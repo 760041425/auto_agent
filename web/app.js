@@ -357,6 +357,15 @@ async function loadTasks() {
           html += '<span class="task-detail-3d">3D: X=' + r.center_3d.x.toFixed(2) + ' Y=' + r.center_3d.y.toFixed(2) + ' Z=' + r.center_3d.z.toFixed(2) + '</span>';
         }
         html += '</div>';
+        // LAS 验证结果
+        if (r.verification && !r.verification.error) {
+          var v = r.verification;
+          html += '<div class="task-detail-verification">';
+          html += '<span class="verif-label">LAS验证</span>';
+          html += '<span class="verif-rate">' + (v.verification_rate * 100).toFixed(0) + '%通过</span>';
+          html += '<span class="verif-detail">' + v.total_verified + '/' + v.total_checked + ' 偏差' + v.mean_distance_m.toFixed(2) + 'm</span>';
+          html += '</div>';
+        }
         // 标注点列表（前5个）
         var displayPoints = r.matched_points ? r.matched_points.slice(0, 5) : [];
         if (displayPoints.length > 0) {

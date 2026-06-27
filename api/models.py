@@ -55,6 +55,7 @@ class ReportModel(Base):
     center_3d_z = Column(Float, nullable=True)
     regions_json = Column(JSON, nullable=True)
     confidence = Column(Float, nullable=True)
+    verification_json = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=_cst_now)
 
     task = relationship("TaskModel", back_populates="report")

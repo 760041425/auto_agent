@@ -63,6 +63,10 @@ main { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
 .task-detail-summary span { background: #f0f4ff; padding: 0.2rem 0.6rem; border-radius: 4px; }
 .task-detail-3d { font-family: monospace; color: #1565c0; font-weight: 600; }
 .task-detail-points { max-height: 240px; overflow-y: auto; border-top: 1px solid #eee; padding-top: 0.4rem; margin-top: 0.2rem; }
+.task-detail-verification { display: flex; gap: 0.6rem; flex-wrap: wrap; padding: 0.35rem 0; font-size: 0.8rem; background: #f0f7ff; border-radius: 4px; margin: 0.3rem 0; padding: 0.3rem 0.6rem; }
+.task-detail-verification .verif-label { color: #1565c0; font-weight: 600; }
+.task-detail-verification .verif-rate { color: #2e7d32; font-weight: 600; }
+.task-detail-verification .verif-detail { color: #666; }
 
 .detail-header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
 .detail-header button { background: #333; color: #fff; border: none; padding: 0.4rem 0.8rem; border-radius: 4px; cursor: pointer; }
