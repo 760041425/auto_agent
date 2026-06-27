@@ -237,13 +237,13 @@ function renderReport(report, task) {
 
   // ====== 标注的匹配点列表 ======
   if (report.matched_points && report.matched_points.length > 0) {
-    html += '<div class="annotated-section"><h4>📍 图像标注点（' + report.matched_points.length + '个）</h4>';
+      html += '<div class="annotated-section"><h4>📍 图像标注点（' + report.matched_points.length + '个）</h4>';
     report.matched_points.forEach(function(p, idx) {
       var c3 = p.point3d;
       html += '<div class="annotated-point">';
-      html += '<span class="point-label">点' + (idx + 1) + '</span>';
-      html += '<span class="point-coord">X=' + c3[0].toFixed(3) + ' Y=' + c3[1].toFixed(3) + ' Z=' + c3[2].toFixed(3) + '</span>';
-      html += '<span class="point-pos">图像位置: (' + p.query_pt[0].toFixed(0) + ', ' + p.query_pt[1].toFixed(0) + ')</span>';
+      html += '<span class="point-label">' + (idx + 1) + '</span>';
+      html += '<span class="point-pixel">像素 (' + p.query_pt[0].toFixed(0) + ', ' + p.query_pt[1].toFixed(0) + ')</span>';
+      html += '<span class="point-coord">3D X=' + c3[0].toFixed(3) + ' Y=' + c3[1].toFixed(3) + ' Z=' + c3[2].toFixed(3) + '</span>';
       html += '</div>';
     });
     html += '</div>';
@@ -357,8 +357,8 @@ async function loadTasks() {
             var c3 = p.point3d;
             html += '<div class="annotated-point">';
             html += '<span class="point-label">' + (idx + 1) + '</span>';
-            html += '<span class="point-coord">X=' + c3[0].toFixed(2) + ' Y=' + c3[1].toFixed(2) + ' Z=' + c3[2].toFixed(2) + '</span>';
-            html += '<span class="point-pos">(' + p.query_pt[0].toFixed(0) + ', ' + p.query_pt[1].toFixed(0) + ')</span>';
+            html += '<span class="point-pixel">像素 (' + p.query_pt[0].toFixed(0) + ', ' + p.query_pt[1].toFixed(0) + ')</span>';
+            html += '<span class="point-coord">3D X=' + c3[0].toFixed(2) + ' Y=' + c3[1].toFixed(2) + ' Z=' + c3[2].toFixed(2) + '</span>';
             html += '</div>';
           });
           html += '</div>';
