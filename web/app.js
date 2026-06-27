@@ -219,6 +219,7 @@ function drawMatchedPoints(points) {
 }
 
 function renderReport(report, task) {
+  console.log('renderReport called, matched_points:', report.matched_points ? report.matched_points.length : 0);
   var el = document.getElementById('compare-result');
   var content = document.getElementById('result-content');
   var html = '';
@@ -302,9 +303,11 @@ function renderReport(report, task) {
 }
 
 async function loadTasks() {
+  console.log('loadTasks called');
   try {
     var resp = await fetch(API + '/tasks');
     var tasks = await resp.json();
+    console.log('tasks loaded:', tasks.length);
     var list = document.getElementById('task-list');
     if (tasks.length === 0) {
       list.innerHTML = '<p>暂无任务</p>';
@@ -326,6 +329,8 @@ async function loadTasks() {
       } catch(e) {}
     });
     await Promise.all(dataPromises);
+    console.log('reports keys:', Object.keys(reports));
+    console.log('images keys:', Object.keys(images));
 
     list.innerHTML = tasks.map(function(t) {
       var html = '<div class="task-item">';
@@ -336,12 +341,13 @@ async function loadTasks() {
 
       var r = reports[t.id];
       var img = images[t.image_id];
+      console.log('task', t.id, 'r:', !!r, 'img:', !!img, 'matched:', r ? r.matched : 'N/A');
       if (r && r.matched) {
         var filename = img ? img.filename : '';
         html += '<div class="task-detail" id="task-detail-' + t.id + '" style="display:none">';
         // 图像 + canvas
         html += '<div class="task-detail-image-wrap">';
-        html += '<img class="task-detail-image" id="task-img-' + t.id + '" src="/images/' + filename + '" data-task-id="' + t.id + '" style="display:none">';
+        html += '<img class="task-detail-image" id="task-img-' + t.id + '" src="/images/' + filename + '" data-task-id="' + t.id + '">';
         html += '<canvas class="task-detail-canvas" id="task-canvas-' + t.id + '" width="0" height="0"></canvas>';
         html += '</div>';
         // 摘要
@@ -379,21 +385,24 @@ async function loadTasks() {
 }
 
 function toggleTaskDetail(id) {
+  console.log('toggleTaskDetail', id);
   var el = document.getElementById('task-detail-' + id);
   if (el) {
+    console.log('  element found, display:', el.style.display);
     var isOpen = el.style.display === 'block';
     el.style.display = isOpen ? 'none' : 'block';
 
     // 展开时绘制标注点
     if (!isOpen) {
       var img = document.getElementById('task-img-' + id);
+      console.log('  task-img found:', !!img, 'src:', img ? img.src : 'N/A');
       if (img) {
-        var filename = img.src;
-        // 如果图片还没加载，等待加载完成后绘制
         if (img.complete && img.naturalWidth > 0) {
+          console.log('  image already loaded, drawing');
           drawTaskPoints(id);
         } else {
-          img.onload = function() { drawTaskPoints(id); };
+          console.log('  waiting for image onload');
+          img.onload = function() { console.log('  image loaded, drawing'); drawTaskPoints(id); };
         }
       }
     }
@@ -401,35 +410,38 @@ function toggleTaskDetail(id) {
 }
 
 function drawTaskPoints(taskId) {
+  console.log('drawTaskPoints', taskId);
   var img = document.getElementById('task-img-' + taskId);
   var canvas = document.getElementById('task-canvas-' + taskId);
+  console.log('  img:', !!img, 'canvas:', !!canvas, 'naturalWidth:', img ? img.naturalWidth : 0);
   if (!img || !canvas || !img.naturalWidth) return;
 
-  canvas.width = Math.min(img.naturalWidth, 600);
-  canvas.height = Math.min(img.naturalHeight, 400);
+  // canvas 的实际像素尺寸 = 图片原始尺寸
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  console.log('  canvas size:', canvas.width, 'x', canvas.height);
   var ctx = canvas.getContext('2d');
 
   // 从 report 获取匹配点（只画前5个）
   fetch(API + '/tasks/' + taskId + '/report').then(function(r) { return r.json(); }).then(function(report) {
     var points = (report.matched_points || []).slice(0, 5);
+    console.log('  points to draw:', points.length);
     if (!points.length) return;
-    var scaleX = canvas.width / img.naturalWidth;
-    var scaleY = canvas.height / img.naturalHeight;
     var colors = ['#e94560', '#ff6b35', '#ffc107', '#4caf50', '#2196f3'];
 
     points.forEach(function(p, idx) {
-      var x = p.query_pt[0] * scaleX;
-      var y = p.query_pt[1] * scaleY;
+      var x = p.query_pt[0];
+      var y = p.query_pt[1];
       var color = colors[idx % colors.length];
       ctx.beginPath();
-      ctx.arc(x, y, 5, 0, 2 * Math.PI);
+      ctx.arc(x, y, 6, 0, 2 * Math.PI);
       ctx.fillStyle = color;
       ctx.fill();
       ctx.strokeStyle = '#fff';
       ctx.lineWidth = 2;
       ctx.stroke();
       ctx.fillStyle = '#fff';
-      ctx.font = 'bold 8px sans-serif';
+      ctx.font = 'bold 9px sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(idx + 1, x, y);
