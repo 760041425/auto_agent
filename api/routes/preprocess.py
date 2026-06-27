@@ -41,20 +41,16 @@ def _run_preprocess():
         las_path = str(las_files[0])
         _preprocess_status["step"] = f"处理 {las_files[0].name}..."
 
-        # Step 2: 多视角投影
-        _preprocess_status["step"] = "生成多视角 LAS 投影图（3高度层 x 5视角）..."
+        # Step 2: 分块投影
+        _preprocess_status["step"] = "生成分块 LAS 投影图（20m×20m→512×512）..."
         _preprocess_status["progress"] = 10
         from services.las_processor.projection import project_las_multi_view
         tiles = project_las_multi_view(las_path)
         _preprocess_status["progress"] = 70
         n_tiles = len(tiles)
         total_pixels = sum(t["pixel_count"] for t in tiles)
-        layers = set(t["layer"] for t in tiles)
-        views = set(t["view"] for t in tiles)
         _preprocess_status["step"] = (f"投影完成: {n_tiles} 张图, "
-                                      f"{total_pixels} 总像素, "
-                                      f"分层: {', '.join(sorted(layers))}, "
-                                      f"视角: {', '.join(sorted(views))}")
+                                      f"{total_pixels} 总像素")
 
         # Step 3: 提取各 tile 的 SIFT 特征
         _preprocess_status["step"] = "提取各图 SIFT 特征..."
@@ -69,9 +65,9 @@ def _run_preprocess():
             proj_img = cv2.imread(tile["image_path"], cv2.IMREAD_GRAYSCALE)
             if proj_img is None:
                 continue
-            sift = cv2.SIFT_create(nfeatures=2000)
+            sift = cv2.SIFT_create(nfeatures=1000)
             kp, des = sift.detectAndCompute(proj_img, None)
-            if des is not None:
+            if des is not None and kp is not None:
                 tile_features[Path(tile["image_path"]).stem] = {
                     "n_kp": len(kp),
                     "path": tile["image_path"],
