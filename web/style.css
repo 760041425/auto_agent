@@ -26,14 +26,21 @@ main { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
 .toolbar button:hover, .btn-primary:hover { background: #c23350; }
 
 .image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
-.image-card { background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); cursor: pointer; transition: transform 0.2s; }
+.image-card { background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); transition: transform 0.2s; }
 .image-card:hover { transform: translateY(-2px); }
-.image-card img { width: 100%; height: 150px; object-fit: cover; }
+.image-card img { width: 100%; height: 150px; object-fit: cover; cursor: pointer; }
 .image-card .info { padding: 0.5rem; font-size: 0.8rem; }
-.image-card .info .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.image-card .info .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.image-card .info .name:hover { color: #e94560; }
 .image-card .info .status { color: #888; }
 .image-card .info .status.completed { color: #4caf50; }
 .image-card .info .status.processing { color: #ff9800; }
+.image-card .match-btn { display: block; width: 100%; margin-top: 0.4rem; padding: 0.3rem; border: 1px solid #e94560; background: #fff; color: #e94560; border-radius: 4px; cursor: pointer; font-size: 0.8rem; transition: all 0.2s; }
+.image-card .match-btn:hover { background: #e94560; color: #fff; }
+.image-card .match-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.image-card .match-btn.loading { background: #fff3e0; border-color: #ff9800; color: #ff9800; }
+.image-card .match-btn.done { background: #e8f5e9; border-color: #4caf50; color: #4caf50; cursor: default; }
+.image-card .match-btn.failed { background: #ffebee; border-color: #f44336; color: #f44336; cursor: default; }
 
 .task-list { display: flex; flex-direction: column; gap: 0.5rem; }
 .task-item { background: #fff; border-radius: 8px; padding: 0.8rem 1rem; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }

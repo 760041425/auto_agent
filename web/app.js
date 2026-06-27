@@ -54,10 +54,11 @@ async function loadImages() {
     const grid = document.getElementById('image-grid');
     document.getElementById('image-count').textContent = '共 ' + images.length + ' 张';
     grid.innerHTML = images.map(img =>
-      '<div class="image-card" onclick="showDetail(' + img.id + ')">' +
-      '<img src="/images/' + img.filename + '">' +
-      '<div class="info"><div class="name">' + img.original_name + '</div>' +
-      '<div class="status ' + img.status + '">' + img.status + '</div></div></div>'
+      '<div class="image-card">' +
+      '<img src="/images/' + img.filename + '" onclick="showDetail(' + img.id + ')">' +
+      '<div class="info"><div class="name" onclick="showDetail(' + img.id + ')">' + img.original_name + '</div>' +
+      '<div class="status ' + img.status + '">' + img.status + '</div>' +
+      '<button class="match-btn" onclick="startCompareFromList(' + img.id + ', this)">匹配</button></div></div>'
     ).join('');
   } catch(e) { console.error(e); }
 }
@@ -127,6 +128,50 @@ async function pollTask(id) {
   } catch(e) {
     statusEl.textContent = '轮询失败: ' + e.message;
     statusEl.className = 'status error';
+  }
+}
+
+async function startCompareFromList(imageId, btn) {
+  btn.disabled = true;
+  btn.textContent = '匹配中...';
+  btn.classList.add('loading');
+
+  try {
+    var resp = await fetch(API + '/tasks/compare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_id: imageId }),
+    });
+    var task = await resp.json();
+    // 轮询等待完成
+    await pollTaskFromList(task.id, btn);
+  } catch(e) {
+    btn.textContent = '请求失败';
+    btn.classList.add('failed');
+  }
+}
+
+async function pollTaskFromList(id, btn) {
+  try {
+    var resp = await fetch(API + '/tasks/' + id);
+    var task = await resp.json();
+    if (task.status === 'completed') {
+      btn.textContent = '已完成';
+      btn.classList.remove('loading');
+      btn.classList.add('done');
+      return;
+    }
+    if (task.status === 'failed') {
+      btn.textContent = '失败';
+      btn.classList.remove('loading');
+      btn.classList.add('failed');
+      return;
+    }
+    btn.textContent = '匹配中...';
+    setTimeout(function() { pollTaskFromList(id, btn); }, 2000);
+  } catch(e) {
+    btn.textContent = '轮询失败';
+    btn.classList.add('failed');
   }
 }
 
