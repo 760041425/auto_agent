@@ -9,7 +9,7 @@ def _extract_sift(image_path: str):
     img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         return None, None
-    sift = cv2.SIFT_create(nfeatures=3000)
+    sift = cv2.SIFT_create(nfeatures=5000)
     return sift.detectAndCompute(img, None)
 
 
@@ -87,10 +87,10 @@ def match_query_to_projection(
     if len(good) < 8:
         return {"matched": False, "regions": [], "message": f"Insufficient initial matches ({len(good)})"}
 
-    # === RANSAC 几何验证：剔除误匹配 ===
+    # === RANSAC 几何验证（宽松阈值） ===
     q_pts = np.float32([q_kp[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
     p_pts = np.float32([p_kp[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-    H, mask = cv2.findHomography(q_pts, p_pts, cv2.USAC_MAGSAC, 3.0, maxIters=10000, confidence=0.999)
+    H, mask = cv2.findHomography(q_pts, p_pts, cv2.USAC_MAGSAC, 6.0, maxIters=10000, confidence=0.99)
     if H is None or mask is None:
         return {"matched": False, "regions": [], "message": "RANSAC verification failed"}
     inlier_mask = mask.ravel().tolist()
@@ -99,14 +99,26 @@ def match_query_to_projection(
     if len(inlier_matches) < 4:
         return {"matched": False, "regions": [], "message": f"Too few inliers after RANSAC ({len(inlier_matches)})"}
 
+    # 获取查询图像的尺寸用于边界检查
+    q_img = cv2.imread(str(query_image_path), cv2.IMREAD_GRAYSCALE)
+    q_h, q_w = q_img.shape[:2] if q_img is not None else (0, 0)
+
     coord_map = _load_coord_map(coord_map_path)
 
     matched_3d = []
     proj_pixel_set = set()
+    query_pixel_set = set()
     for m in inlier_matches:
+        qx = int(round(q_kp[m.queryIdx].pt[0]))
+        qy = int(round(q_kp[m.queryIdx].pt[1]))
+        # 检查查询图像上的点是否在图像范围内（排除出界点）
+        if qx < 0 or qx >= q_w or qy < 0 or qy >= q_h:
+            continue
+        # 去重：同一个查询图像像素只取一次
+        if (qx, qy) in query_pixel_set:
+            continue
         px = int(round(p_kp[m.trainIdx].pt[0]))
         py = int(round(p_kp[m.trainIdx].pt[1]))
-        # 去重：同一个投影像素只取一次
         if (px, py) in proj_pixel_set:
             continue
         found = False
@@ -115,13 +127,13 @@ def match_query_to_projection(
                 coord = coord_map.get((px + dx, py + dy))
                 if coord:
                     matched_3d.append({
-                        "query_pt": (float(q_kp[m.queryIdx].pt[0]),
-                                     float(q_kp[m.queryIdx].pt[1])),
+                        "query_pt": (float(qx), float(qy)),
                         "proj_pt": (int(px), int(py)),
                         "point3d": coord,
                         "distance": float(m.distance),
                     })
                     proj_pixel_set.add((px, py))
+                    query_pixel_set.add((qx, qy))
                     found = True
                     break
             if found:
@@ -132,38 +144,53 @@ def match_query_to_projection(
 
     coords = np.array([m["point3d"] for m in matched_3d], dtype=np.float64)
 
-    # 计算3D坐标的离散度，如果太集中说明匹配区域太小
+    # 检查3D坐标离散度
     coord_std = coords.std(axis=0)
     if coord_std[0] < 0.2 and coord_std[1] < 0.2 and len(matched_3d) > 10:
-        return {"matched": False, "regions": [], "message": "Matches too concentrated"}
+        return {"matched": False, "regions": [], "message": "Matches too concentrated in 3D"}
 
     center = np.median(coords, axis=0)
 
-    # 按匹配距离排序，取距离最近的作为高置信度
+    # 按匹配距离排序
     matched_3d.sort(key=lambda m: m["distance"])
-    high_confidence = matched_3d[:min(20, max(4, len(matched_3d) // 2))]
 
     verification = None
     if verify:
         sample_coords = [m["point3d"] for m in matched_3d]
         verification = _verify_with_las_points(sample_coords)
 
-    # 选取展示用的匹配点（最多5个，优先选分布在图像不同区域的）
-    display_candidates = matched_3d[:20]
-    display_points = [display_candidates[0]] if display_candidates else []
-    for p in display_candidates[1:]:
+    # 选取展示用的点：在图像上均匀分布
+    display_points = []
+    # 把图像分成 3x2 网格，每格取一个最佳点
+    grid_cols = 3
+    grid_rows = 2
+    grid_w = q_w / grid_cols
+    grid_h = q_h / grid_rows
+    matched_by_grid = {}
+    for p in matched_3d:
+        gx = min(int(p["query_pt"][0] / grid_w), grid_cols - 1)
+        gy = min(int(p["query_pt"][1] / grid_h), grid_rows - 1)
+        key = (gy * grid_cols + gx)
+        if key not in matched_by_grid or p["distance"] < matched_by_grid[key]["distance"]:
+            matched_by_grid[key] = p
+
+    # 按网格顺序取点，保证覆盖不同区域
+    for grid_idx in sorted(matched_by_grid.keys()):
         if len(display_points) >= 5:
             break
-        # 检查是否和已有展示点在图像上太近
-        too_close = False
-        for dp in display_points:
-            dx = abs(p["query_pt"][0] - dp["query_pt"][0])
-            dy = abs(p["query_pt"][1] - dp["query_pt"][1])
-            if dx < 100 and dy < 100:
-                too_close = True
+        p = matched_by_grid[grid_idx]
+        display_points.append(p)
+
+    # 如果网格法取不够5个，补距离最近的
+    if len(display_points) < 5:
+        existing_keys = {(p["query_pt"][0] // 100, p["query_pt"][1] // 100) for p in display_points}
+        for p in matched_3d:
+            if len(display_points) >= 5:
                 break
-        if not too_close:
-            display_points.append(p)
+            key = (int(p["query_pt"][0] // 100), int(p["query_pt"][1] // 100))
+            if key not in existing_keys:
+                display_points.append(p)
+                existing_keys.add(key)
 
     matched_points = [{
         "query_pt": [float(p["query_pt"][0]), float(p["query_pt"][1])],
@@ -175,7 +202,7 @@ def match_query_to_projection(
     regions = [{
         "name": "las_projection_match",
         "num_matches": len(matched_3d),
-        "num_high_conf": len(high_confidence),
+        "num_high_conf": len(matched_3d),
         "center_3d": [float(coords.mean(axis=0)[0]), float(coords.mean(axis=0)[1]), float(coords.mean(axis=0)[2])],
         "avg_distance": float(np.mean([m["distance"] for m in matched_3d])),
     }]
@@ -183,7 +210,7 @@ def match_query_to_projection(
     return {
         "matched": True,
         "total_matches": len(matched_3d),
-        "total_inliers": len(high_confidence),
+        "total_inliers": len(matched_3d),
         "center_3d": [float(center[0]), float(center[1]), float(center[2])],
         "regions": regions,
         "verification": verification,
