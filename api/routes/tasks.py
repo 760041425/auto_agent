@@ -1,5 +1,6 @@
 import datetime
 import threading
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -7,6 +8,8 @@ from sqlalchemy.orm import Session
 from api.database import get_db
 from api.models import ImageModel, TaskModel, ReportModel
 from api.schemas import TaskCreate, TaskResponse, ReportResponse
+
+CST = ZoneInfo("Asia/Shanghai")
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -37,7 +40,7 @@ def run_comparison_task(task_id: int, image_id: int, db_url: str):
 
         task.result_json = result
         task.status = "completed"
-        task.finished_at = datetime.datetime.utcnow()
+        task.finished_at = datetime.datetime.now(CST)
 
         report = ReportModel(
             task_id=task.id,

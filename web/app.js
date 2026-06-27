@@ -335,7 +335,7 @@ async function loadTasks() {
     list.innerHTML = tasks.map(function(t) {
       var html = '<div class="task-item">';
       html += '<div class="task-item-main" onclick="toggleTaskDetail(' + t.id + ')">';
-      html += '<div><strong>任务#' + t.id + '</strong> 图像#' + t.image_id + '<br><small>' + new Date(t.created_at).toLocaleString() + '</small></div>';
+      html += '<div><strong>任务#' + t.id + '</strong> 图像#' + t.image_id + '<br><small>' + new Date(t.created_at).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai'}) + '</small></div>';
       html += '<span class="status-badge ' + t.status + '">' + t.status + '</span>';
       html += '</div>';
 
