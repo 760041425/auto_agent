@@ -310,15 +310,21 @@ async function loadTasks() {
       return;
     }
 
-    // 对每个已完成的任务，并行拉取 report
+    // 并行拉取所有已完成任务的 report 和对应图像信息
     var reports = {};
-    var reportPromises = tasks.filter(function(t) { return t.status === 'completed'; }).map(async function(t) {
+    var images = {};
+    var completedTasks = tasks.filter(function(t) { return t.status === 'completed'; });
+    var dataPromises = completedTasks.map(async function(t) {
       try {
-        var r = await fetch(API + '/tasks/' + t.id + '/report');
-        reports[t.id] = await r.json();
+        var [rResp, imgResp] = await Promise.all([
+          fetch(API + '/tasks/' + t.id + '/report'),
+          fetch(API + '/images/' + t.image_id),
+        ]);
+        reports[t.id] = await rResp.json();
+        images[t.image_id] = await imgResp.json();
       } catch(e) {}
     });
-    await Promise.all(reportPromises);
+    await Promise.all(dataPromises);
 
     list.innerHTML = tasks.map(function(t) {
       var html = '<div class="task-item">';
@@ -327,22 +333,40 @@ async function loadTasks() {
       html += '<span class="status-badge ' + t.status + '">' + t.status + '</span>';
       html += '</div>';
 
-      // 已完成的任务展开显示摘要
       var r = reports[t.id];
+      var img = images[t.image_id];
       if (r && r.matched) {
+        var filename = img ? img.filename : '';
         html += '<div class="task-detail" id="task-detail-' + t.id + '" style="display:none">';
-        html += '<div class="task-detail-row"><span class="task-detail-label">匹配点数</span><span>' + r.total_matches + '</span></div>';
+        // 图像 + canvas
+        html += '<div class="task-detail-image-wrap">';
+        html += '<img class="task-detail-image" id="task-img-' + t.id + '" src="/images/' + filename + '" data-task-id="' + t.id + '" style="display:none">';
+        html += '<canvas class="task-detail-canvas" id="task-canvas-' + t.id + '" width="0" height="0"></canvas>';
+        html += '</div>';
+        // 摘要
+        html += '<div class="task-detail-summary">';
+        html += '<span>匹配 ' + r.total_matches + ' 点</span>';
         if (r.center_3d && r.center_3d.x != null) {
-          html += '<div class="task-detail-row"><span class="task-detail-label">3D 中心</span><span>X=' + r.center_3d.x.toFixed(3) + ' Y=' + r.center_3d.y.toFixed(3) + ' Z=' + r.center_3d.z.toFixed(3) + '</span></div>';
+          html += '<span class="task-detail-3d">3D: X=' + r.center_3d.x.toFixed(2) + ' Y=' + r.center_3d.y.toFixed(2) + ' Z=' + r.center_3d.z.toFixed(2) + '</span>';
         }
+        html += '</div>';
+        // 标注点列表
         if (r.matched_points && r.matched_points.length > 0) {
-          html += '<div class="task-detail-row"><span class="task-detail-label">标注点</span><span>' + r.matched_points.length + '个（含3D坐标）</span></div>';
+          html += '<div class="task-detail-points">';
+          r.matched_points.forEach(function(p, idx) {
+            var c3 = p.point3d;
+            html += '<div class="annotated-point">';
+            html += '<span class="point-label">' + (idx + 1) + '</span>';
+            html += '<span class="point-coord">X=' + c3[0].toFixed(2) + ' Y=' + c3[1].toFixed(2) + ' Z=' + c3[2].toFixed(2) + '</span>';
+            html += '<span class="point-pos">(' + p.query_pt[0].toFixed(0) + ', ' + p.query_pt[1].toFixed(0) + ')</span>';
+            html += '</div>';
+          });
+          html += '</div>';
         }
-        html += '<button class="task-view-btn" onclick="event.stopPropagation(); showDetail(' + t.image_id + ')">查看详情</button>';
         html += '</div>';
       } else if (r && !r.matched) {
         html += '<div class="task-detail" id="task-detail-' + t.id + '" style="display:none">';
-        html += '<div class="task-detail-row"><span class="task-detail-label">匹配结果</span><span style="color:#f44336">失败</span></div>';
+        html += '<div class="task-detail-row"><span class="task-detail-label" style="color:#f44336">匹配失败</span></div>';
         html += '</div>';
       }
 
@@ -355,6 +379,59 @@ async function loadTasks() {
 function toggleTaskDetail(id) {
   var el = document.getElementById('task-detail-' + id);
   if (el) {
-    el.style.display = el.style.display === 'none' ? 'block' : 'none';
+    var isOpen = el.style.display === 'block';
+    el.style.display = isOpen ? 'none' : 'block';
+
+    // 展开时绘制标注点
+    if (!isOpen) {
+      var img = document.getElementById('task-img-' + id);
+      if (img) {
+        var filename = img.src;
+        // 如果图片还没加载，等待加载完成后绘制
+        if (img.complete && img.naturalWidth > 0) {
+          drawTaskPoints(id);
+        } else {
+          img.onload = function() { drawTaskPoints(id); };
+        }
+      }
+    }
   }
+}
+
+function drawTaskPoints(taskId) {
+  var img = document.getElementById('task-img-' + taskId);
+  var canvas = document.getElementById('task-canvas-' + taskId);
+  if (!img || !canvas || !img.naturalWidth) return;
+
+  canvas.width = Math.min(img.naturalWidth, 600);
+  canvas.height = Math.min(img.naturalHeight, 400);
+  var ctx = canvas.getContext('2d');
+
+  // 从 report 获取匹配点
+  fetch(API + '/tasks/' + taskId + '/report').then(function(r) { return r.json(); }).then(function(report) {
+    var points = report.matched_points;
+    if (!points) return;
+    var scaleX = canvas.width / img.naturalWidth;
+    var scaleY = canvas.height / img.naturalHeight;
+    var colors = ['#e94560', '#ff6b35', '#ffc107', '#4caf50', '#2196f3',
+                  '#9c27b0', '#00bcd4', '#ff4081', '#7c4dff', '#00e676'];
+
+    points.forEach(function(p, idx) {
+      var x = p.query_pt[0] * scaleX;
+      var y = p.query_pt[1] * scaleY;
+      var color = colors[idx % colors.length];
+      ctx.beginPath();
+      ctx.arc(x, y, 5, 0, 2 * Math.PI);
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 8px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(idx + 1, x, y);
+    });
+  }).catch(function() {});
 }
