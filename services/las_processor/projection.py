@@ -8,154 +8,207 @@ from laspy import open as las_open
 from PIL import Image, ImageEnhance
 
 
-def _make_texture_image(height, width, pixel_bins, r, g, b):
-    """生成带纹理信息的彩色投影图，增强 SIFT 可匹配性"""
-    # 1. 用 RGB 颜色渲染（如果有的话）
-    rgb_image = np.zeros((height, width, 3), dtype=np.uint8)
-    # 2. 用高度着色
-    depth_image = np.full((height, width), -np.inf, dtype=np.float32)
-    # 3. 用强度（intensity）着色
-    intensity_image = np.full((height, width), -np.inf, dtype=np.float32)
+def _make_tile_image(height, width, pixel_map, name=""):
+    """生成单张投影图"""
+    img = np.zeros((height, width, 3), dtype=np.uint8)
+    depth_img = np.full((height, width), np.nan, dtype=np.float32)
 
-    has_rgb = r is not None and g is not None and b is not None
+    for (px, py), (x, y, z) in pixel_map.items():
+        depth_img[py, px] = z
 
-    for (px, py), pts_list in pixel_bins.items():
-        # 取每个像素中 Z 最大的点作为代表
-        zs = [p[2] for p in pts_list]
-        max_z_idx = np.argmax(zs)
-        depth_image[py, px] = zs[max_z_idx]
+    # 深度归一化着色（伪彩色）
+    valid = ~np.isnan(depth_img)
+    if not valid.any():
+        return None
 
-        if has_rgb:
-            rgb_image[py, px] = [int(r[max_z_idx]) >> 8, int(g[max_z_idx]) >> 8, int(b[max_z_idx]) >> 8]
+    d_min, d_max = np.nanmin(depth_img), np.nanmax(depth_img)
+    if d_max <= d_min:
+        return None
 
-    # 深度图归一化
-    depth_vis = np.zeros((height, width), dtype=np.uint8)
-    valid_depth = np.isfinite(depth_image)
-    if valid_depth.any():
-        d_min, d_max = depth_image[valid_depth].min(), depth_image[valid_depth].max()
-        if d_max > d_min:
-            norm = (255 * (depth_image[valid_depth] - d_min) / (d_max - d_min)).astype(np.uint8)
-            depth_vis[valid_depth] = norm
+    norm = (255 * (depth_img - d_min) / (d_max - d_min)).astype(np.uint8)
 
-    # 翻转 Y 轴
-    depth_vis = np.flipud(depth_vis)
-    rgb_image = np.flipud(rgb_image)
+    # Jet 伪彩色
+    jet = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
+    img = jet.copy()
 
-    # 合成最终图像
-    if has_rgb and rgb_image.max() > 10:
-        # 有 RGB 就用 RGB
-        final = rgb_image
-        # 增强对比度
-        pil_img = Image.fromarray(final)
-        enhancer = ImageEnhance.Contrast(pil_img)
-        final = np.array(enhancer.enhance(1.5))
-        enhancer2 = ImageEnhance.Sharpness(Image.fromarray(final))
-        final = np.array(enhancer2.enhance(2.0))
-    else:
-        # 无 RGB：用深度图，但做伪彩色增强 + 边缘增强
-        depth_colored = np.stack([depth_vis] * 3, axis=-1)
-        pil_img = Image.fromarray(depth_colored)
-        # 强对比度
-        enhancer = ImageEnhance.Contrast(pil_img)
-        pil_img = enhancer.enhance(2.0)
-        enhancer2 = ImageEnhance.Sharpness(pil_img)
-        pil_img = enhancer2.enhance(3.0)
-        final = np.array(pil_img)
-
-    # 边缘增强：Sobel 梯度叠加
-    gray = cv2.cvtColor(final, cv2.COLOR_RGB2GRAY) if final.shape[2] == 3 else final
+    # 边缘增强
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
     sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
     edges = np.sqrt(sobelx ** 2 + sobely ** 2)
-    edges = (edges / edges.max() * 60).clip(0, 255).astype(np.uint8)
-    # 叠加边缘到图像
-    if final.shape[2] == 3:
-        for c in range(3):
-            final[:, :, c] = np.clip(final[:, :, c].astype(np.int32) + edges, 0, 255).astype(np.uint8)
-    else:
-        final = np.clip(final.astype(np.int32) + edges, 0, 255).astype(np.uint8)
-        final = np.stack([final] * 3, axis=-1)
+    edges = (edges / (edges.max() + 1e-6) * 40).clip(0, 255).astype(np.uint8)
+    for c in range(3):
+        img[:, :, c] = np.clip(img[:, :, c].astype(np.int32) + edges, 0, 255).astype(np.uint8)
 
-    return final, depth_vis
+    # 对比度增强
+    pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    pil = ImageEnhance.Contrast(pil).enhance(1.5)
+    pil = ImageEnhance.Sharpness(pil).enhance(2.0)
+    return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
 
-def project_las_to_image(
+def project_las_multi_view(
     las_path: str,
     output_dir: str = "projections",
-    resolution: float = 0.1,
-    max_points: int | None = None,
-) -> dict:
+    ground_resolution: float = 0.5,      # 地面投影分辨率
+    tile_size: int = 1000,               # 每块区域大小（像素）
+    z_layers: list | None = None,        # 高度分层
+):
+    """
+    多视角LAS投影：
+    - 按高度分层（地面/中/高）
+    - 分区域（tile）
+    - 每张图较小且清晰
+    """
+    if z_layers is None:
+        z_layers = [(0, 30, "ground"), (30, 60, "mid"), (60, 200, "high")]
+
     reader = las_open(las_path)
     pts = reader.read()
     total = len(pts.x)
 
-    if max_points and total > max_points:
-        step = total // max_points + 1
-        x = pts.x[::step]
-        y = pts.y[::step]
-        z = pts.z[::step]
-        if hasattr(pts, 'red'):
-            r, g, b = pts.red[::step], pts.green[::step], pts.blue[::step]
-        else:
-            r = g = b = None
-    else:
-        x, y, z = pts.x, pts.y, pts.z
-        if hasattr(pts, 'red'):
-            r, g, b = pts.red, pts.green, pts.blue
-        else:
-            r = g = b = None
+    # 采样（处理大量点云）
+    step = max(1, total // 3_000_000)
+    x = np.array(pts.x[::step])
+    y = np.array(pts.y[::step])
+    z = np.array(pts.z[::step])
 
-    x_min, x_max = x.min(), x.max()
-    y_min, y_max = y.min(), y.max()
+    x_min, x_max = float(x.min()), float(x.max())
+    y_min, y_max = float(y.min()), float(y.max())
 
-    width = int((x_max - x_min) / resolution) + 1
-    height = int((y_max - y_min) / resolution) + 1
-
-    col = ((x - x_min) / resolution).astype(np.int64).clip(0, width - 1)
-    row = ((y - y_min) / resolution).astype(np.int64).clip(0, height - 1)
-
-    pixel_bins = defaultdict(list)
-    for i in range(len(x)):
-        pixel_bins[(col[i], row[i])].append((float(x[i]), float(y[i]), float(z[i])))
-
-    # 生成纹理增强的投影图
-    final_image, _ = _make_texture_image(height, width, pixel_bins, r, g, b)
-
-    # 保存
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(final_image).save(str(out / "las_projection.jpg"))
 
-    # 坐标映射（用Z中位数，减少异常点影响）
-    coord_map = {}
-    for (px, py), pts_list in pixel_bins.items():
-        fy = height - 1 - py
-        arr = np.array(pts_list)
-        # 对 Z 排序，取 Z 中位数对应的点
-        z_sorted_idx = np.argsort(arr[:, 2])
-        median_idx = z_sorted_idx[len(z_sorted_idx) // 2]
-        coord_map[f"{px},{fy}"] = arr[median_idx].tolist()
+    # 删除旧投影文件
+    for old in out.glob("tile_*.jpg"):
+        old.unlink()
+    for old in out.glob("coord_tile_*.json"):
+        old.unlink()
+    old_proj = out / "las_projection.jpg"
+    if old_proj.exists():
+        old_proj.unlink()
+    old_coord = out / "coord_map.json"
+    if old_coord.exists():
+        old_coord.unlink()
 
-    # 同时保存全量映射用于验证
-    full_coord_map = {}
-    for (px, py), pts_list in pixel_bins.items():
-        fy = height - 1 - py
-        full_coord_map[f"{px},{fy}"] = [np.mean(p, axis=0).tolist() for p in [pts_list]]
+    # 清理旧特征文件
+    old_feat = out / "las_features.npz"
+    if old_feat.exists():
+        old_feat.unlink()
 
-    coord_path = out / "coord_map.json"
-    with open(coord_path, "w") as f:
-        json.dump({
-            "width": width, "height": height,
-            "resolution": resolution,
-            "x_min": float(x_min), "y_min": float(y_min),
-            "x_max": float(x_max), "y_max": float(y_max),
-            "pixel_count": len(coord_map),
-            "pixels": coord_map,
-        }, f)
+    generated = []
 
-    return {
-        "image_path": str(out / "las_projection.jpg"),
-        "coord_map_path": str(coord_path),
-        "width": width, "height": height,
-        "pixel_count": len(coord_map),
-    }
+    for z_min, z_max, layer_name in z_layers:
+        # 筛选高度
+        mask = (z >= z_min) & (z < z_max)
+        x_layer = x[mask]
+        y_layer = y[mask]
+        z_layer = z[mask]
+
+        if len(x_layer) < 100:
+            continue
+
+        # 计算分块
+        x_range = x_max - x_min
+        y_range = y_max - y_min
+        tile_w_m = x_range / max(1, round(x_range / (tile_size * ground_resolution)))
+        tile_h_m = y_range / max(1, round(y_range / (tile_size * ground_resolution)))
+
+        n_cols = max(1, int(np.ceil(x_range / tile_w_m)))
+        n_rows = max(1, int(np.ceil(y_range / tile_h_m)))
+
+        for row in range(n_rows):
+            for col in range(n_cols):
+                tile_x_min = x_min + col * tile_w_m
+                tile_x_max = min(x_min + (col + 1) * tile_w_m, x_max)
+                tile_y_min = y_min + row * tile_h_m
+                tile_y_max = min(y_min + (row + 1) * tile_h_m, y_max)
+
+                # 筛选区域内点
+                mask_tile = (
+                    (x_layer >= tile_x_min) & (x_layer < tile_x_max) &
+                    (y_layer >= tile_y_min) & (y_layer < tile_y_max)
+                )
+                xt = x_layer[mask_tile]
+                yt = y_layer[mask_tile]
+                zt = z_layer[mask_tile]
+
+                if len(xt) < 50:
+                    continue
+
+                # 构建像素映射
+                w = int(np.ceil((tile_x_max - tile_x_min) / ground_resolution))
+                h = int(np.ceil((tile_y_max - tile_y_min) / ground_resolution))
+                w = max(1, min(w, tile_size))
+                h = max(1, min(h, tile_size))
+
+                col_idx = ((xt - tile_x_min) / ground_resolution).astype(np.int64).clip(0, w - 1)
+                row_idx = ((yt - tile_y_min) / ground_resolution).astype(np.int64).clip(0, h - 1)
+
+                pixel_map = {}
+                pixel_bins = defaultdict(list)
+                for i in range(len(xt)):
+                    pixel_bins[(int(col_idx[i]), int(row_idx[i]))].append(
+                        (float(xt[i]), float(yt[i]), float(zt[i]))
+                    )
+
+                for (px, py), pts_list in pixel_bins.items():
+                    arr = np.array(pts_list)
+                    # 取 Z 中位数点
+                    z_sorted = np.argsort(arr[:, 2])
+                    median_idx = z_sorted[len(z_sorted) // 2]
+                    pixel_map[(px, py)] = arr[median_idx].tolist()
+
+                # 生成图像
+                img = _make_tile_image(h, w, pixel_map, f"{layer_name}_{row}_{col}")
+                if img is None:
+                    continue
+
+                # 翻转 Y
+                img = cv2.flip(img, 0)
+                # 翻转像素映射的 Y
+                pixel_map_flipped = {}
+                for (px, py), val in pixel_map.items():
+                    pixel_map_flipped[f"{px},{h-1-py}"] = val
+
+                fname = f"tile_{layer_name}_{row}_{col}.jpg"
+                cname = f"coord_tile_{layer_name}_{row}_{col}.json"
+                img_path = str(out / fname)
+                coord_path = str(out / cname)
+
+                cv2.imwrite(img_path, img)
+                with open(coord_path, "w") as f:
+                    json.dump({
+                        "width": w, "height": h,
+                        "resolution": ground_resolution,
+                        "layer": layer_name,
+                        "tile_row": row, "tile_col": col,
+                        "x_min": float(tile_x_min), "x_max": float(tile_x_max),
+                        "y_min": float(tile_y_min), "y_max": float(tile_y_max),
+                        "z_min": float(z_min), "z_max": float(z_max),
+                        "pixel_count": len(pixel_map_flipped),
+                        "pixels": pixel_map_flipped,
+                    }, f)
+
+                generated.append({
+                    "image_path": img_path,
+                    "coord_map_path": coord_path,
+                    "width": w, "height": h,
+                    "layer": layer_name,
+                    "tile": f"{row}_{col}",
+                    "pixel_count": len(pixel_map_flipped),
+                    "x_range": [float(tile_x_min), float(tile_x_max)],
+                    "y_range": [float(tile_y_min), float(tile_y_max)],
+                    "z_range": [float(z_min), float(z_max)],
+                })
+
+    # 保存索引
+    index_path = out / "tile_index.json"
+    with open(index_path, "w") as f:
+        json.dump(generated, f, indent=2)
+
+    return generated
+
+
+# 保持向后兼容
+project_las_to_image = project_las_multi_view

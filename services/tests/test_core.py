@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from services.las_processor.colmap_reader import read_images_txt, read_points3d_txt
-from services.las_processor.projection import project_las_to_image
+from services.las_processor.projection import project_las_multi_view
 
 
 def test_read_images_txt():
@@ -23,18 +23,20 @@ def test_read_points3d_txt():
 
 
 def test_las_projection():
-    result = project_las_to_image(
+    result = project_las_multi_view(
         "las/subsample_20260430181508.las",
         "projections/test_proj",
-        resolution=0.5,
-        max_points=100000,
+        ground_resolution=0.5,
+        tile_size=300,
     )
-    assert result["width"] > 0
-    assert result["height"] > 0
-    assert Path(result["image_path"]).exists()
-    assert Path(result["coord_map_path"]).exists()
+    assert len(result) > 0
+    first = result[0]
+    assert first["width"] > 0
+    assert first["height"] > 0
+    assert Path(first["image_path"]).exists()
+    assert Path(first["coord_map_path"]).exists()
 
-    with open(result["coord_map_path"]) as f:
+    with open(first["coord_map_path"]) as f:
         data = json.load(f)
     assert len(data["pixels"]) > 0
 

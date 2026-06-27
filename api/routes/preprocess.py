@@ -41,37 +41,51 @@ def _run_preprocess():
         las_path = str(las_files[0])
         _preprocess_status["step"] = f"处理 {las_files[0].name}..."
 
-        # Step 2: 投影
-        _preprocess_status["step"] = "生成 LAS 投影图..."
+        # Step 2: 多视角投影
+        _preprocess_status["step"] = "生成多视角 LAS 投影图（地面/中空/高空 x 分块）..."
         _preprocess_status["progress"] = 10
-        from services.las_processor.projection import project_las_to_image
-        result = project_las_to_image(las_path, max_points=5_000_000)
-        _preprocess_status["progress"] = 60
-        _preprocess_status["step"] = (f"投影完成: {result['width']}x{result['height']}, "
-                                      f"{result['pixel_count']} 像素")
-
-        # Step 3: 提取 SIFT 特征
-        _preprocess_status["step"] = "提取 SIFT 特征..."
+        from services.las_processor.projection import project_las_multi_view
+        tiles = project_las_multi_view(
+            las_path,
+            ground_resolution=0.5,
+            tile_size=600,
+        )
         _preprocess_status["progress"] = 70
+        n_tiles = len(tiles)
+        total_pixels = sum(t["pixel_count"] for t in tiles)
+        layers = set(t["layer"] for t in tiles)
+        _preprocess_status["step"] = (f"投影完成: {n_tiles} 张图, "
+                                      f"{total_pixels} 总像素, "
+                                      f"分层: {', '.join(sorted(layers))}")
+
+        # Step 3: 提取各 tile 的 SIFT 特征
+        _preprocess_status["step"] = "提取各图 SIFT 特征..."
+        _preprocess_status["progress"] = 75
         import cv2
         import numpy as np
-        proj_img = cv2.imread(result["image_path"], cv2.IMREAD_GRAYSCALE)
-        sift = cv2.SIFT_create(nfeatures=5000)
-        kp, des = sift.detectAndCompute(proj_img, None)
-        n_kp = len(kp) if kp is not None else 0
-
-        # 保存特征到文件
         feat_dir = Path("projections")
-        if des is not None:
-            np.savez_compressed(
-                str(feat_dir / "las_features.npz"),
-                keypoints=np.array([p.pt for p in kp]),
-                descriptors=des,
-                angles=np.array([p.angle for p in kp]),
-                sizes=np.array([p.size for p in kp]),
-            )
-        _preprocess_status["progress"] = 90
-        _preprocess_status["step"] = f"特征提取完成: {n_kp} 个特征点"
+        tile_features = {}
+        for i, tile in enumerate(tiles):
+            _preprocess_status["step"] = f"提取特征 {i+1}/{n_tiles}: {Path(tile['image_path']).name}"
+            _preprocess_status["progress"] = 75 + int(20 * (i + 1) / n_tiles)
+            proj_img = cv2.imread(tile["image_path"], cv2.IMREAD_GRAYSCALE)
+            if proj_img is None:
+                continue
+            sift = cv2.SIFT_create(nfeatures=2000)
+            kp, des = sift.detectAndCompute(proj_img, None)
+            if des is not None:
+                tile_features[Path(tile["image_path"]).stem] = {
+                    "n_kp": len(kp),
+                    "path": tile["image_path"],
+                }
+
+        # 保存特征索引
+        with open(feat_dir / "tile_features_index.json", "w") as f:
+            json.dump(tile_features, f, indent=2)
+
+        total_kp = sum(v["n_kp"] for v in tile_features.values())
+        _preprocess_status["progress"] = 95
+        _preprocess_status["step"] = f"特征提取完成: {len(tile_features)} 张图, {total_kp} 特征点"
 
         # Step 4: 完成
         _preprocess_status["progress"] = 100
