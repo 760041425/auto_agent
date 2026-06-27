@@ -75,6 +75,11 @@ main { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
 
 .matched-points { margin-top: 0.5rem; }
 .coord-tag { display: inline-block; background: #e8eaf6; color: #3949ab; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.7rem; margin: 0.1rem; font-family: monospace; }
+.coord-row { font-size: 0.75rem; font-family: monospace; padding: 0.15rem 0; border-bottom: 1px solid #f0f0f0; display: flex; gap: 0.3rem; align-items: center; flex-wrap: wrap; }
+.coord-label { color: #888; font-size: 0.7rem; }
+.dist-badge { font-weight: 600; padding: 0.05rem 0.3rem; border-radius: 3px; font-size: 0.7rem; }
+.dist-badge.ok { background: #e8f5e9; color: #2e7d32; }
+.dist-badge.fail { background: #fff3e0; color: #e65100; }
 
 @media (max-width: 768px) {
   .detail-body { grid-template-columns: 1fr; }

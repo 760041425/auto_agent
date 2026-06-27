@@ -206,13 +206,23 @@ function showReport(report, task) {
   }
 
   let matchedHtml = '';
-  if (task.result_json && task.result_json.matched_3d) {
-    const pts = task.result_json.matched_3d.slice(0, 30);
-    matchedHtml = `
-      <div class="matched-points">
-        <h5>匹配点详情 (前30个)</h5>
-        ${pts.map(p => `<span class="coord-tag">(${p.query_pt[0].toFixed(0)},${p.query_pt[1].toFixed(0)})→3D</span>`).join(' ')}
-      </div>`;
+  if (task.result_json) {
+    const v = task.result_json.verification;
+    if (v && v.details) {
+      matchedHtml = `
+        <div class="matched-points">
+          <h5>匹配点验证详情</h5>
+          ${v.details.slice(0, 8).map(d => `
+            <div class="coord-row">
+              <span class="coord-label">匹配</span>
+              <span>(${d.matched_xyz.map(x => x.toFixed(2)).join(', ')})</span>
+              <span>→ LAS最邻近</span>
+              <span>(${d.nearest_las_xyz.map(x => x.toFixed(2)).join(', ')})</span>
+              <span class="dist-badge ${d.verified ? 'ok' : 'fail'}">${d.distance_m.toFixed(2)}m ${d.verified ? '✓' : '✗'}</span>
+            </div>
+          `).join('')}
+        </div>`;
+    }
   }
 
   content.innerHTML = `

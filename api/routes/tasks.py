@@ -92,11 +92,15 @@ def list_tasks(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
     return db.query(TaskModel).order_by(TaskModel.created_at.desc()).offset(skip).limit(limit).all()
 
 
-@router.get("/{task_id}/report", response_model=ReportResponse)
+@router.get("/{task_id}/report")
 def get_report(task_id: int, db: Session = Depends(get_db)):
     report = db.query(ReportModel).filter(ReportModel.task_id == task_id).first()
     if not report:
         raise HTTPException(404, "Report not found")
+    task = report.task
+    verification = None
+    if task and task.result_json:
+        verification = task.result_json.get("verification")
     return {
         "id": report.id,
         "task_id": report.task_id,
@@ -109,5 +113,6 @@ def get_report(task_id: int, db: Session = Depends(get_db)):
         } if report.center_3d_x is not None else None,
         "regions": report.regions_json,
         "confidence": report.confidence,
+        "verification": verification,
         "created_at": report.created_at,
     }
