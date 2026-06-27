@@ -2,8 +2,81 @@ import json
 from pathlib import Path
 from collections import defaultdict
 
+import cv2
 import numpy as np
 from laspy import open as las_open
+from PIL import Image, ImageEnhance
+
+
+def _make_texture_image(height, width, pixel_bins, r, g, b):
+    """生成带纹理信息的彩色投影图，增强 SIFT 可匹配性"""
+    # 1. 用 RGB 颜色渲染（如果有的话）
+    rgb_image = np.zeros((height, width, 3), dtype=np.uint8)
+    # 2. 用高度着色
+    depth_image = np.full((height, width), -np.inf, dtype=np.float32)
+    # 3. 用强度（intensity）着色
+    intensity_image = np.full((height, width), -np.inf, dtype=np.float32)
+
+    has_rgb = r is not None and g is not None and b is not None
+
+    for (px, py), pts_list in pixel_bins.items():
+        # 取每个像素中 Z 最大的点作为代表
+        zs = [p[2] for p in pts_list]
+        max_z_idx = np.argmax(zs)
+        depth_image[py, px] = zs[max_z_idx]
+
+        if has_rgb:
+            rgb_image[py, px] = [int(r[max_z_idx]) >> 8, int(g[max_z_idx]) >> 8, int(b[max_z_idx]) >> 8]
+
+    # 深度图归一化
+    depth_vis = np.zeros((height, width), dtype=np.uint8)
+    valid_depth = np.isfinite(depth_image)
+    if valid_depth.any():
+        d_min, d_max = depth_image[valid_depth].min(), depth_image[valid_depth].max()
+        if d_max > d_min:
+            norm = (255 * (depth_image[valid_depth] - d_min) / (d_max - d_min)).astype(np.uint8)
+            depth_vis[valid_depth] = norm
+
+    # 翻转 Y 轴
+    depth_vis = np.flipud(depth_vis)
+    rgb_image = np.flipud(rgb_image)
+
+    # 合成最终图像
+    if has_rgb and rgb_image.max() > 10:
+        # 有 RGB 就用 RGB
+        final = rgb_image
+        # 增强对比度
+        pil_img = Image.fromarray(final)
+        enhancer = ImageEnhance.Contrast(pil_img)
+        final = np.array(enhancer.enhance(1.5))
+        enhancer2 = ImageEnhance.Sharpness(Image.fromarray(final))
+        final = np.array(enhancer2.enhance(2.0))
+    else:
+        # 无 RGB：用深度图，但做伪彩色增强 + 边缘增强
+        depth_colored = np.stack([depth_vis] * 3, axis=-1)
+        pil_img = Image.fromarray(depth_colored)
+        # 强对比度
+        enhancer = ImageEnhance.Contrast(pil_img)
+        pil_img = enhancer.enhance(2.0)
+        enhancer2 = ImageEnhance.Sharpness(pil_img)
+        pil_img = enhancer2.enhance(3.0)
+        final = np.array(pil_img)
+
+    # 边缘增强：Sobel 梯度叠加
+    gray = cv2.cvtColor(final, cv2.COLOR_RGB2GRAY) if final.shape[2] == 3 else final
+    sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    edges = np.sqrt(sobelx ** 2 + sobely ** 2)
+    edges = (edges / edges.max() * 60).clip(0, 255).astype(np.uint8)
+    # 叠加边缘到图像
+    if final.shape[2] == 3:
+        for c in range(3):
+            final[:, :, c] = np.clip(final[:, :, c].astype(np.int32) + edges, 0, 255).astype(np.uint8)
+    else:
+        final = np.clip(final.astype(np.int32) + edges, 0, 255).astype(np.uint8)
+        final = np.stack([final] * 3, axis=-1)
+
+    return final, depth_vis
 
 
 def project_las_to_image(
@@ -45,33 +118,15 @@ def project_las_to_image(
     for i in range(len(x)):
         pixel_bins[(col[i], row[i])].append((float(x[i]), float(y[i]), float(z[i])))
 
-    depth_image = np.full((height, width), -np.inf, dtype=np.float32)
-    color_image = np.zeros((height, width, 3), dtype=np.uint8)
+    # 生成纹理增强的投影图
+    final_image, _ = _make_texture_image(height, width, pixel_bins, r, g, b)
 
-    for (px, py), pts_list in pixel_bins.items():
-        zs = [p[2] for p in pts_list]
-        max_z_idx = np.argmax(zs)
-        depth_image[py, px] = zs[max_z_idx]
-        if r is not None and g is not None and b is not None:
-            color_image[py, px] = [int(r[max_z_idx]) >> 8, int(g[max_z_idx]) >> 8, int(b[max_z_idx]) >> 8]
-
-    depth_vis = np.zeros((height, width), dtype=np.uint8)
-    valid = np.isfinite(depth_image)
-    if valid.any():
-        d_min, d_max = depth_image[valid].min(), depth_image[valid].max()
-        if d_max > d_min:
-            depth_vis[valid] = (255 * (depth_image[valid] - d_min) / (d_max - d_min)).astype(np.uint8)
-
-    depth_vis = np.flipud(depth_vis)
-    color_image = np.flipud(color_image)
-
+    # 保存
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    from PIL import Image
-    Image.fromarray(depth_vis).save(str(out / "las_projection.jpg"))
-    if color_image.max() > 0:
-        Image.fromarray(color_image).save(str(out / "las_projection_rgb.jpg"))
+    Image.fromarray(final_image).save(str(out / "las_projection.jpg"))
 
+    # 坐标映射（用原始数据）
     coord_map = {}
     for (px, py), pts_list in pixel_bins.items():
         fy = height - 1 - py
