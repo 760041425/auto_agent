@@ -26,8 +26,6 @@ def test_las_projection():
     result = project_las_multi_view(
         "las/subsample_20260430181508.las",
         "projections/test_proj",
-        ground_resolution=0.5,
-        tile_size=300,
     )
     assert len(result) > 0
     first = result[0]

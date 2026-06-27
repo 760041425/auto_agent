@@ -42,21 +42,19 @@ def _run_preprocess():
         _preprocess_status["step"] = f"处理 {las_files[0].name}..."
 
         # Step 2: 多视角投影
-        _preprocess_status["step"] = "生成多视角 LAS 投影图（地面/中空/高空 x 分块）..."
+        _preprocess_status["step"] = "生成多视角 LAS 投影图（3高度层 x 5视角）..."
         _preprocess_status["progress"] = 10
         from services.las_processor.projection import project_las_multi_view
-        tiles = project_las_multi_view(
-            las_path,
-            ground_resolution=0.5,
-            tile_size=600,
-        )
+        tiles = project_las_multi_view(las_path)
         _preprocess_status["progress"] = 70
         n_tiles = len(tiles)
         total_pixels = sum(t["pixel_count"] for t in tiles)
         layers = set(t["layer"] for t in tiles)
+        views = set(t["view"] for t in tiles)
         _preprocess_status["step"] = (f"投影完成: {n_tiles} 张图, "
                                       f"{total_pixels} 总像素, "
-                                      f"分层: {', '.join(sorted(layers))}")
+                                      f"分层: {', '.join(sorted(layers))}, "
+                                      f"视角: {', '.join(sorted(views))}")
 
         # Step 3: 提取各 tile 的 SIFT 特征
         _preprocess_status["step"] = "提取各图 SIFT 特征..."
