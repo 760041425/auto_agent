@@ -58,9 +58,23 @@ main { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
 .status.error { background: #ffebee; color: #f44336; }
 .compare-result { margin-top: 1rem; }
 .compare-result h4 { margin-bottom: 0.5rem; }
-.compare-result table { width: 100%; font-size: 0.85rem; border-collapse: collapse; }
+.compare-result h5 { margin: 0.8rem 0 0.4rem; font-size: 0.95rem; }
+.compare-result table { width: 100%; font-size: 0.85rem; border-collapse: collapse; margin-bottom: 0.5rem; }
 .compare-result th, .compare-result td { padding: 0.3rem 0.5rem; text-align: left; border-bottom: 1px solid #eee; }
-.compare-result .coord { font-family: monospace; }
+.compare-result .coord { font-family: monospace; color: #e94560; }
+
+.report-summary { padding-bottom: 0.5rem; border-bottom: 1px solid #eee; margin-bottom: 0.5rem; }
+.report-summary p { margin: 0.3rem 0; }
+
+.region-card { background: #f8f9fa; border-radius: 4px; padding: 0.5rem 0.8rem; margin-bottom: 0.5rem; border-left: 3px solid #e94560; }
+.region-card h5 { margin: 0 0 0.3rem; font-size: 0.9rem; }
+.region-card p { margin: 0.1rem 0; font-size: 0.85rem; color: #666; }
+
+.verification-section { background: #f0f7ff; border-radius: 4px; padding: 0.5rem 0.8rem; margin-top: 0.5rem; border: 1px solid #d0e3ff; }
+.verification-section h4 { color: #1565c0; margin-bottom: 0.4rem; }
+
+.matched-points { margin-top: 0.5rem; }
+.coord-tag { display: inline-block; background: #e8eaf6; color: #3949ab; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.7rem; margin: 0.1rem; font-family: monospace; }
 
 @media (max-width: 768px) {
   .detail-body { grid-template-columns: 1fr; }
