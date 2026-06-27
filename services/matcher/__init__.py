@@ -128,6 +128,16 @@ def match_query_to_projection(
         sample_coords = [m["point3d"] for m in matched_3d]
         verification = _verify_with_las_points(sample_coords)
 
+    # 选取高置信度匹配点用于展示（最多20个，均匀分布）
+    from random import sample
+    display_points = high_confidence if len(high_confidence) <= 20 else sample(high_confidence, 20)
+    matched_points = [{
+        "query_pt": [float(p["query_pt"][0]), float(p["query_pt"][1])],
+        "proj_pt": p["proj_pt"],
+        "point3d": p["point3d"],
+        "distance": float(p["distance"]),
+    } for p in display_points]
+
     regions = [{
         "name": "las_projection_match",
         "num_matches": len(matched_3d),
@@ -144,6 +154,15 @@ def match_query_to_projection(
         "high_conf_center_3d": [float(h_center[0]), float(h_center[1]), float(h_center[2])],
         "regions": regions,
         "verification": verification,
+        "matched_points": matched_points,
+        "all_matched_points": [
+            {
+                "query_pt": [float(p["query_pt"][0]), float(p["query_pt"][1])],
+                "point3d": p["point3d"],
+                "distance": float(p["distance"]),
+            }
+            for p in matched_3d
+        ],
     }
 
 

@@ -99,8 +99,13 @@ def get_report(task_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "Report not found")
     task = report.task
     verification = None
+    matched_points = None
+    all_matched_points = None
     if task and task.result_json:
-        verification = task.result_json.get("verification")
+        result = task.result_json
+        verification = result.get("verification")
+        matched_points = result.get("matched_points")
+        all_matched_points = result.get("all_matched_points")
     return {
         "id": report.id,
         "task_id": report.task_id,
@@ -114,5 +119,7 @@ def get_report(task_id: int, db: Session = Depends(get_db)):
         "regions": report.regions_json,
         "confidence": report.confidence,
         "verification": verification,
+        "matched_points": matched_points,
+        "all_matched_points": all_matched_points,
         "created_at": report.created_at,
     }

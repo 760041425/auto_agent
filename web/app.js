@@ -88,6 +88,7 @@ async function startCompare(imageId) {
   statusEl.textContent = '创建匹配任务...';
   statusEl.className = 'status loading';
   resultEl.classList.add('hidden');
+  clearAnnotations();
 
   try {
     var resp = await fetch(API + '/tasks/compare', {
@@ -129,11 +130,55 @@ async function pollTask(id) {
   }
 }
 
+function clearAnnotations() {
+  var canvas = document.getElementById('overlay-canvas');
+  if (canvas) {
+    var ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+}
+
+function drawMatchedPoints(points) {
+  if (!points || points.length === 0) return;
+  var canvas = document.getElementById('overlay-canvas');
+  var img = document.getElementById('detail-image');
+  if (!canvas || !img) return;
+  canvas.width = img.naturalWidth;
+  canvas.height = img.naturalHeight;
+  var ctx = canvas.getContext('2d');
+
+  var colors = ['#e94560', '#ff6b35', '#ffc107', '#4caf50', '#2196f3',
+                '#9c27b0', '#00bcd4', '#ff4081', '#7c4dff', '#00e676'];
+
+  points.forEach(function(p, idx) {
+    var x = p.query_pt[0];
+    var y = p.query_pt[1];
+    var color = colors[idx % colors.length];
+
+    // 画圆点
+    ctx.beginPath();
+    ctx.arc(x, y, 6, 0, 2 * Math.PI);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // 标序号
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(idx + 1, x, y);
+  });
+}
+
 function renderReport(report, task) {
   var el = document.getElementById('compare-result');
   var content = document.getElementById('result-content');
   var html = '';
 
+  // ====== 摘要 ======
   html += '<div class="report-summary">';
   html += '<p>匹配: <strong style="color:' + (report.matched ? '#4caf50' : '#f44336') + '">' + (report.matched ? '成功' : '失败') + '</strong></p>';
   html += '<p>匹配点数: <strong>' + (report.total_matches || 0) + '</strong></p>';
@@ -141,28 +186,55 @@ function renderReport(report, task) {
     html += '<p>置信度: <strong>' + (report.confidence * 100).toFixed(1) + '%</strong></p>';
   }
   if (report.center_3d && report.center_3d.x != null) {
-    html += '<p>3D 中心: X=' + report.center_3d.x.toFixed(3) + ' Y=' + report.center_3d.y.toFixed(3) + ' Z=' + report.center_3d.z.toFixed(3) + '</p>';
+    html += '<p>区域 3D 中心: X=' + report.center_3d.x.toFixed(3) + ' Y=' + report.center_3d.y.toFixed(3) + ' Z=' + report.center_3d.z.toFixed(3) + '</p>';
   }
   html += '</div>';
 
-  if (report.regions && report.regions.length > 0) {
-    report.regions.forEach(function(r) {
-      html += '<div class="region-card">';
-      html += '<h5>' + (r.name || 'region') + '</h5>';
-      html += '<p>匹配点: ' + r.num_matches + ' | 高置信度: ' + (r.num_high_conf || '-') + '</p>';
-      if (r.center_3d && r.center_3d.length) {
-        html += '<p>3D: (' + r.center_3d.map(function(v) { return v.toFixed(3); }).join(', ') + ')</p>';
-      }
+  // ====== 标注的匹配点列表 ======
+  if (report.matched_points && report.matched_points.length > 0) {
+    html += '<div class="annotated-section"><h4>📍 图像标注点（' + report.matched_points.length + '个）</h4>';
+    report.matched_points.forEach(function(p, idx) {
+      var c3 = p.point3d;
+      html += '<div class="annotated-point">';
+      html += '<span class="point-label">点' + (idx + 1) + '</span>';
+      html += '<span class="point-coord">X=' + c3[0].toFixed(3) + ' Y=' + c3[1].toFixed(3) + ' Z=' + c3[2].toFixed(3) + '</span>';
+      html += '<span class="point-pos">图像位置: (' + p.query_pt[0].toFixed(0) + ', ' + p.query_pt[1].toFixed(0) + ')</span>';
       html += '</div>';
     });
+    html += '</div>';
+
+    // 在图像上绘制匹配点
+    drawMatchedPoints(report.matched_points);
   }
 
+  // ====== 所有匹配点表格（可展开/折叠） ======
+  if (report.all_matched_points && report.all_matched_points.length > 0) {
+    html += '<details class="all-points-details">';
+    html += '<summary>查看全部 ' + report.all_matched_points.length + ' 个匹配点</summary>';
+    html += '<div class="all-points-table-wrap"><table class="points-table">';
+    html += '<thead><tr><th>#</th><th>图像X</th><th>图像Y</th><th>3D X</th><th>3D Y</th><th>3D Z</th><th>距离</th></tr></thead><tbody>';
+    report.all_matched_points.forEach(function(p, idx) {
+      var c3 = p.point3d;
+      html += '<tr>';
+      html += '<td>' + (idx + 1) + '</td>';
+      html += '<td>' + p.query_pt[0].toFixed(0) + '</td>';
+      html += '<td>' + p.query_pt[1].toFixed(0) + '</td>';
+      html += '<td>' + c3[0].toFixed(3) + '</td>';
+      html += '<td>' + c3[1].toFixed(3) + '</td>';
+      html += '<td>' + c3[2].toFixed(3) + '</td>';
+      html += '<td>' + p.distance.toFixed(1) + '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table></div></details>';
+  }
+
+  // ====== LAS 点云验证 ======
   if (report.verification && !report.verification.error) {
     var v = report.verification;
     html += '<div class="verification-section"><h4>LAS 点云验证</h4>';
     html += '<table>';
     html += '<tr><td>匹配点总数</td><td>' + v.total_checked + '</td></tr>';
-    html += '<tr><td>已验证</td><td><strong>' + v.total_verified + '</strong> (' + (v.verification_rate * 100).toFixed(1) + '%)</td></tr>';
+    html += '<tr><td>已验证（偏差<' + (v.details && v.details[0] ? 3 : 3) + 'm）</td><td><strong>' + v.total_verified + '</strong> (' + (v.verification_rate * 100).toFixed(1) + '%)</td></tr>';
     html += '<tr><td>平均偏差</td><td>' + v.mean_distance_m.toFixed(3) + 'm</td></tr>';
     html += '</table>';
     if (v.details) {
