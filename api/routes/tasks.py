@@ -35,8 +35,9 @@ def run_comparison_task(task_id: int, image_id: int, db_url: str):
             db.commit()
             return
 
-        from services.matcher import compute_image_area_3d
-        result = compute_image_area_3d(img.path)
+        from services.matcher import compute_image_area_3d, log_match_step
+        log_match_step(f"⏳ 开始处理任务: image={img.path}, image_id={image_id}, task_id={task_id}, db={db_url}", task_id)
+        result = compute_image_area_3d(img.path, task_id=task_id)
 
         task.result_json = result
         task.status = "completed"
@@ -58,6 +59,9 @@ def run_comparison_task(task_id: int, image_id: int, db_url: str):
         task.status = "failed"
         task.error_message = str(e)
         db.commit()
+        log_match_step(f"❌ 任务异常: {e}", task_id)
+        import traceback
+        log_match_step(f"   traceback: {traceback.format_exc()}", task_id)
     finally:
         db.close()
 

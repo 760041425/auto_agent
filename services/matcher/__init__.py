@@ -1,16 +1,42 @@
 import json
+import logging
+import os
+from datetime import datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
 
+# 日志配置
+LOG_DIR = Path(__file__).parent.parent.parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+_logger = logging.getLogger("matcher")
+_logger.setLevel(logging.DEBUG)
+_fh = logging.FileHandler(LOG_DIR / "matcher.log", mode="a", encoding="utf-8")
+_fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+_logger.handlers.clear()
+_logger.addHandler(_fh)
 
-def _extract_sift(image_path: str):
+# 同时输出到 stdout
+_sh = logging.StreamHandler()
+_sh.setFormatter(logging.Formatter("%(asctime)s [MATCHER] %(message)s", datefmt="%H:%M:%S"))
+_logger.addHandler(_sh)
+
+
+def log_match_step(msg: str, task_id: int | None = None):
+    prefix = f"[Task#{task_id}]" if task_id else ""
+    _logger.info(f"{prefix} {msg}")
+
+
+def _extract_sift(image_path: str, task_id: int | None = None):
     img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
+        log_match_step(f"❌ 无法读取图像: {image_path}", task_id)
         return None, None, None
     sift = cv2.SIFT_create(nfeatures=3000)
     kp, des = sift.detectAndCompute(img, None)
+    n_kp = len(kp) if kp is not None else 0
+    log_match_step(f"📷 SIFT提取: {os.path.basename(image_path)} → {n_kp}个特征点, 图像尺寸={img.shape}", task_id)
     return kp, des, img.shape  # (kp, des, (h, w))
 
 
@@ -30,13 +56,14 @@ def _safe_knn_match(des1, des2, k=2):
     return result
 
 
-def _match_with_flann(des1, des2, ratio=0.75):
+def _match_with_flann(des1, des2, ratio=0.75, task_id=None):
     knn = _safe_knn_match(des1, des2, k=2)
     good = []
     for pair in knn:
         m, n = pair[0], pair[1]
         if m.distance < ratio * n.distance:
             good.append(m)
+    log_match_step(f"🔗 FLANN匹配: 初始匹配={len(knn)}, Lowe比率={ratio}, 通过={len(good)}", task_id)
     return good
 
 
@@ -89,24 +116,32 @@ def _verify_with_las_points(matched_coords, las_path="las/subsample_202604301815
         return {"error": str(e)}
 
 
-def _try_ransac(q_pts, p_pts):
+def _try_ransac(q_pts, p_pts, total_matches=0, task_id=None):
     """尝试多种 RANSAC 方法，返回最佳结果"""
     methods = [
-        (cv2.USAC_MAGSAC, 8.0, 0.99),
-        (cv2.USAC_ACCURATE, 6.0, 0.99),
-        (cv2.RANSAC, 5.0, 0.995),
+        ("USAC_MAGSAC", cv2.USAC_MAGSAC, 8.0, 0.99),
+        ("USAC_ACCURATE", cv2.USAC_ACCURATE, 6.0, 0.99),
+        ("RANSAC", cv2.RANSAC, 5.0, 0.995),
     ]
     best_H, best_mask, best_inliers = None, None, 0
-    for method, threshold, confidence in methods:
+    best_name = "None"
+    for name, method, threshold, confidence in methods:
         try:
             H, mask = cv2.findHomography(q_pts, p_pts, method, threshold,
                                           maxIters=5000, confidence=confidence)
             if H is not None and mask is not None:
                 inliers = int(mask.sum())
+                log_match_step(f"🔄 RANSAC({name}): 阈值={threshold}, 内点={inliers}/{total_matches} ({inliers/max(total_matches,1)*100:.0f}%)", task_id)
                 if inliers > best_inliers:
                     best_H, best_mask, best_inliers = H, mask, inliers
-        except cv2.error:
+                    best_name = name
+        except cv2.error as e:
+            log_match_step(f"⚠️ RANSAC({name}) 失败: {e}", task_id)
             continue
+    if best_H is not None:
+        log_match_step(f"✅ RANSAC最佳: {best_name}, 内点={best_inliers}/{total_matches}", task_id)
+    else:
+        log_match_step(f"❌ 所有RANSAC方法均失败", task_id)
     return best_H, best_mask
 
 
@@ -115,59 +150,76 @@ def match_query_to_projection(
     projection_image_path: str = "projections/las_projection.jpg",
     coord_map_path: str = "projections/coord_map.json",
     verify: bool = True,
+    task_id: int | None = None,
 ) -> dict:
-    q_kp, q_des, q_shape = _extract_sift(query_image_path)
-    p_kp, p_des, _ = _extract_sift(projection_image_path)
+    log_match_step(f"{'='*60}", task_id)
+    log_match_step(f"🚀 开始匹配: 查询图像={os.path.basename(query_image_path)}", task_id)
+
+    q_kp, q_des, q_shape = _extract_sift(query_image_path, task_id)
+    p_kp, p_des, p_shape = _extract_sift(projection_image_path, task_id)
 
     if q_des is None or p_des is None:
+        log_match_step(f"❌ 特征提取失败: q={q_des is not None}, p={p_des is not None}", task_id)
         return {"matched": False, "regions": [], "message": "Feature extraction failed"}
     if q_shape:
         q_h, q_w = q_shape
     else:
         q_h, q_w = 0, 0
+    log_match_step(f"📐 查询图像尺寸: {q_w}x{q_h}, 投影图尺寸: {p_shape}", task_id)
 
     # FLANN 匹配
-    good = _match_with_flann(q_des, p_des)
+    good = _match_with_flann(q_des, p_des, task_id=task_id)
     if len(good) < 6:
+        log_match_step(f"❌ 初始匹配不足: {len(good)} < 6", task_id)
         return {"matched": False, "regions": [], "message": f"Too few initial matches ({len(good)})"}
 
     # RANSAC 几何验证
     q_pts = np.float32([q_kp[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
     p_pts = np.float32([p_kp[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-    H, mask = _try_ransac(q_pts, p_pts)
+    H, mask = _try_ransac(q_pts, p_pts, len(good), task_id)
 
     if H is None or mask is None:
-        # 不用 RANSAC 过滤，直接用距离排序 + 边界检查
+        log_match_step(f"⚠️ RANSAC全部失败, 改用距离排序取top-20", task_id)
         inlier_matches = sorted(good, key=lambda m: m.distance)[:min(20, len(good))]
     else:
         inlier_mask = mask.ravel().tolist()
         inlier_matches = [m for m, is_inlier in zip(good, inlier_mask) if is_inlier]
+        log_match_step(f"📊 RANSAC内点: {len(inlier_matches)}/{len(good)}", task_id)
         if len(inlier_matches) < 3:
+            log_match_step(f"⚠️ RANSAC内点={len(inlier_matches)} < 3, 改用距离排序取top-15", task_id)
             inlier_matches = sorted(good, key=lambda m: m.distance)[:min(15, len(good))]
 
     if len(inlier_matches) < 3:
+        log_match_step(f"❌ 最终有效匹配不足: {len(inlier_matches)}", task_id)
         return {"matched": False, "regions": [], "message": f"Too few valid matches ({len(inlier_matches)})"}
+    log_match_step(f"✅ 有效匹配: {len(inlier_matches)}个", task_id)
 
     coord_map = _load_coord_map(coord_map_path)
+    log_match_step(f"🗺️ 坐标映射表: {len(coord_map)}个像素", task_id)
 
     # 将匹配点转为 3D 坐标
     matched_3d = []
     used_proj_pixels = set()
     used_query_pixels = set()
-    query_img_shape = (q_w, q_h)
+    skipped_out_of_bounds = 0
+    skipped_dup = 0
+    skipped_no_coord = 0
 
     for m in inlier_matches:
         qx = int(round(q_kp[m.queryIdx].pt[0]))
         qy = int(round(q_kp[m.queryIdx].pt[1]))
         # 边界检查
         if qx < 0 or qx >= q_w or qy < 0 or qy >= q_h:
+            skipped_out_of_bounds += 1
             continue
         # 查询像素去重
         if (qx, qy) in used_query_pixels:
+            skipped_dup += 1
             continue
         px = int(round(p_kp[m.trainIdx].pt[0]))
         py = int(round(p_kp[m.trainIdx].pt[1]))
         if (px, py) in used_proj_pixels:
+            skipped_dup += 1
             continue
         # 查找 3D 坐标（允许小范围邻域搜索）
         found = False
@@ -187,19 +239,40 @@ def match_query_to_projection(
                     break
             if found:
                 break
+        if not found:
+            skipped_no_coord += 1
+
+    log_match_step(f"📊 坐标映射: 成功={len(matched_3d)}, 出界={skipped_out_of_bounds}, 去重={skipped_dup}, 无坐标={skipped_no_coord}", task_id)
 
     if len(matched_3d) < 3:
+        log_match_step(f"❌ 3D映射点不足: {len(matched_3d)}", task_id)
         return {"matched": False, "regions": [], "message": f"Too few 3D-mapped matches ({len(matched_3d)})"}
 
     coords = np.array([m["point3d"] for m in matched_3d], dtype=np.float64)
     center = np.median(coords, axis=0)
+    xs, ys, zs = coords[:, 0], coords[:, 1], coords[:, 2]
+    log_match_step(f"📍 3D坐标范围: X=[{xs.min():.2f},{xs.max():.2f}] Y=[{ys.min():.2f},{ys.max():.2f}] Z=[{zs.min():.2f},{zs.max():.2f}]", task_id)
+    log_match_step(f"📍 3D中心: ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f})", task_id)
 
     # 按距离排序
     matched_3d.sort(key=lambda m: m["distance"])
 
+    # 输出每个匹配点的详情
+    for i, p in enumerate(matched_3d):
+        log_match_step(f"  🔵 点#{i+1}: 像素({p['query_pt'][0]:.0f},{p['query_pt'][1]:.0f}) "
+                       f"→ 投影({p['proj_pt'][0]},{p['proj_pt'][1]}) "
+                       f"→ 3D({p['point3d'][0]:.2f},{p['point3d'][1]:.2f},{p['point3d'][2]:.2f}) "
+                       f"距离={p['distance']:.1f}", task_id)
+
     verification = None
     if verify:
         verification = _verify_with_las_points([m["point3d"] for m in matched_3d])
+        if verification and "error" not in verification:
+            log_match_step(f"✅ LAS验证: {verification['total_verified']}/{verification['total_checked']} "
+                          f"通过({verification['verification_rate']*100:.0f}%), "
+                          f"平均偏差={verification['mean_distance_m']:.2f}m", task_id)
+        elif verification and "error" in verification:
+            log_match_step(f"⚠️ LAS验证失败: {verification['error']}", task_id)
 
     # 选取展示点：按网格均匀分布在图像上
     display_points = []
@@ -231,6 +304,8 @@ def match_query_to_projection(
                 display_points.append(p)
                 existing.add(key)
 
+    log_match_step(f"📌 展示点: {len(display_points)}个 (网格{grid_cols}x{grid_rows})", task_id)
+
     matched_points = [{
         "query_pt": [float(p["query_pt"][0]), float(p["query_pt"][1])],
         "proj_pt": p["proj_pt"],
@@ -245,6 +320,9 @@ def match_query_to_projection(
         "center_3d": [float(coords.mean(axis=0)[0]), float(coords.mean(axis=0)[1]), float(coords.mean(axis=0)[2])],
         "avg_distance": float(np.mean([m["distance"] for m in matched_3d])),
     }]
+
+    log_match_step(f"✅ 匹配完成: 内点={len(matched_3d)}, 展示={len(matched_points)}", task_id)
+    log_match_step(f"{'='*60}", task_id)
 
     return {
         "matched": True,
@@ -266,5 +344,6 @@ def match_query_to_projection(
 def compute_image_area_3d(
     query_image_path: str,
     region: dict | None = None,
+    task_id: int | None = None,
 ) -> dict:
-    return match_query_to_projection(query_image_path)
+    return match_query_to_projection(query_image_path, task_id=task_id)
