@@ -14,7 +14,7 @@ from collections import defaultdict
 import cv2
 import numpy as np
 from laspy import open as las_open
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
 
 
 TILE_PX = 512          # 每块像素
@@ -34,11 +34,15 @@ def project_las_multi_view(
     pts = reader.read()
     total = len(pts.x)
 
-    # 采样
+    # 采样（同时读 RGB）
     step = max(1, total // 3_000_000)
     x = np.array(pts.x[::step], dtype=np.float64)
     y = np.array(pts.y[::step], dtype=np.float64)
     z = np.array(pts.z[::step], dtype=np.float64)
+    has_rgb = hasattr(pts, 'red') and hasattr(pts, 'green') and hasattr(pts, 'blue')
+    r_arr = np.array(pts.red[::step], dtype=np.uint8) if has_rgb else None
+    g_arr = np.array(pts.green[::step], dtype=np.uint8) if has_rgb else None
+    b_arr = np.array(pts.blue[::step], dtype=np.uint8) if has_rgb else None
 
     x_min, x_max = float(x.min()), float(x.max())
     y_min, y_max = float(y.min()), float(y.max())
@@ -80,61 +84,64 @@ def project_las_multi_view(
             col_idx = ((xt - tx_min) / RES).astype(np.int64).clip(0, w - 1)
             row_idx = ((yt - ty_min) / RES).astype(np.int64).clip(0, h - 1)
 
-            # 对每个像素，取 Z 最低的点（最接近地面）
-            # 用 dict: (px, py) -> (x, y, z)  保留第一个遇到的最低Z点
-            pixel_map = {}
+            # 对每个像素，取 Z 最低的点（最接近地面），保留原始 RGB
+            # 先筛选 RGB
+            rt = r_arr[mask] if r_arr is not None else None
+            gt = g_arr[mask] if g_arr is not None else None
+            bt = b_arr[mask] if b_arr is not None else None
+            pixel_map = {}  # (px, py) -> (x, y, z, r, g, b)
             for i in range(len(xt)):
                 px, py = int(col_idx[i]), int(row_idx[i])
                 key = (px, py)
                 if key not in pixel_map or zt[i] < pixel_map[key][2]:
-                    pixel_map[key] = (float(xt[i]), float(yt[i]), float(zt[i]))
+                    cr = int(rt[i]) if rt is not None else 0
+                    cg = int(gt[i]) if gt is not None else 0
+                    cb = int(bt[i]) if bt is not None else 0
+                    pixel_map[key] = (float(xt[i]), float(yt[i]), float(zt[i]), cr, cg, cb)
 
             if len(pixel_map) < 20:
                 continue
 
-            # 渲染图像（Z 伪彩色）
+            # 渲染图像（原始 RGB 颜色）
             img = np.zeros((h, w, 3), dtype=np.uint8)
-            depth_img = np.full((h, w), np.nan, dtype=np.float32)
+            for (px, py), (_, _, _, cr, cg, cb) in pixel_map.items():
+                img[py, px, 0] = np.clip(int(cb), 0, 255)
+                img[py, px, 1] = np.clip(int(cg), 0, 255)
+                img[py, px, 2] = np.clip(int(cr), 0, 255)
 
-            for (px, py), (_, _, pz) in pixel_map.items():
-                depth_img[py, px] = pz
+            # 保存原始颜色作映射（增强前）
+            raw_pixel_colors = {}
+            for (px, py), (_, _, _, cr, cg, cb) in pixel_map.items():
+                raw_pixel_colors[(px, py)] = (cr, cg, cb)
 
-            valid = ~np.isnan(depth_img)
-            d_min, d_max = np.nanmin(depth_img[valid]), np.nanmax(depth_img[valid])
+            # 增强（仅用于显示，不影响坐标映射）
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+            sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+            edges = np.sqrt(sobelx ** 2 + sobely ** 2)
+            if edges.max() > 0:
+                edges = (edges / edges.max() * 30).clip(0, 255).astype(np.uint8)
+                for c in range(3):
+                    img[:, :, c] = np.clip(img[:, :, c].astype(np.int32) + edges, 0, 255).astype(np.uint8)
 
-            if d_max > d_min:
-                norm = np.zeros((h, w), dtype=np.uint8)
-                norm[valid] = (255 * (depth_img[valid] - d_min) / (d_max - d_min)).astype(np.uint8)
-                img = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
-
-                # 边缘增强
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-                sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-                edges = np.sqrt(sobelx ** 2 + sobely ** 2)
-                if edges.max() > 0:
-                    edges = (edges / edges.max() * 40).clip(0, 255).astype(np.uint8)
-                    for c in range(3):
-                        img[:, :, c] = np.clip(img[:, :, c].astype(np.int32) + edges, 0, 255).astype(np.uint8)
-
-                # 对比度
-                pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-                pil = ImageEnhance.Contrast(pil).enhance(1.5)
-                pil = ImageEnhance.Sharpness(pil).enhance(2.0)
-                img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+            pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            pil = ImageEnhance.Contrast(pil).enhance(1.2)
+            pil = ImageEnhance.Sharpness(pil).enhance(1.5)
+            img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
             # 翻转 Y
             img = cv2.flip(img, 0)
 
-            # 坐标映射（Y 翻转后）
+            # 坐标映射（Y 翻转后，用增强前的原始 RGB）
             coord_map = {}
-            for (px, py), (rx, ry, rz) in pixel_map.items():
-                coord_map[f"{px},{h-1-py}"] = [rx, ry, rz]
+            for (px, py), (rx, ry, rz, _, _, _) in pixel_map.items():
+                cr, cg, cb = raw_pixel_colors.get((px, py), (0, 0, 0))
+                coord_map[f"{px},{h-1-py}"] = [rx, ry, rz, cr, cg, cb]
 
-            fname = f"tile_{row}_{col}.jpg"
+            fname = f"tile_{row}_{col}.png"
             cname = f"coord_tile_{row}_{col}.json"
 
-            cv2.imwrite(str(out / fname), img)
+            cv2.imwrite(str(out / fname), img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             with open(str(out / cname), "w") as f:
                 json.dump({
                     "width": w, "height": h,
