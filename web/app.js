@@ -235,10 +235,11 @@ function renderReport(report, task) {
   }
   html += '</div>';
 
-  // ====== 标注的匹配点列表 ======
-  if (report.matched_points && report.matched_points.length > 0) {
-      html += '<div class="annotated-section"><h4>📍 图像标注点（' + report.matched_points.length + '个）</h4>';
-    report.matched_points.forEach(function(p, idx) {
+  // ====== 标注的匹配点列表（前5个） ======
+  var displayPoints = report.matched_points ? report.matched_points.slice(0, 5) : [];
+  if (displayPoints.length > 0) {
+    html += '<div class="annotated-section"><h4>📍 图像标注点（前' + displayPoints.length + '个）</h4>';
+    displayPoints.forEach(function(p, idx) {
       var c3 = p.point3d;
       html += '<div class="annotated-point">';
       html += '<span class="point-label">' + (idx + 1) + '</span>';
@@ -248,8 +249,8 @@ function renderReport(report, task) {
     });
     html += '</div>';
 
-    // 在图像上绘制匹配点
-    drawMatchedPoints(report.matched_points);
+    // 在图像上绘制匹配点（前5个）
+    drawMatchedPoints(displayPoints);
   }
 
   // ====== 所有匹配点表格（可展开/折叠） ======
@@ -350,10 +351,11 @@ async function loadTasks() {
           html += '<span class="task-detail-3d">3D: X=' + r.center_3d.x.toFixed(2) + ' Y=' + r.center_3d.y.toFixed(2) + ' Z=' + r.center_3d.z.toFixed(2) + '</span>';
         }
         html += '</div>';
-        // 标注点列表
-        if (r.matched_points && r.matched_points.length > 0) {
+        // 标注点列表（前5个）
+        var displayPoints = r.matched_points ? r.matched_points.slice(0, 5) : [];
+        if (displayPoints.length > 0) {
           html += '<div class="task-detail-points">';
-          r.matched_points.forEach(function(p, idx) {
+          displayPoints.forEach(function(p, idx) {
             var c3 = p.point3d;
             html += '<div class="annotated-point">';
             html += '<span class="point-label">' + (idx + 1) + '</span>';
@@ -407,14 +409,13 @@ function drawTaskPoints(taskId) {
   canvas.height = Math.min(img.naturalHeight, 400);
   var ctx = canvas.getContext('2d');
 
-  // 从 report 获取匹配点
+  // 从 report 获取匹配点（只画前5个）
   fetch(API + '/tasks/' + taskId + '/report').then(function(r) { return r.json(); }).then(function(report) {
-    var points = report.matched_points;
-    if (!points) return;
+    var points = (report.matched_points || []).slice(0, 5);
+    if (!points.length) return;
     var scaleX = canvas.width / img.naturalWidth;
     var scaleY = canvas.height / img.naturalHeight;
-    var colors = ['#e94560', '#ff6b35', '#ffc107', '#4caf50', '#2196f3',
-                  '#9c27b0', '#00bcd4', '#ff4081', '#7c4dff', '#00e676'];
+    var colors = ['#e94560', '#ff6b35', '#ffc107', '#4caf50', '#2196f3'];
 
     points.forEach(function(p, idx) {
       var x = p.query_pt[0] * scaleX;
