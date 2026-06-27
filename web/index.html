@@ -27,6 +27,20 @@
         <div class="progress-bar"></div>
       </div>
       <div id="upload-result" class="result hidden"></div>
+
+      <div style="margin-top:2rem;border-top:1px solid #eee;padding-top:1rem">
+        <h3 style="font-size:0.95rem;margin-bottom:0.5rem">LAS 数据预处理</h3>
+        <p style="font-size:0.82rem;color:#888;margin-bottom:0.5rem">
+          生成 LAS 投影图、像素-3D 坐标映射和 SIFT 特征，用于图像匹配
+        </p>
+        <button id="preprocess-btn" class="btn-primary" onclick="startPreprocess()">
+          开始预处理
+        </button>
+        <div id="preprocess-status" class="hidden" style="margin-top:0.5rem"></div>
+        <div id="preprocess-progress-wrap" class="progress hidden" style="margin-top:0.5rem">
+          <div id="preprocess-progress-bar" class="progress-bar" style="width:0%"></div>
+        </div>
+      </div>
     </section>
 
     <section id="tab-list" class="tab-content">

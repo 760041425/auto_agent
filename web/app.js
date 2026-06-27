@@ -457,3 +457,69 @@ function drawTaskPoints(taskId) {
     });
   }).catch(function() {});
 }
+
+// ====== LAS 预处理 ======
+
+async function startPreprocess() {
+  var btn = document.getElementById('preprocess-btn');
+  var statusEl = document.getElementById('preprocess-status');
+  var progressWrap = document.getElementById('preprocess-progress-wrap');
+  var progressBar = document.getElementById('preprocess-progress-bar');
+
+  btn.disabled = true;
+  btn.textContent = '处理中...';
+  statusEl.classList.remove('hidden');
+  statusEl.className = 'status loading';
+  statusEl.textContent = '启动预处理...';
+  progressWrap.classList.remove('hidden');
+  progressBar.style.width = '0%';
+
+  try {
+    var resp = await fetch(API + '/las/preprocess', { method: 'POST' });
+    var data = await resp.json();
+    console.log('preprocess started:', data);
+
+    // 轮询进度
+    pollPreprocessStatus(btn, statusEl, progressWrap, progressBar);
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '开始预处理';
+    statusEl.textContent = '启动失败: ' + e.message;
+    statusEl.className = 'status error';
+  }
+}
+
+async function pollPreprocessStatus(btn, statusEl, progressWrap, progressBar) {
+  try {
+    var resp = await fetch(API + '/las/preprocess/status');
+    var s = await resp.json();
+
+    statusEl.textContent = s.step || '';
+    progressBar.style.width = s.progress + '%';
+
+    if (s.error) {
+      btn.disabled = false;
+      btn.textContent = '开始预处理';
+      statusEl.textContent = '❌ ' + s.error;
+      statusEl.className = 'status error';
+      return;
+    }
+
+    if (s.running) {
+      setTimeout(function() { pollPreprocessStatus(btn, statusEl, progressWrap, progressBar); }, 1000);
+    } else {
+      // 完成
+      btn.disabled = false;
+      btn.textContent = '重新预处理';
+      if (s.progress >= 100) {
+        statusEl.textContent = '✅ ' + (s.step || '预处理完成');
+        statusEl.className = 'status success';
+      }
+    }
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '开始预处理';
+    statusEl.textContent = '查询状态失败: ' + e.message;
+    statusEl.className = 'status error';
+  }
+}

@@ -126,12 +126,21 @@ def project_las_to_image(
     out.mkdir(parents=True, exist_ok=True)
     Image.fromarray(final_image).save(str(out / "las_projection.jpg"))
 
-    # 坐标映射（用原始数据）
+    # 坐标映射（用Z中位数，减少异常点影响）
     coord_map = {}
     for (px, py), pts_list in pixel_bins.items():
         fy = height - 1 - py
-        center = np.mean(pts_list, axis=0).tolist()
-        coord_map[f"{px},{fy}"] = center
+        arr = np.array(pts_list)
+        # 对 Z 排序，取 Z 中位数对应的点
+        z_sorted_idx = np.argsort(arr[:, 2])
+        median_idx = z_sorted_idx[len(z_sorted_idx) // 2]
+        coord_map[f"{px},{fy}"] = arr[median_idx].tolist()
+
+    # 同时保存全量映射用于验证
+    full_coord_map = {}
+    for (px, py), pts_list in pixel_bins.items():
+        fy = height - 1 - py
+        full_coord_map[f"{px},{fy}"] = [np.mean(p, axis=0).tolist() for p in [pts_list]]
 
     coord_path = out / "coord_map.json"
     with open(coord_path, "w") as f:
