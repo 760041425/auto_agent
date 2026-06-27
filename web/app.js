@@ -309,8 +309,52 @@ async function loadTasks() {
       list.innerHTML = '<p>暂无任务</p>';
       return;
     }
+
+    // 对每个已完成的任务，并行拉取 report
+    var reports = {};
+    var reportPromises = tasks.filter(function(t) { return t.status === 'completed'; }).map(async function(t) {
+      try {
+        var r = await fetch(API + '/tasks/' + t.id + '/report');
+        reports[t.id] = await r.json();
+      } catch(e) {}
+    });
+    await Promise.all(reportPromises);
+
     list.innerHTML = tasks.map(function(t) {
-      return '<div class="task-item"><div><strong>任务#' + t.id + '</strong> 图像#' + t.image_id + '<br><small>' + new Date(t.created_at).toLocaleString() + '</small></div><span class="status-badge ' + t.status + '">' + t.status + '</span></div>';
+      var html = '<div class="task-item">';
+      html += '<div class="task-item-main" onclick="toggleTaskDetail(' + t.id + ')">';
+      html += '<div><strong>任务#' + t.id + '</strong> 图像#' + t.image_id + '<br><small>' + new Date(t.created_at).toLocaleString() + '</small></div>';
+      html += '<span class="status-badge ' + t.status + '">' + t.status + '</span>';
+      html += '</div>';
+
+      // 已完成的任务展开显示摘要
+      var r = reports[t.id];
+      if (r && r.matched) {
+        html += '<div class="task-detail" id="task-detail-' + t.id + '" style="display:none">';
+        html += '<div class="task-detail-row"><span class="task-detail-label">匹配点数</span><span>' + r.total_matches + '</span></div>';
+        if (r.center_3d && r.center_3d.x != null) {
+          html += '<div class="task-detail-row"><span class="task-detail-label">3D 中心</span><span>X=' + r.center_3d.x.toFixed(3) + ' Y=' + r.center_3d.y.toFixed(3) + ' Z=' + r.center_3d.z.toFixed(3) + '</span></div>';
+        }
+        if (r.matched_points && r.matched_points.length > 0) {
+          html += '<div class="task-detail-row"><span class="task-detail-label">标注点</span><span>' + r.matched_points.length + '个（含3D坐标）</span></div>';
+        }
+        html += '<button class="task-view-btn" onclick="event.stopPropagation(); showDetail(' + t.image_id + ')">查看详情</button>';
+        html += '</div>';
+      } else if (r && !r.matched) {
+        html += '<div class="task-detail" id="task-detail-' + t.id + '" style="display:none">';
+        html += '<div class="task-detail-row"><span class="task-detail-label">匹配结果</span><span style="color:#f44336">失败</span></div>';
+        html += '</div>';
+      }
+
+      html += '</div>';
+      return html;
     }).join('');
   } catch(e) { console.error(e); }
+}
+
+function toggleTaskDetail(id) {
+  var el = document.getElementById('task-detail-' + id);
+  if (el) {
+    el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  }
 }
