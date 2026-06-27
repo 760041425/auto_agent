@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LAS 3D 坐标查询系统</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>LAS 3D 坐标查询系统</h1>
+    <nav>
+      <button class="tab active" data-tab="upload">上传图像</button>
+      <button class="tab" data-tab="list">图像列表</button>
+      <button class="tab" data-tab="tasks">任务记录</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="tab-upload" class="tab-content active">
+      <div class="upload-zone" id="upload-zone">
+        <p>拖拽图像到此处，或点击上传</p>
+        <input type="file" id="file-input" accept="image/*" multiple hidden>
+      </div>
+      <div id="upload-progress" class="progress hidden">
+        <div class="progress-bar"></div>
+      </div>
+      <div id="upload-result" class="result hidden"></div>
+    </section>
+
+    <section id="tab-list" class="tab-content">
+      <div class="toolbar">
+        <button id="refresh-btn">刷新列表</button>
+        <span id="image-count"></span>
+      </div>
+      <div id="image-grid" class="image-grid"></div>
+    </section>
+
+    <section id="tab-tasks" class="tab-content">
+      <div id="task-list" class="task-list"></div>
+    </section>
+
+    <section id="tab-detail" class="tab-content">
+      <div class="detail-header">
+        <button id="back-btn">← 返回</button>
+        <span id="detail-title"></span>
+      </div>
+      <div class="detail-body">
+        <div class="image-viewer">
+          <img id="detail-image" src="" alt="">
+          <canvas id="overlay-canvas"></canvas>
+        </div>
+        <div class="detail-info">
+          <h3>操作</h3>
+          <button id="compare-btn" class="btn-primary">开始 3D 坐标匹配</button>
+          <div id="compare-status" class="status hidden"></div>
+          <div id="compare-result" class="compare-result hidden">
+            <h4>匹配结果</h4>
+            <div id="result-content"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

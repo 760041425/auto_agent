@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.env
+*.db
+*.sqlite3
+
+# Node / Frontend
+web/node_modules/
+web/dist/
+web/.env
+
+# Data
+las/*.las
+query_images/*
+video_frames/*
+projections/*
+!las/.gitkeep
+!las/*.txt
+!query_images/.gitkeep
+!projections/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
