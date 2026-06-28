@@ -168,8 +168,10 @@ def project_las_multi_view(
             for (px, py), (rx, ry, rz, cr, cg, cb) in pixel_map.items():
                 coord_map[f"{px},{h-1-py}"] = [rx, ry, rz, cr, cg, cb]
 
-            fname = f"tile_{row}_{col}.png"
-            cname = f"coord_tile_{row}_{col}.json"
+            # 文件名包含tile左上角局部坐标
+            fx = f"{tx_min:.0f}_{ty_min:.0f}"
+            fname = f"tile_{fx}_{row}_{col}.png"
+            cname = f"coord_tile_{fx}_{row}_{col}.json"
 
             cv2.imwrite(str(out / fname), img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             with open(str(out / cname), "w") as f:
