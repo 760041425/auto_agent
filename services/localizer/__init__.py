@@ -47,7 +47,7 @@ _POINT_INDEX = None  # 3D点空间索引
 
 
 def load_colmap(las_dir: str = "las", force_reload: bool = False):
-    """加载 COLMAP 数据"""
+    """加载 COLMAP 数据（从 LAS 点云 + images.txt）"""
     global _COLMAP_POINTS, _COLMAP_IMAGES, _POINT_INDEX
 
     if _COLMAP_POINTS is not None and not force_reload:
@@ -56,13 +56,47 @@ def load_colmap(las_dir: str = "las", force_reload: bool = False):
     log("加载 COLMAP 数据...")
     t0 = time.time()
 
+    # 加载 images.txt（全景位姿）
     img_path = os.path.join(las_dir, "images.txt")
-    pt_path = os.path.join(las_dir, "points3D.txt")
-
     _COLMAP_IMAGES = read_images_txt(img_path)
-    _COLMAP_POINTS = read_points3d_txt(pt_path)
+    log(f"  {len(_COLMAP_IMAGES)} 张图像, 耗时{time.time()-t0:.1f}s")
 
-    log(f"  {len(_COLMAP_IMAGES)} 张图像, {len(_COLMAP_POINTS)} 个3D点, 耗时{time.time()-t0:.1f}s")
+    # 从 LAS 点云构建 3D 点（采样）
+    log("从点云构建3D点索引...")
+    las_path = os.path.join(las_dir, "default_2026-05-28-112428.las")
+    from laspy import open as las_open
+    reader = las_open(las_path)
+    pts = reader.read()
+
+    # 采样500万点
+    step = max(1, len(pts.x) // 5_000_000)
+    n_pts = len(pts.x) // step
+
+    # 构建简易 ColmapPoint3D 数据结构
+    class _SimplePoint3D:
+        def __init__(self, pid, x, y, z, r=128, g=128, b=128):
+            self.point_id = pid
+            self.x, self.y, self.z = x, y, z
+            self.r, self.g, self.b = r, g, b
+
+    _COLMAP_POINTS = {}
+    xs = pts.x[::step]
+    ys = pts.y[::step]
+    zs = pts.z[::step]
+
+    has_rgb = hasattr(pts, 'red') and hasattr(pts, 'green') and hasattr(pts, 'blue')
+    rs = pts.red[::step] if has_rgb else None
+    gs = pts.green[::step] if has_rgb else None
+    bs = pts.blue[::step] if has_rgb else None
+
+    for i in range(len(xs)):
+        pid = i + 1
+        r = int(rs[i]) if rs is not None else 128
+        g = int(gs[i]) if gs is not None else 128
+        b = int(bs[i]) if bs is not None else 128
+        _COLMAP_POINTS[pid] = _SimplePoint3D(pid, float(xs[i]), float(ys[i]), float(zs[i]), r, g, b)
+
+    log(f"  从点云构建 {len(_COLMAP_POINTS)} 个3D点, 耗时{time.time()-t0:.1f}s")
 
     # 构建空间索引
     log("构建3D点空间索引...")
