@@ -518,33 +518,17 @@ def localize_image(
         if p_img is None:
             continue
 
-        p_kp, p_des = None, None
-        q_img_for_match = query_img
-        p_img_for_match = p_img
-
         if match_method in ("lightglue", "loftr"):
             # 深度学习方法：直接传图像
             matches = _match_features(None, None, match_method, img1=query_img, img2=p_img)
             if not matches:
                 continue
-            # LoFTR 的特殊处理
-            if hasattr(matches, '_loftr_kpts0'):
-                # 构造 p_kp, q_kp
-                p_kp = [cv2.KeyPoint(float(x), float(y), 1) for x, y in matches._loftr_kpts1]
-                q_kp_extra = [cv2.KeyPoint(float(x), float(y), 1) for x, y in matches._loftr_kpts0]
-                # 合并到 q_kp
-                offset = len(q_kp)
-                q_kp_list = list(q_kp) + q_kp_extra
-                q_kp = tuple(q_kp_list)
-                # 调整 matches 的索引
-                for m in matches:
-                    m.queryIdx += offset
-                    m.trainIdx = m.trainIdx  # 一一对应
-                # 用 p_kp 做 RANSAC
-                _p_kp = p_kp
-                _q_kp = q_kp_list
-            else:
-                _p_kp = [cv2.KeyPoint(float(x), float(y), 1) for x, y in matches._loftr_kpts1] if hasattr(matches, '_loftr_kpts1') else []
+            inlier_m = matches[:min(30, len(matches))]
+            # 从深度匹配中提取点坐标
+            dl_kpts0 = getattr(matches, '_loftr_kpts0', None)
+            dl_kpts1 = getattr(matches, '_loftr_kpts1', None)
+            if dl_kpts0 is None or dl_kpts1 is None:
+                continue
         else:
             # 传统方法
             p_kp, p_des, _ = _extract_features(tile_path, "sift")
@@ -585,8 +569,22 @@ def localize_image(
         for m in inlier_m:
             if len(matched_3d) >= 10:
                 break
-            qx, qy = q_kp[m.queryIdx].pt
-            px, py = p_kp[m.trainIdx].pt
+            
+            if match_method in ("lightglue", "loftr"):
+                # 深度学习方法：从保存的关键点数组取坐标
+                idx0 = m.queryIdx if hasattr(m, 'queryIdx') else m
+                idx1 = m.trainIdx if hasattr(m, 'trainIdx') else m
+                if dl_kpts0 is not None and idx0 < len(dl_kpts0):
+                    qx, qy = float(dl_kpts0[idx0][0]), float(dl_kpts0[idx0][1])
+                else:
+                    continue
+                if dl_kpts1 is not None and idx1 < len(dl_kpts1):
+                    px, py = float(dl_kpts1[idx1][0]), float(dl_kpts1[idx1][1])
+                else:
+                    continue
+            else:
+                qx, qy = q_kp[m.queryIdx].pt
+                px, py = p_kp[m.trainIdx].pt
             px_i, py_i = int(round(px)), int(round(py))
 
             # 在 coord_map 中查找
