@@ -128,6 +128,21 @@ def run_localize_task(task_id: int, image_id: int, feature_methods: list[str], m
         db.close()
 
 
+@router.get("/check")
+def check_colmap():
+    """检查 COLMAP 数据是否可用"""
+    import os
+    has_images = os.path.exists("las/images.txt")
+    has_points = os.path.exists("las/points3D.txt")
+    has_las = len([f for f in os.listdir("las") if f.endswith(".las")]) > 0
+    return {
+        "available": has_images and has_points,
+        "has_images": has_images,
+        "has_points": has_points,
+        "has_las": has_las,
+    }
+
+
 @router.post("")
 def create_localize_task(req: LocalizeRequest, db: Session = Depends(get_db)):
     task = TaskModel(image_id=req.image_id, status="pending")

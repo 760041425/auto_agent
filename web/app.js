@@ -593,6 +593,21 @@ function selectLocalizeImage(id, filename, name) {
 async function startLocalize() {
   var imageId = localizeSelectedId;
   if (!imageId) { alert('请先选择图像'); return; }
+  if (!document.getElementById('localize-btn').dataset.colmapOk) {
+    // 先检查是否有 COLMAP 数据
+    try {
+      var chk = await fetch(API + '/localize/check');
+      var chkData = await chk.json();
+      if (!chkData.available) {
+        alert('定位不可用：缺少 COLMAP 数据（las/images.txt）。\n请先准备 COLMAP 数据后再使用此功能。');
+        return;
+      }
+      document.getElementById('localize-btn').dataset.colmapOk = '1';
+    } catch(e) {
+      alert('检查 COLMAP 数据失败: ' + e.message);
+      return;
+    }
+  }
 
   var btn = document.getElementById('localize-btn');
   var statusEl = document.getElementById('localize-status');
