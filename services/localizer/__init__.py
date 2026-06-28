@@ -22,6 +22,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 from services.las_processor.colmap_reader import read_images_txt, read_points3d_txt
 
+# ── 深度学习特征匹配（懒加载） ──────────────
+_DL_MATCHER = None  # LightGlueMatcher
+_LOFTR = None       # LoFTR
+
 LOG_DIR = Path(__file__).parent.parent.parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
@@ -260,21 +264,43 @@ def _extract_features(image, method="sift"):
     elif method == "akaze":
         detector = cv2.AKAZE_create()
         return detector.detectAndCompute(gray, None)
+    elif method in ("lightglue", "superpoint", "loftr"):
+        # 深度学习方法：返回原始图像用于后续匹配
+        kp = [cv2.KeyPoint(0, 0, 1)]  # 占位
+        return kp, gray  # 返回灰度图代替descriptor
     else:
         detector = cv2.SIFT_create(nfeatures=3000)
         return detector.detectAndCompute(gray, None)
 
 
-def _match_features(des1, des2, method="flann", ratio=0.75):
+def _init_dl_matcher():
+    """初始化深度学习匹配器（懒加载）"""
+    global _DL_MATCHER, _LOFTR
+    if _DL_MATCHER is None:
+        log("加载 LightGlue 模型...")
+        _DL_MATCHER = KF.LightGlueMatcher('sift')
+    if _LOFTR is None:
+        log("加载 LoFTR 模型...")
+        _LOFTR = KF.LoFTR(pretrained='outdoor')
+
+
+def _match_features(des1, des2, method="flann", ratio=0.75, img1=None, img2=None):
     """按指定方法匹配特征
 
     方法:
-      flann      - FLANN kd-tree + Lowe 0.75 比率测试（默认）
-      bf         - BruteForce + Lowe 0.75 比率测试
-      flann_lowes - FLANN + 严格 Lowe 0.6 比率测试
-      bf_cross   - BruteForce + 交叉验证（双向匹配）
-      knn_rank   - FLANN + 取前 N 个最近邻（无比率测试，取 top-50）
+      flann        - FLANN kd-tree + Lowe 0.75
+      bf           - BruteForce + Lowe 0.75
+      flann_lowes  - FLANN + 严格 Lowe 0.6
+      bf_cross     - BruteForce + 交叉验证
+      knn_rank     - FLANN + top-50
+      lightglue    - LightGlue (深度学习)
+      loftr        - LoFTR (深度学习)
     """
+    # 深度学习方法
+    if method in ("lightglue", "loftr"):
+        return _match_deep(des1, des2, method, img1, img2)
+
+    # 传统方法
     if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
         return []
 
@@ -294,7 +320,6 @@ def _match_features(des1, des2, method="flann", ratio=0.75):
         use_knn, test_ratio = True, 0.6
     elif method == "bf_cross":
         norm = cv2.NORM_HAMMING if is_binary else cv2.NORM_L2
-        # 交叉验证（双向匹配）
         bf12 = cv2.BFMatcher(norm, crossCheck=False)
         bf21 = cv2.BFMatcher(norm, crossCheck=False)
         try:
@@ -302,7 +327,6 @@ def _match_features(des1, des2, method="flann", ratio=0.75):
             m21 = bf21.knnMatch(des2, des1, k=2)
         except cv2.error:
             return []
-        # 取双向一致的匹配
         good = []
         for pair in m12:
             if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance:
@@ -319,7 +343,6 @@ def _match_features(des1, des2, method="flann", ratio=0.75):
             matches = matcher.knnMatch(des1, des2, k=2)
         except cv2.error:
             return []
-        # 取距离最小的 top-50
         all_m = [m for pair in matches if len(pair) > 0 for m in [pair[0]]]
         all_m.sort(key=lambda x: x.distance)
         return all_m[:min(50, len(all_m))]
@@ -341,6 +364,87 @@ def _match_features(des1, des2, method="flann", ratio=0.75):
             if m.distance < test_ratio * n.distance:
                 good.append(m)
     return good
+
+
+def _match_deep(img1_gray, img2_gray, method="lightglue", img1_full=None, img2_full=None):
+    """深度学习特征匹配（LightGlue / LoFTR）"""
+    _init_dl_matcher()
+    
+    # 确保输入是灰度图
+    if len(img1_gray.shape) == 3:
+        img1_gray = cv2.cvtColor(img1_gray, cv2.COLOR_BGR2GRAY)
+    if len(img2_gray.shape) == 3:
+        img2_gray = cv2.cvtColor(img2_gray, cv2.COLOR_BGR2GRAY)
+    
+    # 转为 tensor
+    h1, w1 = img1_gray.shape
+    h2, w2 = img2_gray.shape
+    
+    if method == "lightglue":
+        # LightGlue 需要 SIFT 特征 + 深度学习匹配
+        sift = cv2.SIFT_create(nfeatures=2000)
+        kp1, des1 = sift.detectAndCompute(img1_gray, None)
+        kp2, des2 = sift.detectAndCompute(img2_gray, None)
+        if des1 is None or des2 is None or len(des1) < 5 or len(des2) < 5:
+            return []
+        
+        # 转为 tensor
+        desc1 = torch.from_numpy(des1.astype(np.float32)).unsqueeze(0)
+        desc2 = torch.from_numpy(des2.astype(np.float32)).unsqueeze(0)
+        kpts1 = torch.from_numpy(np.array([k.pt for k in kp1], dtype=np.float32)).unsqueeze(0)
+        kpts2 = torch.from_numpy(np.array([k.pt for k in kp2], dtype=np.float32)).unsqueeze(0)
+        
+        with torch.no_grad():
+            result = _DL_MATCHER(desc1, desc2, kpts1, kpts2)
+        
+        # 解析结果
+        matches = []
+        if result is not None and len(result) >= 3:
+            match_indices = result[0]  # (N, 2) tensor
+            for idx in range(match_indices.shape[0]):
+                i, j = int(match_indices[idx, 0]), int(match_indices[idx, 1])
+                # 创建 cv2.DMatch 兼容对象
+                class _DMatch:
+                    def __init__(self, qi, ti, d):
+                        self.queryIdx = qi
+                        self.trainIdx = ti
+                        self.distance = d
+                matches.append(_DMatch(i, j, 0.0))
+        return matches
+        
+    elif method == "loftr":
+        # LoFTR: 端到端匹配（不需要特征点）
+        img1_tensor = image_to_tensor(img1_gray, keepdim=True).unsqueeze(0).float() / 255.0
+        img2_tensor = image_to_tensor(img2_gray, keepdim=True).unsqueeze(0).float() / 255.0
+        
+        with torch.no_grad():
+            corr = _LOFTR({
+                'image0': img1_tensor,
+                'image1': img2_tensor,
+            })
+        
+        matches = []
+        if 'keypoints0' in corr and 'keypoints1' in corr:
+            kpts0 = corr['keypoints0'][0].cpu().numpy()
+            kpts1 = corr['keypoints1'][0].cpu().numpy()
+            
+            class _DMatch:
+                def __init__(self, qi, ti, d):
+                    self.queryIdx = qi
+                    self.trainIdx = ti
+                    self.distance = d
+            
+            # LoFTR 的匹配是隐含的（一一对应）
+            for i in range(min(len(kpts0), len(kpts1))):
+                matches.append(_DMatch(i, i, 0.0))
+            
+            # 保存关键点用于后续处理
+            matches._loftr_kpts0 = kpts0
+            matches._loftr_kpts1 = kpts1
+        
+        return matches
+    
+    return []
 
 
 def localize_image(
