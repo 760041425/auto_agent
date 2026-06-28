@@ -18,8 +18,8 @@ from PIL import Image, ImageEnhance, ImageFilter
 
 
 TILE_PX = 512          # 每块像素
-TILE_M = 20            # 每块地面尺寸 (m)
-RES = TILE_M / TILE_PX # 分辨率 ≈ 0.039m/像素 (3.9cm)
+TILE_M = 50            # 每块地面尺寸 (m)
+RES = TILE_M / TILE_PX # 分辨率 ≈ 0.098m/像素 (9.8cm)
 
 
 def project_las_multi_view(
