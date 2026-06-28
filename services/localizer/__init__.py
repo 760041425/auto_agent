@@ -264,6 +264,10 @@ def render_projection_image(
 
 def _extract_features(image, method="sift"):
     """按指定方法提取特征"""
+    if isinstance(image, str):
+        image = cv2.imread(image)
+        if image is None:
+            return [], None
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
 
     if method == "sift":
