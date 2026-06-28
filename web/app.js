@@ -9,9 +9,8 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.classList.add('active');
       const tab = btn.dataset.tab;
       document.getElementById('tab-' + tab).classList.add('active');
-  if (tab === 'list') loadImages();
-  if (tab === 'tasks') loadTasks();
-  if (tab === 'localize') loadLocalizeImages();
+      if (tab === 'list') loadImages();
+      if (tab === 'tasks') loadTasks();
       if (tab === 'localize') loadLocalizeImages();
     });
   });
@@ -36,6 +35,7 @@ function switchTab(name) {
   document.getElementById('tab-' + name).classList.add('active');
   if (name === 'list') loadImages();
   if (name === 'tasks') loadTasks();
+  if (name === 'localize') loadLocalizeImages();
 }
 
 async function uploadFiles(files) {
