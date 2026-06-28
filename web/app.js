@@ -562,8 +562,8 @@ async function startLocalize() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         image_id: imageId,
-        feature_methods: ['sift', 'orb', 'akaze'],
-        match_methods: ['flann', 'bf'],
+        feature_methods: ['sift'],
+        match_methods: ['flann', 'bf', 'flann_lowes', 'bf_cross', 'knn_rank'],
       }),
     });
     var data = await resp.json();
@@ -606,7 +606,9 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
     results.forEach(function(r) {
       html += '<div class="localize-card" style="background:#fff;border-radius:8px;padding:1rem;margin-top:0.8rem;box-shadow:0 1px 3px rgba(0,0,0,0.1)">';
       html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">';
-      html += '<h4 style="margin:0">' + r.feature_method + ' + ' + r.match_method + '</h4>';
+      var matchNames = { 'flann': 'FLANN kd-tree', 'bf': 'BruteForce', 'flann_lowes': 'FLANN严格(0.6)', 'bf_cross': 'BF交叉验证', 'knn_rank': 'KNN Top-50' };
+      var matchName = matchNames[r.match_method] || r.match_method;
+      html += '<h4 style="margin:0">SIFT + ' + matchName + '</h4>';
       html += '<span class="status-badge ' + (r.success ? 'completed' : 'failed') + '">' + (r.success ? '✓ 成功' : '✗ 失败') + '</span>';
       html += '</div>';
 

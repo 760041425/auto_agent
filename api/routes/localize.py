@@ -20,8 +20,8 @@ router = APIRouter(prefix="/api/localize", tags=["localize"])
 
 class LocalizeRequest(BaseModel):
     image_id: int
-    feature_methods: list[str] = ["sift", "orb", "akaze"]
-    match_methods: list[str] = ["flann", "bf", "ransac"]
+    feature_methods: list[str] = ["sift"]
+    match_methods: list[str] = ["flann", "bf", "flann_lowes", "bf_cross", "knn_rank"]
 
 
 class LocalizeResult(BaseModel):

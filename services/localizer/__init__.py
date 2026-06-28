@@ -289,22 +289,69 @@ def _extract_features(image, method="sift"):
 
 
 def _match_features(des1, des2, method="flann", ratio=0.75):
-    """按指定方法匹配特征"""
+    """按指定方法匹配特征
+
+    方法:
+      flann      - FLANN kd-tree + Lowe 0.75 比率测试（默认）
+      bf         - BruteForce + Lowe 0.75 比率测试
+      flann_lowes - FLANN + 严格 Lowe 0.6 比率测试
+      bf_cross   - BruteForce + 交叉验证（双向匹配）
+      knn_rank   - FLANN + 取前 N 个最近邻（无比率测试，取 top-50）
+    """
     if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
         return []
 
-    if method == "flann":
-        index_params = dict(algorithm=1, trees=5)
-        search_params = dict(checks=50)
-        matcher = cv2.FlannBasedMatcher(index_params, search_params)
-    elif method == "bf":
-        if des1.dtype == np.uint8:
-            matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-        else:
-            matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
-    else:
-        matcher = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
+    is_binary = des1.dtype == np.uint8
 
+    if method == "flann":
+        params = (dict(algorithm=1, trees=5), dict(checks=50))
+        matcher = cv2.FlannBasedMatcher(*params)
+        use_knn, test_ratio = True, 0.75
+    elif method == "bf":
+        norm = cv2.NORM_HAMMING if is_binary else cv2.NORM_L2
+        matcher = cv2.BFMatcher(norm, crossCheck=False)
+        use_knn, test_ratio = True, 0.75
+    elif method == "flann_lowes":
+        params = (dict(algorithm=1, trees=5), dict(checks=50))
+        matcher = cv2.FlannBasedMatcher(*params)
+        use_knn, test_ratio = True, 0.6
+    elif method == "bf_cross":
+        norm = cv2.NORM_HAMMING if is_binary else cv2.NORM_L2
+        # 交叉验证（双向匹配）
+        bf12 = cv2.BFMatcher(norm, crossCheck=False)
+        bf21 = cv2.BFMatcher(norm, crossCheck=False)
+        try:
+            m12 = bf12.knnMatch(des1, des2, k=2)
+            m21 = bf21.knnMatch(des2, des1, k=2)
+        except cv2.error:
+            return []
+        # 取双向一致的匹配
+        good = []
+        for pair in m12:
+            if len(pair) == 2 and pair[0].distance < 0.75 * pair[1].distance:
+                for pair2 in m21:
+                    if len(pair2) == 2 and pair2[0].trainIdx == pair[0].queryIdx:
+                        if pair2[0].distance < 0.75 * pair2[1].distance:
+                            good.append(pair[0])
+                            break
+        return good
+    elif method == "knn_rank":
+        params = (dict(algorithm=1, trees=5), dict(checks=50))
+        matcher = cv2.FlannBasedMatcher(*params)
+        try:
+            matches = matcher.knnMatch(des1, des2, k=2)
+        except cv2.error:
+            return []
+        # 取距离最小的 top-50
+        all_m = [m for pair in matches if len(pair) > 0 for m in [pair[0]]]
+        all_m.sort(key=lambda x: x.distance)
+        return all_m[:min(50, len(all_m))]
+    else:
+        params = (dict(algorithm=1, trees=5), dict(checks=50))
+        matcher = cv2.FlannBasedMatcher(*params)
+        use_knn, test_ratio = True, 0.75
+
+    # 通用 knnMatch + Lowe 比率测试
     try:
         knn = matcher.knnMatch(des1, des2, k=2)
     except cv2.error:
@@ -314,7 +361,7 @@ def _match_features(des1, des2, method="flann", ratio=0.75):
     for pair in knn:
         if len(pair) == 2:
             m, n = pair[0], pair[1]
-            if m.distance < ratio * n.distance:
+            if m.distance < test_ratio * n.distance:
                 good.append(m)
     return good
 
