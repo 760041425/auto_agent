@@ -531,7 +531,7 @@ def localize_image(
                 continue
         else:
             # 传统方法
-            p_kp, p_des, _ = _extract_features(tile_path, "sift")
+            p_kp, p_des = _extract_features(tile_path, "sift")
             if p_des is None or len(p_des) < 4:
                 continue
             matches = _match_features(q_des, p_des, match_method)
