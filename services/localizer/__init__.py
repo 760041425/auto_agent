@@ -18,6 +18,9 @@ from collections import defaultdict
 
 import cv2
 import numpy as np
+import torch
+import kornia.feature as KF
+from kornia.utils import image_to_tensor
 from PIL import Image, ImageDraw, ImageFont
 
 from services.las_processor.colmap_reader import read_images_txt, read_points3d_txt
@@ -298,7 +301,7 @@ def _match_features(des1, des2, method="flann", ratio=0.75, img1=None, img2=None
     """
     # 深度学习方法
     if method in ("lightglue", "loftr"):
-        return _match_deep(des1, des2, method, img1, img2)
+        return _match_deep(img1, img2, method)
 
     # 传统方法
     if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
@@ -423,24 +426,26 @@ def _match_deep(img1_gray, img2_gray, method="lightglue", img1_full=None, img2_f
                 'image1': img2_tensor,
             })
         
-        matches = []
+        class _LoftrMatches(list):
+            def __init__(self):
+                super().__init__()
+                self.kpts0 = None
+                self.kpts1 = None
+        
+        matches = _LoftrMatches()
         if 'keypoints0' in corr and 'keypoints1' in corr:
             kpts0 = corr['keypoints0'][0].cpu().numpy()
             kpts1 = corr['keypoints1'][0].cpu().numpy()
+            matches.kpts0 = kpts0
+            matches.kpts1 = kpts1
             
-            class _DMatch:
-                def __init__(self, qi, ti, d):
-                    self.queryIdx = qi
-                    self.trainIdx = ti
-                    self.distance = d
-            
-            # LoFTR 的匹配是隐含的（一一对应）
             for i in range(min(len(kpts0), len(kpts1))):
+                class _DMatch:
+                    def __init__(self, qi, ti, d):
+                        self.queryIdx = qi
+                        self.trainIdx = ti
+                        self.distance = d
                 matches.append(_DMatch(i, i, 0.0))
-            
-            # 保存关键点用于后续处理
-            matches._loftr_kpts0 = kpts0
-            matches._loftr_kpts1 = kpts1
         
         return matches
     
@@ -525,8 +530,8 @@ def localize_image(
                 continue
             inlier_m = matches[:min(30, len(matches))]
             # 从深度匹配中提取点坐标
-            dl_kpts0 = getattr(matches, '_loftr_kpts0', None)
-            dl_kpts1 = getattr(matches, '_loftr_kpts1', None)
+            dl_kpts0 = getattr(matches, 'kpts0', None)
+            dl_kpts1 = getattr(matches, 'kpts1', None)
             if dl_kpts0 is None or dl_kpts1 is None:
                 continue
         else:
