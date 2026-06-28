@@ -9,8 +9,10 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.classList.add('active');
       const tab = btn.dataset.tab;
       document.getElementById('tab-' + tab).classList.add('active');
-      if (tab === 'list') loadImages();
-      if (tab === 'tasks') loadTasks();
+  if (tab === 'list') loadImages();
+  if (tab === 'tasks') loadTasks();
+  if (tab === 'localize') loadLocalizeImages();
+      if (tab === 'localize') loadLocalizeImages();
     });
   });
 
@@ -520,6 +522,119 @@ async function pollPreprocessStatus(btn, statusEl, progressWrap, progressBar) {
     btn.disabled = false;
     btn.textContent = '开始预处理';
     statusEl.textContent = '查询状态失败: ' + e.message;
+    statusEl.className = 'status error';
+  }
+}
+
+// ====== 视觉定位 ======
+
+async function loadLocalizeImages() {
+  try {
+    var resp = await fetch(API + '/images');
+    var images = await resp.json();
+    var sel = document.getElementById('localize-image-select');
+    sel.innerHTML = '<option value="">-- 选择图像 --</option>' +
+      images.map(function(img) {
+        return '<option value="' + img.id + '">' + img.original_name + '</option>';
+      }).join('');
+  } catch(e) { console.error(e); }
+}
+
+async function startLocalize() {
+  var sel = document.getElementById('localize-image-select');
+  var imageId = parseInt(sel.value);
+  if (!imageId) { alert('请先选择图像'); return; }
+
+  var btn = document.getElementById('localize-btn');
+  var statusEl = document.getElementById('localize-status');
+  var resultsEl = document.getElementById('localize-results');
+
+  btn.disabled = true;
+  btn.textContent = '定位中...';
+  statusEl.classList.remove('hidden');
+  statusEl.className = 'status loading';
+  statusEl.textContent = '启动定位...';
+  resultsEl.innerHTML = '';
+
+  try {
+    var resp = await fetch(API + '/localize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image_id: imageId,
+        feature_methods: ['sift', 'orb', 'akaze'],
+        match_methods: ['flann', 'bf'],
+      }),
+    });
+    var data = await resp.json();
+    pollLocalize(data.task_id, btn, statusEl, resultsEl);
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '开始定位';
+    statusEl.textContent = '请求失败: ' + e.message;
+    statusEl.className = 'status error';
+  }
+}
+
+async function pollLocalize(taskId, btn, statusEl, resultsEl) {
+  try {
+    var resp = await fetch(API + '/localize/' + taskId);
+    var data = await resp.json();
+
+    if (data.status === 'running') {
+      statusEl.textContent = '定位中... (' + (data.results || []).filter(function(r) { return r.success; }).length + '/6 完成)';
+      setTimeout(function() { pollLocalize(taskId, btn, statusEl, resultsEl); }, 2000);
+      return;
+    }
+
+    btn.disabled = false;
+    btn.textContent = '开始定位';
+
+    if (data.status === 'failed') {
+      statusEl.textContent = '定位失败';
+      statusEl.className = 'status error';
+      return;
+    }
+
+    statusEl.textContent = '定位完成';
+    statusEl.className = 'status success';
+
+    // 渲染结果
+    var html = '';
+    var results = data.results || [];
+
+    results.forEach(function(r) {
+      html += '<div class="localize-card" style="background:#fff;border-radius:8px;padding:1rem;margin-top:0.8rem;box-shadow:0 1px 3px rgba(0,0,0,0.1)">';
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">';
+      html += '<h4 style="margin:0">' + r.feature_method + ' + ' + r.match_method + '</h4>';
+      html += '<span class="status-badge ' + (r.success ? 'completed' : 'failed') + '">' + (r.success ? '✓ 成功' : '✗ 失败') + '</span>';
+      html += '</div>';
+
+      if (r.success) {
+        html += '<p style="font-size:0.85rem;margin:0.3rem 0">内点: ' + r.inliers + ' | 3D点数: ' + (r.total_3d_points || 0) + '</p>';
+        if (r.pose && r.pose.translation) {
+          html += '<p style="font-size:0.82rem;color:#666;font-family:monospace">位姿: [' + r.pose.translation.map(function(v) { return v.toFixed(2); }).join(', ') + ']</p>';
+        }
+        if (r.comparison_image) {
+          var imgSrc = '/projections/localize/' + r.comparison_image.split('/').pop();
+          html += '<div style="margin-top:0.5rem;text-align:center">';
+          html += '<img src="' + imgSrc + '" style="max-width:100%;max-height:400px;border-radius:4px;border:1px solid #ddd">';
+          html += '<p style="font-size:0.75rem;color:#888;margin-top:0.2rem">左: 原图 | 右: 重投影 | 彩色连线: 匹配点</p>';
+          html += '</div>';
+        }
+      } else {
+        html += '<p style="font-size:0.85rem;color:#f44336">' + (r.error || '失败') + '</p>';
+      }
+
+      html += '</div>';
+    });
+
+    resultsEl.innerHTML = html;
+
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '开始定位';
+    statusEl.textContent = '查询失败: ' + e.message;
     statusEl.className = 'status error';
   }
 }

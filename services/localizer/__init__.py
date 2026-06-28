@@ -267,6 +267,58 @@ def render_projection_image(
     return output_path, coord_map
 
 
+def _extract_features(image, method="sift"):
+    """按指定方法提取特征"""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+
+    if method == "sift":
+        detector = cv2.SIFT_create(nfeatures=3000)
+        return detector.detectAndCompute(gray, None)
+    elif method == "orb":
+        detector = cv2.ORB_create(nfeatures=3000, scaleFactor=1.2, nlevels=8)
+        kp, des = detector.detectAndCompute(gray, None)
+        if des is not None:
+            des = des.astype(np.uint8)
+        return kp, des
+    elif method == "akaze":
+        detector = cv2.AKAZE_create()
+        return detector.detectAndCompute(gray, None)
+    else:
+        detector = cv2.SIFT_create(nfeatures=3000)
+        return detector.detectAndCompute(gray, None)
+
+
+def _match_features(des1, des2, method="flann", ratio=0.75):
+    """按指定方法匹配特征"""
+    if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
+        return []
+
+    if method == "flann":
+        index_params = dict(algorithm=1, trees=5)
+        search_params = dict(checks=50)
+        matcher = cv2.FlannBasedMatcher(index_params, search_params)
+    elif method == "bf":
+        if des1.dtype == np.uint8:
+            matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+        else:
+            matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=False)
+    else:
+        matcher = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
+
+    try:
+        knn = matcher.knnMatch(des1, des2, k=2)
+    except cv2.error:
+        return []
+
+    good = []
+    for pair in knn:
+        if len(pair) == 2:
+            m, n = pair[0], pair[1]
+            if m.distance < ratio * n.distance:
+                good.append(m)
+    return good
+
+
 def localize_image(
     query_image_path: str,
     output_dir: str = "projections/localize",
@@ -277,11 +329,12 @@ def localize_image(
     """
     端到端视觉定位主函数。
 
-    特征方法: sift, superpoint
-    匹配方法: flann, ransac
+    特征方法: sift, orb, akaze
+    匹配方法: flann, bf
     """
+    tag = f"{feature_method}_{match_method}"
     log(f"{'='*60}")
-    log(f"🚀 视觉定位: {os.path.basename(query_image_path)}")
+    log(f"🚀 视觉定位 [{tag}]: {os.path.basename(query_image_path)}")
     log(f"   特征={feature_method}, 匹配={match_method}, 迭代={max_iterations}")
 
     out = Path(output_dir)
@@ -293,170 +346,189 @@ def localize_image(
     # 2. 读取查询图像
     query_img = cv2.imread(query_image_path)
     if query_img is None:
-        return {"success": False, "error": "Cannot read query image"}
+        return {"success": False, "error": "Cannot read query image", "tag": tag}
     q_h, q_w = query_img.shape[:2]
-
     camera_matrix = _get_camera_matrix(q_w, q_h)
     log(f"📷 查询图像: {q_w}x{q_h}, 内参矩阵已估算")
 
     # 3. 提取查询图像特征
-    sift = cv2.SIFT_create(nfeatures=3000)
-    q_gray = cv2.cvtColor(query_img, cv2.COLOR_BGR2GRAY)
-    q_kp, q_des = sift.detectAndCompute(q_gray, None)
-    log(f"🔍 SIFT特征: {len(q_kp) if q_kp is not None else 0} 个")
-
+    q_kp, q_des = _extract_features(query_img, feature_method)
     if q_des is None or len(q_des) < 10:
-        return {"success": False, "error": "Too few features"}
+        return {"success": False, "error": f"Too few {feature_method} features", "tag": tag}
+    log(f"🔍 {feature_method}特征: {len(q_kp)} 个")
 
-    # 4. 图像检索 + 3D-2D匹配 → PnP
+    # 4. 与 COLMAP 图像做 3D-2D 匹配
     log("🔗 3D-2D匹配中...")
-    pts_3d, pts_2d = _build_3d_point_descriptors(
-        q_kp, q_des, known_images, known_points, top_k_images=100
-    )
+    pts_3d = []
+    pts_2d = []
+    used_3d = set()
+    best_inlier_count = 0
+    best_rvec, best_tvec = None, None
+    best_pts_3d, best_pts_2d = None, None
+    best_inliers_idx = None
 
-    log(f"   候选匹配: {len(pts_3d)} 个3D-2D点对")
+    # 采样 COLMAP 图像
+    sample_imgs = known_images[:200]
 
-    if len(pts_3d) < 4:
-        return {"success": False, "error": f"Too few 3D-2D matches ({len(pts_3d)})"}
+    for img_idx, img in enumerate(sample_imgs):
+        img_path = os.path.join("las", img.name)
+        if not os.path.exists(img_path):
+            continue
 
-    # 5. PnP 位姿估计
-    rvec, tvec, inliers = _solve_pnp(pts_3d, pts_2d, camera_matrix)
-    if rvec is None:
+        img_gray = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+        if img_gray is None:
+            continue
+
+        img_kp, img_des = _extract_features(img_gray, feature_method)
+        if img_des is None or len(img_des) < 10:
+            continue
+
+        # 匹配
+        matches = _match_features(q_des, img_des, match_method)
+        if len(matches) < 4:
+            continue
+
+        # 收集 3D-2D 点对
+        local_3d = []
+        local_2d = []
+        for m in matches:
+            q_pt = q_kp[m.queryIdx].pt
+            train_idx = m.trainIdx
+            if train_idx >= len(img_kp):
+                continue
+
+            # 找该 COLMAP 图像在此点的 3D 观测
+            for pt2d_x, pt2d_y, pt3d_id in img.points2d:
+                if pt3d_id <= 0 or pt3d_id in used_3d:
+                    continue
+                cd = np.sqrt((img_kp[train_idx].pt[0] - pt2d_x)**2 +
+                             (img_kp[train_idx].pt[1] - pt2d_y)**2)
+                if cd < 8.0 and pt3d_id in known_points:
+                    p3d = known_points[pt3d_id]
+                    local_3d.append([p3d.x, p3d.y, p3d.z])
+                    local_2d.append([q_pt[0], q_pt[1]])
+                    used_3d.add(pt3d_id)
+                    break
+
+        if len(local_3d) < 4:
+            continue
+
+        # PnP
+        rvec_i, tvec_i, inliers_i = _solve_pnp(
+            np.array(local_3d, dtype=np.float64),
+            np.array(local_2d, dtype=np.float64),
+            camera_matrix
+        )
+        if rvec_i is not None:
+            ic = len(inliers_i) if inliers_i is not None else 0
+            if ic > best_inlier_count:
+                best_inlier_count = ic
+                best_rvec, best_tvec = rvec_i, tvec_i
+                best_pts_3d, best_pts_2d = local_3d, local_2d
+                best_inliers_idx = inliers_i
+                log(f"  → COLMAP图像#{img_idx}: {ic}内点 (累积{len(used_3d)}个3D点)")
+
+    if best_rvec is None:
         log("❌ PnP 位姿估计失败")
-        return {"success": False, "error": "PnP failed"}
+        return {"success": False, "error": "PnP failed for all images", "tag": tag}
 
-    inlier_count = len(inliers) if inliers is not None else 0
-    log(f"✅ PnP成功: 内点={inlier_count}/{len(pts_3d)}")
+    log(f"✅ PnP成功: 内点={best_inlier_count}")
 
-    # 6. 多轮迭代优化
-    best_rvec, best_tvec = rvec, tvec
-    best_inliers = inlier_count
+    # 5. 迭代优化
+    rvec, tvec = best_rvec, best_tvec
+    inlier_count = best_inlier_count
 
     for iteration in range(1, max_iterations):
         log(f"🔄 迭代 {iteration+1}/{max_iterations}...")
-        
-        # 用当前位姿重新投影，找到更多3D-2D匹配
         reprojected, valid_mask = reproject_points(
-            best_rvec, best_tvec, camera_matrix,
+            rvec, tvec, camera_matrix,
             _POINT_INDEX["pts"], q_w, q_h
         )
-        
-        # 在重投影位置附近搜索匹配
-        new_pts_3d = []
-        new_pts_2d = []
-        
+        new_pts_3d, new_pts_2d = [], []
         for i, (px, py) in enumerate(reprojected):
             if not valid_mask[i]:
                 continue
-            # 在查询图像上重投影位置附近提取特征匹配
             px_i, py_i = int(round(px)), int(round(py))
-            x_min, x_max = max(0, px_i-10), min(q_w-1, px_i+10)
-            y_min, y_max = max(0, py_i-10), min(q_h-1, py_i+10)
-            
-            # 找附近的关键点
             for kp in q_kp:
-                if x_min <= kp.pt[0] <= x_max and y_min <= kp.pt[1] <= y_max:
-                    pid = _POINT_INDEX["ids"][i]
-                    p3d = known_points.get(int(pid))
-                    if p3d:
+                if abs(kp.pt[0]-px_i) < 10 and abs(kp.pt[1]-py_i) < 10:
+                    pid = int(_POINT_INDEX["ids"][i])
+                    if pid in known_points:
+                        p3d = known_points[pid]
                         new_pts_3d.append([p3d.x, p3d.y, p3d.z])
                         new_pts_2d.append([kp.pt[0], kp.pt[1]])
-                        break
-
+                    break
         if len(new_pts_3d) >= 4:
-            new_rvec, new_tvec, new_inliers = _solve_pnp(
-                np.array(new_pts_3d), np.array(new_pts_2d), camera_matrix
-            )
-            if new_rvec is not None:
-                new_inlier_count = len(new_inliers) if new_inliers is not None else 0
-                if new_inlier_count > best_inliers:
-                    best_rvec, best_tvec = new_rvec, new_tvec
-                    best_inliers = new_inlier_count
-                    log(f"  → 优化成功: 内点={new_inlier_count}")
-                else:
-                    log(f"  → 未提升: {new_inlier_count} ≤ {best_inliers}")
+            nr, nt, ni = _solve_pnp(np.array(new_pts_3d), np.array(new_pts_2d), camera_matrix)
+            if nr is not None:
+                nic = len(ni) if ni is not None else 0
+                if nic > inlier_count:
+                    rvec, tvec = nr, nt
+                    inlier_count = nic
+                    log(f"  → 优化: {nic}内点")
 
-    # 7. 生成重投影图像
+    # 6. 生成重投影
     log("🖼️ 生成重投影图像...")
-    
     all_pts_3d = np.array([(p.x, p.y, p.z) for p in known_points.values()], dtype=np.float64)
     all_colors = np.array([(p.r, p.g, p.b) for p in known_points.values()], dtype=np.uint8)
 
-    proj_path = str(out / "reprojection.png")
+    proj_path = str(out / f"reprojection_{tag}.png")
     proj_path, coord_map = render_projection_image(
-        all_pts_3d, all_colors,
-        best_rvec, best_tvec, camera_matrix,
-        q_w, q_h, proj_path
+        all_pts_3d, all_colors, rvec, tvec, camera_matrix, q_w, q_h, proj_path
     )
 
-    # 8. 保存坐标映射
-    coord_path = str(out / "reprojection_coord.json")
+    coord_path = str(out / f"reprojection_coord_{tag}.json")
     with open(coord_path, "w") as f:
-        json.dump({
-            "width": q_w, "height": q_h,
-            "pixels": coord_map,
-        }, f)
+        json.dump({"width": q_w, "height": q_h, "pixels": coord_map}, f)
 
-    # 9. 生成双图对比（原图 + 投影图）
+    # 7. 双图对比 + 连线
+    comparison_path = None
     if proj_path:
         proj_img = cv2.imread(proj_path)
         if proj_img is not None:
-            # 调整到相同高度
             h = max(q_h, proj_img.shape[0])
             w = q_w + proj_img.shape[1]
             canvas = np.zeros((h, w, 3), dtype=np.uint8)
             canvas[:q_h, :q_w] = query_img
-            canvas[:proj_img.shape[0], q_w:q_w+proj_img.shape[1]] = proj_img
+            canvas[:proj_img.shape[0], q_w:] = proj_img
 
-            # 标注匹配点连线
-            colors_map = [
-                (255, 0, 0), (0, 255, 0), (0, 0, 255),
-                (255, 255, 0), (255, 0, 255), (0, 255, 255),
-            ]
-            for i in range(min(best_inliers, 5)):
-                if inliers is not None and i < len(inliers):
-                    idx = inliers[i][0]
-                    if idx < len(pts_2d):
-                        x1, y1 = int(pts_2d[idx, 0]), int(pts_2d[idx, 1])
-                        # 投影图上对应位置
-                        p3d = pts_3d[idx]
-                        projected_pts, _ = cv2.projectPoints(
-                            p3d.reshape(1, 1, 3), best_rvec, best_tvec,
-                            camera_matrix, None
-                        )
-                        x2, y2 = int(projected_pts[0, 0, 0]) + q_w, int(projected_pts[0, 0, 1])
-                        color = colors_map[i % len(colors_map)]
-                        cv2.circle(canvas, (x1, y1), 5, color, -1)
-                        cv2.circle(canvas, (x2, y2), 5, color, -1)
-                        cv2.line(canvas, (x1, y1), (x2, y2), color, 2)
+            colors = [(255,0,0),(0,255,0),(0,0,255),(255,255,0),(255,0,255)]
+            if best_inliers_idx is not None and best_pts_2d is not None:
+                for i in range(min(5, len(best_inliers_idx))):
+                    idx = best_inliers_idx[i][0]
+                    if idx < len(best_pts_2d):
+                        x1, y1 = int(best_pts_2d[idx][0]), int(best_pts_2d[idx][1])
+                        p3d = np.array([best_pts_3d[idx]], dtype=np.float64)
+                        pp, _ = cv2.projectPoints(p3d.reshape(1,1,3), rvec, tvec, camera_matrix, None)
+                        x2, y2 = int(pp[0,0,0]) + q_w, int(pp[0,0,1])
+                        c = colors[i % len(colors)]
+                        cv2.circle(canvas, (x1, y1), 6, c, -1)
+                        cv2.circle(canvas, (x2, y2), 6, c, -1)
+                        cv2.line(canvas, (x1, y1), (x2, y2), c, 2)
 
-            comparison_path = str(out / "comparison.png")
+            comparison_path = str(out / f"comparison_{tag}.png")
             cv2.imwrite(comparison_path, canvas)
-            log(f"✅ 双图对比已保存: {comparison_path}")
+            log(f"✅ 双图对比: {comparison_path}")
 
-    # 10. 将 rvec, tvec 转为四元数 + 平移
-    rmat, _ = cv2.Rodrigues(best_rvec)
+    # 8. 位姿
+    rmat, _ = cv2.Rodrigues(rvec)
     quat = _rotation_matrix_to_quaternion(rmat)
-    translation = best_tvec.flatten().tolist()
 
     result = {
         "success": True,
-        "pose": {
-            "quaternion": [float(q) for q in quat],
-            "translation": translation,
-            "rotation_matrix": rmat.tolist(),
-        },
-        "inliers": int(best_inliers),
-        "total_matches": len(pts_3d),
-        "reprojection_image": proj_path,
-        "comparison_image": comparison_path if 'comparison_path' in dir() else None,
-        "coord_map": coord_path,
+        "tag": tag,
         "feature_method": feature_method,
         "match_method": match_method,
-        "iterations": max_iterations,
+        "pose": {
+            "quaternion": [float(q) for q in quat],
+            "translation": tvec.flatten().tolist(),
+        },
+        "inliers": int(inlier_count),
+        "total_3d_points": len(used_3d),
+        "reprojection_image": proj_path,
+        "comparison_image": comparison_path,
+        "coord_map": coord_path,
     }
 
-    log(f"✅ 定位完成: 内点={best_inliers}, 位姿=[{translation[0]:.2f}, {translation[1]:.2f}, {translation[2]:.2f}]")
+    log(f"✅ [{tag}] 完成: 内点={inlier_count}")
     log(f"{'='*60}")
-
     return result

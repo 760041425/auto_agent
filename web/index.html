@@ -14,6 +14,7 @@
       <button class="tab active" data-tab="upload">上传图像</button>
       <button class="tab" data-tab="list">图像列表</button>
       <button class="tab" data-tab="tasks">任务记录</button>
+      <button class="tab" data-tab="localize">视觉定位</button>
     </nav>
   </header>
 
@@ -53,6 +54,21 @@
 
     <section id="tab-tasks" class="tab-content">
       <div id="task-list" class="task-list"></div>
+    </section>
+
+    <section id="tab-localize" class="tab-content">
+      <h3 style="margin-bottom:0.5rem">端到端视觉定位</h3>
+      <p style="font-size:0.85rem;color:#888;margin-bottom:1rem">
+        使用 COLMAP 数据进行 3D-2D 匹配 + PnP 位姿估计，多种特征/匹配方案对比
+      </p>
+      <div style="display:flex;gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap">
+        <select id="localize-image-select" style="flex:1;min-width:200px;padding:0.4rem;border:1px solid #ccc;border-radius:4px">
+          <option value="">-- 选择图像 --</option>
+        </select>
+        <button id="localize-btn" class="btn-primary" onclick="startLocalize()">开始定位</button>
+      </div>
+      <div id="localize-status" class="status hidden"></div>
+      <div id="localize-results"></div>
     </section>
 
     <section id="tab-detail" class="tab-content">
