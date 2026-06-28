@@ -35,7 +35,7 @@ def project_las_multi_view(
     total = len(pts.x)
 
     # 采样（同时读 RGB）
-    step = max(1, total // 10_000_000)
+    step = max(1, total // 3_000_000)
     x = np.array(pts.x[::step], dtype=np.float64)
     y = np.array(pts.y[::step], dtype=np.float64)
     z = np.array(pts.z[::step], dtype=np.float64)

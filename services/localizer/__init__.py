@@ -434,18 +434,21 @@ def _match_deep(img1_gray, img2_gray, method="lightglue", img1_full=None, img2_f
         
         matches = _LoftrMatches()
         if 'keypoints0' in corr and 'keypoints1' in corr:
-            kpts0 = corr['keypoints0'][0].cpu().numpy()
-            kpts1 = corr['keypoints1'][0].cpu().numpy()
-            matches.kpts0 = kpts0
-            matches.kpts1 = kpts1
-            
-            for i in range(min(len(kpts0), len(kpts1))):
-                class _DMatch:
-                    def __init__(self, qi, ti, d):
-                        self.queryIdx = qi
-                        self.trainIdx = ti
-                        self.distance = d
-                matches.append(_DMatch(i, i, 0.0))
+            kpts0_all = corr['keypoints0']
+            kpts1_all = corr['keypoints1']
+            if len(kpts0_all) > 0 and len(kpts1_all) > 0:
+                kpts0 = kpts0_all[0].cpu().numpy()
+                kpts1 = kpts1_all[0].cpu().numpy()
+                matches.kpts0 = kpts0
+                matches.kpts1 = kpts1
+                
+                for i in range(min(len(kpts0), len(kpts1))):
+                    class _DMatch:
+                        def __init__(self, qi, ti, d):
+                            self.queryIdx = qi
+                            self.trainIdx = ti
+                            self.distance = d
+                    matches.append(_DMatch(i, i, 0.0))
         
         return matches
     
@@ -476,16 +479,31 @@ def localize_image(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # 1. 读取查询图像
+    # 1. 读取查询图像并下采样到 512x512
     query_img = cv2.imread(query_image_path)
     if query_img is None:
         return {"success": False, "error": "Cannot read query image", "tag": tag}
-    q_h, q_w = query_img.shape[:2]
-    camera_matrix = _get_camera_matrix(q_w, q_h, fov_deg=75)
-    log(f"📷 查询图像: {q_w}x{q_h}, 内参矩阵已估算")
+    q_h_orig, q_w_orig = query_img.shape[:2]
+    
+    # 下采样到 512x512（保持宽高比）
+    scale = 512 / max(q_h_orig, q_w_orig)
+    if scale < 1.0:
+        q_small = cv2.resize(query_img, (int(q_w_orig * scale), int(q_h_orig * scale)))
+    else:
+        q_small = query_img
+    q_h, q_w = q_small.shape[:2]
+    
+    # 计算原始图像的内参（下采样后内参要缩放）
+    camera_matrix_orig = _get_camera_matrix(q_w_orig, q_h_orig, fov_deg=75)
+    camera_matrix = camera_matrix_orig.copy()
+    camera_matrix[0,0] *= scale  # fx
+    camera_matrix[1,1] *= scale  # fy
+    camera_matrix[0,2] *= scale  # cx
+    camera_matrix[1,2] *= scale  # cy
+    log(f"📷 查询图像: {q_w_orig}x{q_h_orig} → {q_w}x{q_h}, 缩放={scale:.3f}")
 
-    # 2. 提取查询图像特征
-    q_kp, q_des = _extract_features(query_img, feature_method)
+    # 2. 提取查询图像特征（使用下采样后的图像）
+    q_kp, q_des = _extract_features(q_small, feature_method)
     if q_des is None or len(q_des) < 10:
         return {"success": False, "error": f"Too few {feature_method} features", "tag": tag}
     log(f"🔍 {feature_method}特征: {len(q_kp)} 个")
