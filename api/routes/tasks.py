@@ -80,7 +80,7 @@ def create_comparison_task(req: TaskCreate, db: Session = Depends(get_db)):
 
     threading.Thread(
         target=run_comparison_task,
-        args=(task.id, req.image_id, "sqlite:///./projections/app.db"),
+        args=(task.id, req.image_id, f"sqlite:///{os.path.abspath('projections/app.db')}"),
         daemon=True,
     ).start()
 

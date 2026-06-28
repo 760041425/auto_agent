@@ -137,7 +137,7 @@ def create_localize_task(req: LocalizeRequest, db: Session = Depends(get_db)):
 
     threading.Thread(
         target=run_localize_task,
-        args=(task.id, req.image_id, req.feature_methods, req.match_methods, "sqlite:///./projections/app.db"),
+        args=(task.id, req.image_id, req.feature_methods, req.match_methods, f"sqlite:///{os.path.abspath('projections/app.db')}"),
         daemon=True,
     ).start()
 
