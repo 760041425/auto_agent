@@ -145,119 +145,83 @@ def _try_ransac(q_pts, p_pts, total_matches=0, task_id=None):
     return best_H, best_mask
 
 
-def match_query_to_projection(
-    query_image_path: str,
-    projection_image_path: str = "projections/las_projection.jpg",
-    coord_map_path: str = "projections/coord_map.json",
-    verify: bool = True,
-    task_id: int | None = None,
-) -> dict:
-    log_match_step(f"{'='*60}", task_id)
-    log_match_step(f"🚀 开始匹配: 查询图像={os.path.basename(query_image_path)}", task_id)
+def _match_on_tile(q_kp, q_des, q_w, q_h, tile_info, task_id):
+    """在单个 tile 上执行匹配"""
+    tile_path = tile_info["image_path"]
+    coord_path = tile_info["coord_map_path"]
 
-    q_kp, q_des, q_shape = _extract_sift(query_image_path, task_id)
-    p_kp, p_des, p_shape = _extract_sift(projection_image_path, task_id)
+    p_kp, p_des, p_shape = _extract_sift(tile_path, task_id)
+    if p_des is None or len(p_des) < 4:
+        return None
 
-    if q_des is None or p_des is None:
-        log_match_step(f"❌ 特征提取失败: q={q_des is not None}, p={p_des is not None}", task_id)
-        return {"matched": False, "regions": [], "message": "Feature extraction failed"}
-    if q_shape:
-        q_h, q_w = q_shape
-    else:
-        q_h, q_w = 0, 0
-    log_match_step(f"📐 查询图像尺寸: {q_w}x{q_h}, 投影图尺寸: {p_shape}", task_id)
-
-    # FLANN 匹配
     good = _match_with_flann(q_des, p_des, task_id=task_id)
-    if len(good) < 6:
-        log_match_step(f"❌ 初始匹配不足: {len(good)} < 6", task_id)
-        return {"matched": False, "regions": [], "message": f"Too few initial matches ({len(good)})"}
+    if len(good) < 4:
+        return None
 
-    # RANSAC 几何验证
     q_pts = np.float32([q_kp[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
     p_pts = np.float32([p_kp[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
     H, mask = _try_ransac(q_pts, p_pts, len(good), task_id)
 
     if H is None or mask is None:
-        log_match_step(f"⚠️ RANSAC全部失败, 改用距离排序取top-20", task_id)
-        inlier_matches = sorted(good, key=lambda m: m.distance)[:min(20, len(good))]
+        inlier_matches = sorted(good, key=lambda m: m.distance)[:min(15, len(good))]
     else:
         inlier_mask = mask.ravel().tolist()
-        inlier_matches = [m for m, is_inlier in zip(good, inlier_mask) if is_inlier]
-        log_match_step(f"📊 RANSAC内点: {len(inlier_matches)}/{len(good)}", task_id)
+        inlier_matches = [m for m, is_in in zip(good, inlier_mask) if is_in]
         if len(inlier_matches) < 3:
-            log_match_step(f"⚠️ RANSAC内点={len(inlier_matches)} < 3, 改用距离排序取top-15", task_id)
-            inlier_matches = sorted(good, key=lambda m: m.distance)[:min(15, len(good))]
+            inlier_matches = sorted(good, key=lambda m: m.distance)[:min(12, len(good))]
 
     if len(inlier_matches) < 3:
-        log_match_step(f"❌ 最终有效匹配不足: {len(inlier_matches)}", task_id)
-        return {"matched": False, "regions": [], "message": f"Too few valid matches ({len(inlier_matches)})"}
-    log_match_step(f"✅ 有效匹配: {len(inlier_matches)}个", task_id)
+        return None
 
-    coord_map = _load_coord_map(coord_map_path)
-    log_match_step(f"🗺️ 坐标映射表: {len(coord_map)}个像素", task_id)
+    coord_map = _load_coord_map(coord_path)
+    tile_w, tile_h = tile_info["width"], tile_info["height"]
 
-    # 将匹配点转为 3D 坐标
     matched_3d = []
-    used_proj_pixels = set()
-    used_query_pixels = set()
-    skipped_out_of_bounds = 0
-    skipped_dup = 0
-    skipped_no_coord = 0
-
+    used_pp = set()
+    used_qp = set()
     for m in inlier_matches:
         qx = int(round(q_kp[m.queryIdx].pt[0]))
         qy = int(round(q_kp[m.queryIdx].pt[1]))
-        # 边界检查
         if qx < 0 or qx >= q_w or qy < 0 or qy >= q_h:
-            skipped_out_of_bounds += 1
             continue
-        # 查询像素去重
-        if (qx, qy) in used_query_pixels:
-            skipped_dup += 1
+        if (qx, qy) in used_qp:
             continue
         px = int(round(p_kp[m.trainIdx].pt[0]))
         py = int(round(p_kp[m.trainIdx].pt[1]))
-        if (px, py) in used_proj_pixels:
-            skipped_dup += 1
+        if (px, py) in used_pp:
             continue
-        # 查找 3D 坐标（允许小范围邻域搜索）
         found = False
         for dx in range(-2, 3):
             for dy in range(-2, 3):
-                coord = coord_map.get((px + dx, py + dy))
-                if coord:
+                c = coord_map.get((px + dx, py + dy))
+                if c:
                     matched_3d.append({
                         "query_pt": (float(qx), float(qy)),
                         "proj_pt": (int(px), int(py)),
-                        "point3d": coord,
+                        "point3d": c[:3],
                         "distance": float(m.distance),
                     })
-                    used_proj_pixels.add((px, py))
-                    used_query_pixels.add((qx, qy))
+                    used_pp.add((px, py))
+                    used_qp.add((qx, qy))
                     found = True
                     break
             if found:
                 break
-        if not found:
-            skipped_no_coord += 1
-
-    log_match_step(f"📊 坐标映射: 成功={len(matched_3d)}, 出界={skipped_out_of_bounds}, 去重={skipped_dup}, 无坐标={skipped_no_coord}", task_id)
 
     if len(matched_3d) < 3:
-        log_match_step(f"❌ 3D映射点不足: {len(matched_3d)}", task_id)
-        return {"matched": False, "regions": [], "message": f"Too few 3D-mapped matches ({len(matched_3d)})"}
+        return None
 
-    coords = np.array([m["point3d"] for m in matched_3d], dtype=np.float64)
+    return matched_3d
+
+
+def _build_result(matched_3d, coords, q_w, q_h, task_id, verify):
+    """从匹配点构建返回结果"""
     center = np.median(coords, axis=0)
     xs, ys, zs = coords[:, 0], coords[:, 1], coords[:, 2]
     log_match_step(f"📍 3D坐标范围: X=[{xs.min():.2f},{xs.max():.2f}] Y=[{ys.min():.2f},{ys.max():.2f}] Z=[{zs.min():.2f},{zs.max():.2f}]", task_id)
     log_match_step(f"📍 3D中心: ({center[0]:.2f}, {center[1]:.2f}, {center[2]:.2f})", task_id)
 
-    # 按距离排序
     matched_3d.sort(key=lambda m: m["distance"])
-
-    # 输出每个匹配点的详情
     for i, p in enumerate(matched_3d):
         log_match_step(f"  🔵 点#{i+1}: 像素({p['query_pt'][0]:.0f},{p['query_pt'][1]:.0f}) "
                        f"→ 投影({p['proj_pt'][0]},{p['proj_pt'][1]}) "
@@ -271,13 +235,9 @@ def match_query_to_projection(
             log_match_step(f"✅ LAS验证: {verification['total_verified']}/{verification['total_checked']} "
                           f"通过({verification['verification_rate']*100:.0f}%), "
                           f"平均偏差={verification['mean_distance_m']:.2f}m", task_id)
-        elif verification and "error" in verification:
-            log_match_step(f"⚠️ LAS验证失败: {verification['error']}", task_id)
 
-    # 选取展示点：按网格均匀分布在图像上
     display_points = []
-    grid_cols = 3
-    grid_rows = 2
+    grid_cols, grid_rows = 3, 2
     grid_w = q_w / grid_cols
     grid_h = q_h / grid_rows
     matched_by_grid = {}
@@ -287,13 +247,10 @@ def match_query_to_projection(
         key = gy * grid_cols + gx
         if key not in matched_by_grid or p["distance"] < matched_by_grid[key]["distance"]:
             matched_by_grid[key] = p
-
     for grid_idx in sorted(matched_by_grid.keys()):
         if len(display_points) >= 5:
             break
         display_points.append(matched_by_grid[grid_idx])
-
-    # 补足到5个
     if len(display_points) < 5:
         existing = {(p["query_pt"][0] // 100, p["query_pt"][1] // 100) for p in display_points}
         for p in matched_3d:
@@ -304,8 +261,6 @@ def match_query_to_projection(
                 display_points.append(p)
                 existing.add(key)
 
-    log_match_step(f"📌 展示点: {len(display_points)}个 (网格{grid_cols}x{grid_rows})", task_id)
-
     matched_points = [{
         "query_pt": [float(p["query_pt"][0]), float(p["query_pt"][1])],
         "proj_pt": p["proj_pt"],
@@ -314,11 +269,9 @@ def match_query_to_projection(
     } for p in display_points]
 
     regions = [{
-        "name": "las_projection_match",
         "num_matches": len(matched_3d),
         "num_high_conf": len(matched_3d),
         "center_3d": [float(coords.mean(axis=0)[0]), float(coords.mean(axis=0)[1]), float(coords.mean(axis=0)[2])],
-        "avg_distance": float(np.mean([m["distance"] for m in matched_3d])),
     }]
 
     log_match_step(f"✅ 匹配完成: 内点={len(matched_3d)}, 展示={len(matched_points)}", task_id)
@@ -339,6 +292,51 @@ def match_query_to_projection(
             for p in matched_3d
         ],
     }
+
+
+def match_query_to_projection(
+    query_image_path: str,
+    projection_image_path: str = "projections/las_projection.jpg",
+    coord_map_path: str = "projections/coord_map.json",
+    verify: bool = True,
+    task_id: int | None = None,
+) -> dict:
+    log_match_step(f"{'='*60}", task_id)
+    log_match_step(f"🚀 开始匹配: 查询图像={os.path.basename(query_image_path)}", task_id)
+
+    q_kp, q_des, q_shape = _extract_sift(query_image_path, task_id)
+    if q_des is None:
+        return {"matched": False, "regions": [], "message": "Query image feature extraction failed"}
+    q_h, q_w = q_shape if q_shape else (0, 0)
+    log_match_step(f"📐 查询图像尺寸: {q_w}x{q_h}", task_id)
+
+    # 加载 tile 索引
+    tile_index_path = Path("projections/tile_index.json")
+    if not tile_index_path.exists():
+        log_match_step(f"❌ tile_index.json 不存在，请先运行预处理", task_id)
+        return {"matched": False, "regions": [], "message": "tile_index.json not found, run preprocess first"}
+
+    with open(tile_index_path) as f:
+        tiles = json.load(f)
+    log_match_step(f"🗺️ 加载 {len(tiles)} 个 tile", task_id)
+
+    best_result = None
+    best_count = 0
+
+    for i, tile in enumerate(tiles):
+        log_match_step(f"🔍 Tile {i+1}/{len(tiles)}: {Path(tile['image_path']).name}", task_id)
+        result = _match_on_tile(q_kp, q_des, q_w, q_h, tile, task_id)
+        if result is not None and len(result) > best_count:
+            best_count = len(result)
+            best_result = result
+            log_match_step(f"  → 当前最佳: {best_count} 内点", task_id)
+
+    if best_result is None or best_count < 3:
+        log_match_step(f"❌ 所有 tile 均未匹配成功", task_id)
+        return {"matched": False, "regions": [], "message": "No matching tile found"}
+
+    coords = np.array([m["point3d"] for m in best_result], dtype=np.float64)
+    return _build_result(best_result, coords, q_w, q_h, task_id, verify)
 
 
 def compute_image_area_3d(
