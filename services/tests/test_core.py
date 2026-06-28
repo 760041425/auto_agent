@@ -23,8 +23,10 @@ def test_read_points3d_txt():
 
 
 def test_las_projection():
+    las_files = [f for f in sorted(Path("las").glob("*.las")) if "subsample" not in f.name]
+    las_path = str(las_files[0]) if las_files else "las/default_2026-05-28-112428.las"
     result = project_las_multi_view(
-        "las/subsample_20260430181508.las",
+        las_path,
         "projections/test_proj",
     )
     assert len(result) > 0

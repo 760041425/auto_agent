@@ -81,7 +81,7 @@ def _load_coord_map(path="projections/coord_map.json"):
     return coord_map
 
 
-def _verify_with_las_points(matched_coords, las_path="las/subsample_20260430181508.las",
+def _verify_with_las_points(matched_coords, las_path="las/default_2026-05-28-112428.las",
                              sample_size=5000, tol=3.0):
     try:
         from laspy import open as las_open

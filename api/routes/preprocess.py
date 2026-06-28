@@ -33,6 +33,8 @@ def _run_preprocess():
         _preprocess_status["progress"] = 5
         las_dir = Path("las")
         las_files = sorted(las_dir.glob("*.las"))
+        # 排除旧的 subsample 文件
+        las_files = [f for f in las_files if "subsample" not in f.name]
         if not las_files:
             _preprocess_status["error"] = "未找到 LAS 文件"
             _preprocess_status["running"] = False
