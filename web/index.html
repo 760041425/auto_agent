@@ -59,13 +59,17 @@
     <section id="tab-localize" class="tab-content">
       <h3 style="margin-bottom:0.5rem">端到端视觉定位</h3>
       <p style="font-size:0.85rem;color:#888;margin-bottom:1rem">
-        使用 COLMAP 数据进行 3D-2D 匹配 + PnP 位姿估计，多种特征/匹配方案对比
+        使用 COLMAP 数据进行 3D-2D 匹配 + PnP 位姿估计，多种匹配方案对比
       </p>
-      <div style="display:flex;gap:0.5rem;margin-bottom:1rem;flex-wrap:wrap">
-        <select id="localize-image-select" style="flex:1;min-width:200px;padding:0.4rem;border:1px solid #ccc;border-radius:4px">
-          <option value="">-- 选择图像 --</option>
-        </select>
-        <button id="localize-btn" class="btn-primary" onclick="startLocalize()">开始定位</button>
+      <div id="localize-image-grid" class="image-grid" style="margin-bottom:1rem"></div>
+      <div id="localize-selected" style="display:none;margin-bottom:0.5rem">
+        <div style="display:flex;align-items:center;gap:0.5rem;padding:0.5rem;background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+          <img id="localize-selected-thumb" style="width:60px;height:60px;object-fit:cover;border-radius:4px">
+          <span id="localize-selected-name" style="font-size:0.9rem"></span>
+          <div style="margin-left:auto">
+            <button id="localize-btn" class="btn-primary" onclick="startLocalize()">开始定位</button>
+          </div>
+        </div>
       </div>
       <div id="localize-status" class="status hidden"></div>
       <div id="localize-results"></div>

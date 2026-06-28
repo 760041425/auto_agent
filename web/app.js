@@ -528,21 +528,34 @@ async function pollPreprocessStatus(btn, statusEl, progressWrap, progressBar) {
 
 // ====== 视觉定位 ======
 
+var localizeSelectedId = null;
+
 async function loadLocalizeImages() {
   try {
     var resp = await fetch(API + '/images');
     var images = await resp.json();
-    var sel = document.getElementById('localize-image-select');
-    sel.innerHTML = '<option value="">-- 选择图像 --</option>' +
-      images.map(function(img) {
-        return '<option value="' + img.id + '">' + img.original_name + '</option>';
-      }).join('');
+    var grid = document.getElementById('localize-image-grid');
+    grid.innerHTML = images.map(function(img) {
+      return '<div class="image-card" data-id="' + img.id + '" onclick="selectLocalizeImage(' + img.id + ', \'' + img.filename + '\', \'' + img.original_name + '\')">' +
+        '<img src="/images/' + img.filename + '">' +
+        '<div class="info"><div class="name">' + img.original_name + '</div></div></div>';
+    }).join('');
   } catch(e) { console.error(e); }
 }
 
+function selectLocalizeImage(id, filename, name) {
+  localizeSelectedId = id;
+  document.getElementById('localize-selected').style.display = 'block';
+  document.getElementById('localize-selected-thumb').src = '/images/' + filename;
+  document.getElementById('localize-selected-name').textContent = name;
+  // 高亮选中
+  document.querySelectorAll('#localize-image-grid .image-card').forEach(function(c) {
+    c.style.border = c.dataset.id == id ? '2px solid #e94560' : 'none';
+  });
+}
+
 async function startLocalize() {
-  var sel = document.getElementById('localize-image-select');
-  var imageId = parseInt(sel.value);
+  var imageId = localizeSelectedId;
   if (!imageId) { alert('请先选择图像'); return; }
 
   var btn = document.getElementById('localize-btn');
