@@ -18,8 +18,8 @@ from PIL import Image, ImageEnhance, ImageFilter
 
 
 TILE_PX = 512          # 每块像素
-TILE_M = 20            # 每块地面尺寸 (m)
-RES = TILE_M / TILE_PX # 分辨率 ≈ 0.039m/像素 (3.9cm)
+TILE_M = 50            # 每块地面尺寸 (m)
+RES = TILE_M / TILE_PX # 分辨率 ≈ 0.098m/像素 (9.8cm)
 
 
 def project_las_multi_view(
@@ -84,14 +84,30 @@ def project_las_multi_view(
             col_idx = ((xt - tx_min) / RES).astype(np.int64).clip(0, w - 1)
             row_idx = ((yt - ty_min) / RES).astype(np.int64).clip(0, h - 1)
 
-            # 对每个像素，取 Z 最低的点（最接近地面），保留原始 RGB
             # 先筛选 RGB
             rt = r_arr[mask] if r_arr is not None else None
             gt = g_arr[mask] if g_arr is not None else None
             bt = b_arr[mask] if b_arr is not None else None
-            pixel_map = {}  # (px, py) -> (x, y, z, r, g, b)
+
+            # 渲染图像：所有点都画上（不丢弃），提高覆盖密度
+            img = np.zeros((h, w, 3), dtype=np.uint8)
             for i in range(len(xt)):
                 px, py = int(col_idx[i]), int(row_idx[i])
+                if px < 0 or px >= w or py < 0 or py >= h:
+                    continue
+                cr = int(rt[i]) if rt is not None else 128
+                cg = int(gt[i]) if gt is not None else 128
+                cb = int(bt[i]) if bt is not None else 128
+                img[py, px, 0] = np.clip(cb, 0, 255)
+                img[py, px, 1] = np.clip(cg, 0, 255)
+                img[py, px, 2] = np.clip(cr, 0, 255)
+
+            # 坐标映射：取 Z 最低的点（精确3D坐标）
+            pixel_map = {}
+            for i in range(len(xt)):
+                px, py = int(col_idx[i]), int(row_idx[i])
+                if px < 0 or px >= w or py < 0 or py >= h:
+                    continue
                 key = (px, py)
                 if key not in pixel_map or zt[i] < pixel_map[key][2]:
                     cr = int(rt[i]) if rt is not None else 0
@@ -101,18 +117,6 @@ def project_las_multi_view(
 
             if len(pixel_map) < 20:
                 continue
-
-            # 渲染图像（原始 RGB 颜色）
-            img = np.zeros((h, w, 3), dtype=np.uint8)
-            for (px, py), (_, _, _, cr, cg, cb) in pixel_map.items():
-                img[py, px, 0] = np.clip(int(cb), 0, 255)
-                img[py, px, 1] = np.clip(int(cg), 0, 255)
-                img[py, px, 2] = np.clip(int(cr), 0, 255)
-
-            # 保存原始颜色作映射（增强前）
-            raw_pixel_colors = {}
-            for (px, py), (_, _, _, cr, cg, cb) in pixel_map.items():
-                raw_pixel_colors[(px, py)] = (cr, cg, cb)
 
             # 增强（仅用于显示，不影响坐标映射）
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -132,10 +136,9 @@ def project_las_multi_view(
             # 翻转 Y
             img = cv2.flip(img, 0)
 
-            # 坐标映射（Y 翻转后，用增强前的原始 RGB）
+            # 坐标映射（Y 翻转后，用原始 RGB）
             coord_map = {}
-            for (px, py), (rx, ry, rz, _, _, _) in pixel_map.items():
-                cr, cg, cb = raw_pixel_colors.get((px, py), (0, 0, 0))
+            for (px, py), (rx, ry, rz, cr, cg, cb) in pixel_map.items():
                 coord_map[f"{px},{h-1-py}"] = [rx, ry, rz, cr, cg, cb]
 
             fname = f"tile_{row}_{col}.png"
