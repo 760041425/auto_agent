@@ -530,11 +530,47 @@ async function pollPreprocessStatus(btn, statusEl, progressWrap, progressBar) {
 
 var localizeSelectedId = null;
 
+// 定位页面上传
+document.addEventListener('DOMContentLoaded', function() {
+  var zone = document.getElementById('localize-upload-zone');
+  var input = document.getElementById('localize-file-input');
+  if (zone && input) {
+    zone.addEventListener('click', function() { input.click(); });
+    zone.addEventListener('dragover', function(e) { e.preventDefault(); zone.style.borderColor = '#e94560'; });
+    zone.addEventListener('dragleave', function() { zone.style.borderColor = '#ccc'; });
+    zone.addEventListener('drop', function(e) {
+      e.preventDefault();
+      zone.style.borderColor = '#ccc';
+      uploadLocalizeFiles(e.dataTransfer.files);
+    });
+    input.addEventListener('change', function() { uploadLocalizeFiles(input.files); });
+  }
+});
+
+async function uploadLocalizeFiles(files) {
+  for (var file of files) {
+    var form = new FormData();
+    form.append('file', file);
+    try {
+      await fetch(API + '/images/upload', { method: 'POST', body: form });
+    } catch(e) {}
+  }
+  refreshLocalizeImages();
+}
+
+async function refreshLocalizeImages() {
+  await loadLocalizeImages();
+}
+
 async function loadLocalizeImages() {
   try {
     var resp = await fetch(API + '/images');
     var images = await resp.json();
     var grid = document.getElementById('localize-image-grid');
+    if (images.length === 0) {
+      grid.innerHTML = '<p style="color:#888;font-size:0.85rem;padding:1rem;text-align:center">暂无图像，请上传</p>';
+      return;
+    }
     grid.innerHTML = images.map(function(img) {
       return '<div class="image-card" data-id="' + img.id + '" onclick="selectLocalizeImage(' + img.id + ', \'' + img.filename + '\', \'' + img.original_name + '\')">' +
         '<img src="/images/' + img.filename + '">' +
