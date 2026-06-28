@@ -21,6 +21,17 @@ import numpy as np
 import torch
 import kornia.feature as KF
 from kornia.utils import image_to_tensor
+
+# ── 设备选择 ──
+try:
+    if torch.backends.mps.is_available():
+        DEVICE = torch.device("mps")
+        print(f"[LOCALIZER] 使用 MPS (Metal GPU)")
+    else:
+        DEVICE = torch.device("cpu")
+        print(f"[LOCALIZER] 使用 CPU")
+except:
+    DEVICE = torch.device("cpu")
 from PIL import Image, ImageDraw, ImageFont
 
 from services.las_processor.colmap_reader import read_images_txt, read_points3d_txt
@@ -280,11 +291,11 @@ def _init_dl_matcher():
     """初始化深度学习匹配器（懒加载）"""
     global _DL_MATCHER, _LOFTR
     if _DL_MATCHER is None:
-        log("加载 LightGlue 模型...")
-        _DL_MATCHER = KF.LightGlueMatcher('sift')
+        log(f"加载 LightGlue 模型 ({DEVICE})...")
+        _DL_MATCHER = KF.LightGlueMatcher('sift').to(DEVICE)
     if _LOFTR is None:
-        log("加载 LoFTR 模型...")
-        _LOFTR = KF.LoFTR(pretrained='outdoor')
+        log(f"加载 LoFTR 模型 ({DEVICE})...")
+        _LOFTR = KF.LoFTR(pretrained='outdoor').to(DEVICE)
 
 
 def _match_features(des1, des2, method="flann", ratio=0.75, img1=None, img2=None):
@@ -391,11 +402,11 @@ def _match_deep(img1_gray, img2_gray, method="lightglue", img1_full=None, img2_f
         if des1 is None or des2 is None or len(des1) < 5 or len(des2) < 5:
             return []
         
-        # 转为 tensor
-        desc1 = torch.from_numpy(des1.astype(np.float32)).unsqueeze(0)
-        desc2 = torch.from_numpy(des2.astype(np.float32)).unsqueeze(0)
-        kpts1 = torch.from_numpy(np.array([k.pt for k in kp1], dtype=np.float32)).unsqueeze(0)
-        kpts2 = torch.from_numpy(np.array([k.pt for k in kp2], dtype=np.float32)).unsqueeze(0)
+        # 转为 tensor (移到 GPU)
+        desc1 = torch.from_numpy(des1.astype(np.float32)).unsqueeze(0).to(DEVICE)
+        desc2 = torch.from_numpy(des2.astype(np.float32)).unsqueeze(0).to(DEVICE)
+        kpts1 = torch.from_numpy(np.array([k.pt for k in kp1], dtype=np.float32)).unsqueeze(0).to(DEVICE)
+        kpts2 = torch.from_numpy(np.array([k.pt for k in kp2], dtype=np.float32)).unsqueeze(0).to(DEVICE)
         
         with torch.no_grad():
             result = _DL_MATCHER(desc1, desc2, kpts1, kpts2)
@@ -417,8 +428,8 @@ def _match_deep(img1_gray, img2_gray, method="lightglue", img1_full=None, img2_f
         
     elif method == "loftr":
         # LoFTR: 端到端匹配（不需要特征点）
-        img1_tensor = image_to_tensor(img1_gray, keepdim=True).unsqueeze(0).float() / 255.0
-        img2_tensor = image_to_tensor(img2_gray, keepdim=True).unsqueeze(0).float() / 255.0
+        img1_tensor = image_to_tensor(img1_gray, keepdim=True).unsqueeze(0).float().to(DEVICE) / 255.0
+        img2_tensor = image_to_tensor(img2_gray, keepdim=True).unsqueeze(0).float().to(DEVICE) / 255.0
         
         with torch.no_grad():
             corr = _LOFTR({
@@ -522,6 +533,20 @@ def localize_image(
     with open(tile_index_path) as f:
         tiles = json.load(f)
 
+    # 按非零像素数排序（覆盖率高的优先）
+    log("  按覆盖率排序tile...")
+    tile_pixels = []
+    for tile in tiles:
+        p_img_check = cv2.imread(tile["image_path"], cv2.IMREAD_GRAYSCALE)
+        if p_img_check is not None:
+            nz = int((p_img_check > 0).sum())
+        else:
+            nz = 0
+        tile_pixels.append((nz, tile))
+    tile_pixels.sort(key=lambda x: -x[0])  # 覆盖率高的在前
+    tiles_sorted = [t for _, t in tile_pixels]
+    log(f"  覆盖率: {tile_pixels[0][0]/262144*100:.0f}%~{tile_pixels[-1][0]/262144*100:.0f}%")
+
     matched_3d = []
     matched_2d = []
     
@@ -529,8 +554,8 @@ def localize_image(
     pc_x_min, pc_x_max = float(point_index[:, 0].min()), float(point_index[:, 0].max())
     pc_y_min, pc_y_max = float(point_index[:, 1].min()), float(point_index[:, 1].max())
 
-    for i, tile in enumerate(tiles):
-        if len(matched_3d) >= 10:
+    for i, tile in enumerate(tiles_sorted):
+        if len(matched_3d) >= 15:
             break
 
         tile_path = tile["image_path"]
