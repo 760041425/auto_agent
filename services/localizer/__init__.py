@@ -513,18 +513,60 @@ def localize_image(
         tile_path = tile["image_path"]
         coord_path = tile["coord_map_path"]
 
-        p_kp, p_des, _ = _extract_features(tile_path, "sift")
-        if p_des is None or len(p_des) < 4:
+        # 读取 tile 图像
+        p_img = cv2.imread(tile_path)
+        if p_img is None:
             continue
 
-        matches = _match_features(q_des, p_des, match_method)
+        p_kp, p_des = None, None
+        q_img_for_match = query_img
+        p_img_for_match = p_img
+
+        if match_method in ("lightglue", "loftr"):
+            # 深度学习方法：直接传图像
+            matches = _match_features(None, None, match_method, img1=query_img, img2=p_img)
+            if not matches:
+                continue
+            # LoFTR 的特殊处理
+            if hasattr(matches, '_loftr_kpts0'):
+                # 构造 p_kp, q_kp
+                p_kp = [cv2.KeyPoint(float(x), float(y), 1) for x, y in matches._loftr_kpts1]
+                q_kp_extra = [cv2.KeyPoint(float(x), float(y), 1) for x, y in matches._loftr_kpts0]
+                # 合并到 q_kp
+                offset = len(q_kp)
+                q_kp_list = list(q_kp) + q_kp_extra
+                q_kp = tuple(q_kp_list)
+                # 调整 matches 的索引
+                for m in matches:
+                    m.queryIdx += offset
+                    m.trainIdx = m.trainIdx  # 一一对应
+                # 用 p_kp 做 RANSAC
+                _p_kp = p_kp
+                _q_kp = q_kp_list
+            else:
+                _p_kp = [cv2.KeyPoint(float(x), float(y), 1) for x, y in matches._loftr_kpts1] if hasattr(matches, '_loftr_kpts1') else []
+        else:
+            # 传统方法
+            p_kp, p_des, _ = _extract_features(tile_path, "sift")
+            if p_des is None or len(p_des) < 4:
+                continue
+            matches = _match_features(q_des, p_des, match_method)
+
         if len(matches) < 4:
             continue
 
-        # RANSAC
-        q_pts_m = np.float32([q_kp[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
-        p_pts_m = np.float32([p_kp[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
-        H, mask = cv2.findHomography(q_pts_m, p_pts_m, cv2.USAC_MAGSAC, 8.0, maxIters=5000, confidence=0.99)
+        # RANSAC（仅对传统方法，深度学习方法跳过或简化）
+        if match_method in ("lightglue", "loftr"):
+            inlier_m = matches[:min(20, len(matches))]
+        else:
+            q_pts_m = np.float32([q_kp[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+            p_pts_m = np.float32([p_kp[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+            H, mask = cv2.findHomography(q_pts_m, p_pts_m, cv2.USAC_MAGSAC, 8.0, maxIters=5000, confidence=0.99)
+            if H is not None and mask is not None:
+                inlier_mask = mask.ravel().tolist()
+                inlier_m = [m for m, is_in in zip(matches, inlier_mask) if is_in]
+            else:
+                inlier_m = sorted(matches, key=lambda x: x.distance)[:min(10, len(matches))]
 
         if H is not None and mask is not None:
             inlier_mask = mask.ravel().tolist()
