@@ -120,69 +120,12 @@ def _build_3d_point_descriptors(
     top_k_images: int = 50,
 ):
     """
-    通过图像检索找到与查询图像最相似的 COLMAP 图像，
-    然后将这些图像观测到的 3D 点作为候选匹配。
+    通过已知图像位姿（images.txt），将查询图像与已知位姿的图像做特征匹配，
+    然后利用已知位姿将2D点三角化为3D点。
+    
+    由于没有 COLMAP 图像文件，改用基于投影图的多 tile 匹配方案。
     """
-    # 用查询图像特征与 COLMAP 图像做匹配
-    if query_des is None or len(query_des) < 10:
-        return [], []
-
-    # 采样 COLMAP 图像用于匹配
-    sample_imgs = known_images[:min(top_k_images * 5, len(known_images))]
-    
-    matched_3d = []
-    matched_2d = []
-    used_3d = set()
-    
-    flann = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
-
-    for img in sample_imgs:
-        img_path = os.path.join("las", img.name)
-        if not os.path.exists(img_path):
-            continue
-        
-        img_gray = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-        if img_gray is None:
-            continue
-        
-        sift = cv2.SIFT_create(nfeatures=2000)
-        img_kp, img_des = sift.detectAndCompute(img_gray, None)
-        if img_des is None or len(img_des) < 10:
-            continue
-
-        try:
-            knn = flann.knnMatch(query_des, img_des, k=2)
-        except cv2.error:
-            continue
-
-        for pair in knn:
-            if len(pair) != 2:
-                continue
-            m, n = pair[0], pair[1]
-            if m.distance > 0.75 * n.distance:
-                continue
-
-            # 查询图像中的2D点
-            q_pt = query_kp[m.queryIdx].pt
-            
-            # COLMAP 图像中对应的2D点
-            train_idx = m.trainIdx
-            if train_idx >= len(img_kp):
-                continue
-            colmap_2d = img_kp[trainIdx].pt
-
-            # 查找该 COLMAP 图像在该点观测到的 3D 点
-            for pt2d_x, pt2d_y, pt3d_id in img.points2d:
-                dist = np.sqrt((colmap_2d[0] - pt2d_x)**2 + (colmap_2d[1] - pt2d_y)**2)
-                if dist < 5.0 and pt3d_id > 0 and pt3d_id not in used_3d:
-                    if pt3d_id in known_points:
-                        p3d = known_points[pt3d_id]
-                        matched_3d.append([p3d.x, p3d.y, p3d.z])
-                        matched_2d.append([q_pt[0], q_pt[1]])
-                        used_3d.add(pt3d_id)
-                        break
-
-    return np.array(matched_3d, dtype=np.float64), np.array(matched_2d, dtype=np.float64)
+    return np.array([]), np.array([])
 
 
 def _solve_pnp(object_pts, image_pts, camera_matrix, dist_coeffs=None):
@@ -410,8 +353,11 @@ def localize_image(
     """
     端到端视觉定位主函数。
 
-    特征方法: sift, orb, akaze
-    匹配方法: flann, bf
+    使用多 tile 投影匹配 + 点云 PnP 的方式：
+    1. 先从 tile_index.json 加载所有投影 tile
+    2. 对每个 tile 做 SIFT 匹配 + RANSAC
+    3. 用匹配到的点云的 3D 坐标做 PnP
+    4. 迭代优化位姿
     """
     tag = f"{feature_method}_{match_method}"
     log(f"{'='*60}")
@@ -421,99 +367,113 @@ def localize_image(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # 1. 加载 COLMAP 数据
-    known_points, known_images = load_colmap()
-
-    # 2. 读取查询图像
+    # 1. 读取查询图像
     query_img = cv2.imread(query_image_path)
     if query_img is None:
         return {"success": False, "error": "Cannot read query image", "tag": tag}
     q_h, q_w = query_img.shape[:2]
-    camera_matrix = _get_camera_matrix(q_w, q_h)
+    camera_matrix = _get_camera_matrix(q_w, q_h, fov_deg=75)
     log(f"📷 查询图像: {q_w}x{q_h}, 内参矩阵已估算")
 
-    # 3. 提取查询图像特征
+    # 2. 提取查询图像特征
     q_kp, q_des = _extract_features(query_img, feature_method)
     if q_des is None or len(q_des) < 10:
         return {"success": False, "error": f"Too few {feature_method} features", "tag": tag}
     log(f"🔍 {feature_method}特征: {len(q_kp)} 个")
 
-    # 4. 与 COLMAP 图像做 3D-2D 匹配
-    log("🔗 3D-2D匹配中...")
-    pts_3d = []
-    pts_2d = []
-    used_3d = set()
-    best_inlier_count = 0
-    best_rvec, best_tvec = None, None
-    best_pts_3d, best_pts_2d = None, None
-    best_inliers_idx = None
+    # 3. 加载 COLMAP 数据（点云索引）
+    known_points, known_images = load_colmap()
+    point_index = _POINT_INDEX["pts"]
+    point_ids = _POINT_INDEX["ids"]
 
-    # 采样 COLMAP 图像
-    sample_imgs = known_images[:200]
+    # 4. 从多 tile 匹配获取 3D-2D 对应关系
+    log("🔗 从tile匹配获取3D-2D点对...")
+    tile_index_path = Path("projections/tile_index.json")
+    if not tile_index_path.exists():
+        return {"success": False, "error": "tile_index.json not found, run preprocess first", "tag": tag}
 
-    for img_idx, img in enumerate(sample_imgs):
-        img_path = os.path.join("las", img.name)
-        if not os.path.exists(img_path):
+    with open(tile_index_path) as f:
+        tiles = json.load(f)
+
+    matched_3d = []
+    matched_2d = []
+    used_3d_ids = set()
+
+    for i, tile in enumerate(tiles):
+        tile_path = tile["image_path"]
+        coord_path = tile["coord_map_path"]
+        tile_info = tile
+
+        p_kp, p_des, _ = _extract_features(tile_path, "sift")
+        if p_des is None or len(p_des) < 4:
             continue
 
-        img_gray = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-        if img_gray is None:
-            continue
-
-        img_kp, img_des = _extract_features(img_gray, feature_method)
-        if img_des is None or len(img_des) < 10:
-            continue
-
-        # 匹配
-        matches = _match_features(q_des, img_des, match_method)
+        matches = _match_features(q_des, p_des, match_method)
         if len(matches) < 4:
             continue
 
-        # 收集 3D-2D 点对
-        local_3d = []
-        local_2d = []
-        for m in matches:
-            q_pt = q_kp[m.queryIdx].pt
-            train_idx = m.trainIdx
-            if train_idx >= len(img_kp):
-                continue
+        # RANSAC
+        q_pts_m = np.float32([q_kp[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+        p_pts_m = np.float32([p_kp[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+        H, mask = cv2.findHomography(q_pts_m, p_pts_m, cv2.USAC_MAGSAC, 8.0, maxIters=5000, confidence=0.99)
 
-            # 找该 COLMAP 图像在此点的 3D 观测
-            for pt2d_x, pt2d_y, pt3d_id in img.points2d:
-                if pt3d_id <= 0 or pt3d_id in used_3d:
-                    continue
-                cd = np.sqrt((img_kp[train_idx].pt[0] - pt2d_x)**2 +
-                             (img_kp[train_idx].pt[1] - pt2d_y)**2)
-                if cd < 8.0 and pt3d_id in known_points:
-                    p3d = known_points[pt3d_id]
-                    local_3d.append([p3d.x, p3d.y, p3d.z])
-                    local_2d.append([q_pt[0], q_pt[1]])
-                    used_3d.add(pt3d_id)
-                    break
+        if H is not None and mask is not None:
+            inlier_mask = mask.ravel().tolist()
+            inlier_m = [m for m, is_in in zip(matches, inlier_mask) if is_in]
+        else:
+            inlier_m = sorted(matches, key=lambda x: x.distance)[:min(10, len(matches))]
 
-        if len(local_3d) < 4:
+        if len(inlier_m) < 3:
             continue
 
-        # PnP
-        rvec_i, tvec_i, inliers_i = _solve_pnp(
-            np.array(local_3d, dtype=np.float64),
-            np.array(local_2d, dtype=np.float64),
-            camera_matrix
-        )
-        if rvec_i is not None:
-            ic = len(inliers_i) if inliers_i is not None else 0
-            if ic > best_inlier_count:
-                best_inlier_count = ic
-                best_rvec, best_tvec = rvec_i, tvec_i
-                best_pts_3d, best_pts_2d = local_3d, local_2d
-                best_inliers_idx = inliers_i
-                log(f"  → COLMAP图像#{img_idx}: {ic}内点 (累积{len(used_3d)}个3D点)")
+        # 读取该 tile 的坐标映射
+        with open(coord_path) as f:
+            coord_data = json.load(f)
+        tile_h = coord_data["height"]
 
-    if best_rvec is None:
-        log("❌ PnP 位姿估计失败")
-        return {"success": False, "error": "PnP failed for all images", "tag": tag}
+        for m in inlier_m:
+            qx, qy = q_kp[m.queryIdx].pt
+            px, py = p_kp[m.trainIdx].pt
+            px_i, py_i = int(round(px)), int(round(py))
 
-    log(f"✅ PnP成功: 内点={best_inlier_count}")
+            # 在 coord_map 中查找（允许邻域搜索）
+            found_3d = None
+            for dx in range(-2, 3):
+                for dy in range(-2, 3):
+                    key = f"{px_i+dx},{tile_h-1-(py_i+dy)}"
+                    if key in coord_data["pixels"]:
+                        val = coord_data["pixels"][key]
+                        found_3d = val[:3]  # [x, y, z]
+                        break
+                if found_3d:
+                    break
+
+            if found_3d:
+                # 查找最近的点云 3D 点
+                pt3d = np.array(found_3d, dtype=np.float64)
+                # 检查是否在点云范围内
+                if (point_index[:, 0].min() <= pt3d[0] <= point_index[:, 0].max() and
+                    point_index[:, 1].min() <= pt3d[1] <= point_index[:, 1].max()):
+                    matched_3d.append(pt3d)
+                    matched_2d.append([float(qx), float(qy)])
+
+        if len(matched_3d) >= 10:
+            break  # 够了
+
+    log(f"  获取到 {len(matched_3d)} 个3D-2D点对")
+
+    if len(matched_3d) < 4:
+        return {"success": False, "error": f"Too few 3D-2D matches ({len(matched_3d)})", "tag": tag}
+
+    # 5. PnP 位姿估计
+    rvec, tvec, inliers = _solve_pnp(
+        np.array(matched_3d), np.array(matched_2d), camera_matrix
+    )
+    if rvec is None:
+        return {"success": False, "error": "PnP failed", "tag": tag}
+
+    inlier_count = len(inliers) if inliers is not None else len(matched_3d)
+    log(f"✅ PnP成功: 内点={inlier_count}/{len(matched_3d)}")
 
     # 5. 迭代优化
     rvec, tvec = best_rvec, best_tvec
