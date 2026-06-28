@@ -397,12 +397,17 @@ def localize_image(
 
     matched_3d = []
     matched_2d = []
-    used_3d_ids = set()
+    
+    # 预计算点云范围
+    pc_x_min, pc_x_max = float(point_index[:, 0].min()), float(point_index[:, 0].max())
+    pc_y_min, pc_y_max = float(point_index[:, 1].min()), float(point_index[:, 1].max())
 
     for i, tile in enumerate(tiles):
+        if len(matched_3d) >= 10:
+            break
+
         tile_path = tile["image_path"]
         coord_path = tile["coord_map_path"]
-        tile_info = tile
 
         p_kp, p_des, _ = _extract_features(tile_path, "sift")
         if p_des is None or len(p_des) < 4:
@@ -432,33 +437,30 @@ def localize_image(
         tile_h = coord_data["height"]
 
         for m in inlier_m:
+            if len(matched_3d) >= 10:
+                break
             qx, qy = q_kp[m.queryIdx].pt
             px, py = p_kp[m.trainIdx].pt
             px_i, py_i = int(round(px)), int(round(py))
 
-            # 在 coord_map 中查找（允许邻域搜索）
+            # 在 coord_map 中查找
             found_3d = None
             for dx in range(-2, 3):
                 for dy in range(-2, 3):
                     key = f"{px_i+dx},{tile_h-1-(py_i+dy)}"
                     if key in coord_data["pixels"]:
                         val = coord_data["pixels"][key]
-                        found_3d = val[:3]  # [x, y, z]
+                        found_3d = val[:3]
                         break
                 if found_3d:
                     break
 
-            if found_3d:
-                # 查找最近的点云 3D 点
-                pt3d = np.array(found_3d, dtype=np.float64)
-                # 检查是否在点云范围内
-                if (point_index[:, 0].min() <= pt3d[0] <= point_index[:, 0].max() and
-                    point_index[:, 1].min() <= pt3d[1] <= point_index[:, 1].max()):
-                    matched_3d.append(pt3d)
-                    matched_2d.append([float(qx), float(qy)])
+            if found_3d and (pc_x_min <= found_3d[0] <= pc_x_max) and (pc_y_min <= found_3d[1] <= pc_y_max):
+                matched_3d.append(np.array(found_3d, dtype=np.float64))
+                matched_2d.append([float(qx), float(qy)])
 
-        if len(matched_3d) >= 10:
-            break  # 够了
+        if (i + 1) % 20 == 0:
+            log(f"  tile {i+1}/{len(tiles)}: 已收集 {len(matched_3d)} 个点")
 
     log(f"  获取到 {len(matched_3d)} 个3D-2D点对")
 
@@ -476,9 +478,6 @@ def localize_image(
     log(f"✅ PnP成功: 内点={inlier_count}/{len(matched_3d)}")
 
     # 5. 迭代优化
-    rvec, tvec = best_rvec, best_tvec
-    inlier_count = best_inlier_count
-
     for iteration in range(1, max_iterations):
         log(f"🔄 迭代 {iteration+1}/{max_iterations}...")
         reprojected, valid_mask = reproject_points(
