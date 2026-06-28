@@ -36,13 +36,34 @@ def project_las_multi_view(
 
     # 采样（同时读 RGB）
     step = max(1, total // 3_000_000)
-    x = np.array(pts.x[::step], dtype=np.float64)
-    y = np.array(pts.y[::step], dtype=np.float64)
-    z = np.array(pts.z[::step], dtype=np.float64)
+    x_raw = np.array(pts.x[::step], dtype=np.float64)
+    y_raw = np.array(pts.y[::step], dtype=np.float64)
+    z_raw = np.array(pts.z[::step], dtype=np.float64)
     has_rgb = hasattr(pts, 'red') and hasattr(pts, 'green') and hasattr(pts, 'blue')
     r_arr = np.array(pts.red[::step], dtype=np.uint8) if has_rgb else None
     g_arr = np.array(pts.green[::step], dtype=np.uint8) if has_rgb else None
     b_arr = np.array(pts.blue[::step], dtype=np.uint8) if has_rgb else None
+
+    # 检测坐标系并转为局部坐标
+    # UTM 坐标 ~50万，局部坐标 ~0
+    import json as _json
+    map_cfg_path = Path(las_path).parent / "map_config.json"
+    offset_x, offset_y, offset_z = 0.0, 0.0, 0.0
+    if x_raw.min() > 100000:
+        # 是 UTM 坐标，从 map_config.json 读取 offset
+        if map_cfg_path.exists():
+            with open(map_cfg_path) as _f:
+                _cfg = _json.load(_f)
+            offset_x, offset_y, offset_z = _cfg["offset_xyz"]
+        else:
+            # fallback: 用 LAS 头文件的 offset
+            offset_x = reader.header.x_offset
+            offset_y = reader.header.y_offset
+            offset_z = reader.header.z_offset
+
+    x = x_raw - offset_x
+    y = y_raw - offset_y
+    z = z_raw - offset_z
 
     x_min, x_max = float(x.min()), float(x.max())
     y_min, y_max = float(y.min()), float(y.max())
