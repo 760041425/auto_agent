@@ -89,11 +89,14 @@ def project_las_multi_view(
             gt = g_arr[mask] if g_arr is not None else None
             bt = b_arr[mask] if b_arr is not None else None
 
-            # 渲染图像：所有点都画上（不丢弃），提高覆盖密度
+            # 渲染图像：所有地面附近的点都画上（过滤超高）
             img = np.zeros((h, w, 3), dtype=np.uint8)
+            z_cap = 80.0
             for i in range(len(xt)):
                 px, py = int(col_idx[i]), int(row_idx[i])
                 if px < 0 or px >= w or py < 0 or py >= h:
+                    continue
+                if zt[i] > z_cap:
                     continue
                 cr = int(rt[i]) if rt is not None else 128
                 cg = int(gt[i]) if gt is not None else 128
@@ -102,11 +105,14 @@ def project_las_multi_view(
                 img[py, px, 1] = np.clip(cg, 0, 255)
                 img[py, px, 2] = np.clip(cr, 0, 255)
 
-            # 坐标映射：取 Z 最低的点（精确3D坐标）
+            # 坐标映射：取 Z 最低的点，但排除超高异常点（Z>80m视为噪声/飞点）
             pixel_map = {}
+            z_cap = 80.0  # 忽略高于80m的点（避免建筑/飞点干扰）
             for i in range(len(xt)):
                 px, py = int(col_idx[i]), int(row_idx[i])
                 if px < 0 or px >= w or py < 0 or py >= h:
+                    continue
+                if zt[i] > z_cap:  # 过滤超高
                     continue
                 key = (px, py)
                 if key not in pixel_map or zt[i] < pixel_map[key][2]:
