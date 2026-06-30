@@ -22,6 +22,8 @@ import torch
 import kornia.feature as KF
 from kornia.utils import image_to_tensor
 
+from services.las_processor.projection import _load_poses_and_offset
+
 # ── 设备选择 ──
 try:
     if torch.backends.mps.is_available():
