@@ -480,286 +480,217 @@ def localize_image(
     """
     端到端视觉定位主函数。
 
-    使用多 tile 投影匹配 + 点云 PnP 的方式：
-    1. 先从 tile_index.json 加载所有投影 tile
-    2. 对每个 tile 做 SIFT 匹配 + RANSAC
-    3. 用匹配到的点云的 3D 坐标做 PnP
-    4. 迭代优化位姿
+    使用 panoramicPoses 位姿直接做 PnP 初始化 + 迭代优化：
+    1. 加载 panoramicPoses 位姿（局部坐标）
+    2. 对每个位姿，将点云投影到图像平面
+    3. 在投影位置附近搜索查询图像的特征点
+    4. 收集 3D-2D 匹配点对做 PnP
+    5. 迭代优化位姿
     """
     tag = f"{feature_method}_{match_method}"
     log(f"{'='*60}")
     log(f"🚀 视觉定位 [{tag}]: {os.path.basename(query_image_path)}")
-    log(f"   特征={feature_method}, 匹配={match_method}, 迭代={max_iterations}")
 
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # 1. 读取查询图像并下采样到 512x512
+    # 1. 读取查询图像
     query_img = cv2.imread(query_image_path)
     if query_img is None:
         return {"success": False, "error": "Cannot read query image", "tag": tag}
     q_h_orig, q_w_orig = query_img.shape[:2]
-    
-    # 下采样到 512x512（保持宽高比）
     scale = 512 / max(q_h_orig, q_w_orig)
-    if scale < 1.0:
-        q_small = cv2.resize(query_img, (int(q_w_orig * scale), int(q_h_orig * scale)))
-    else:
-        q_small = query_img
+    q_small = cv2.resize(query_img, (int(q_w_orig * scale), int(q_h_orig * scale))) if scale < 1.0 else query_img
     q_h, q_w = q_small.shape[:2]
     
-    # 计算原始图像的内参（下采样后内参要缩放）
-    camera_matrix_orig = _get_camera_matrix(q_w_orig, q_h_orig, fov_deg=75)
-    camera_matrix = camera_matrix_orig.copy()
-    camera_matrix[0,0] *= scale  # fx
-    camera_matrix[1,1] *= scale  # fy
-    camera_matrix[0,2] *= scale  # cx
-    camera_matrix[1,2] *= scale  # cy
-    log(f"📷 查询图像: {q_w_orig}x{q_h_orig} → {q_w}x{q_h}, 缩放={scale:.3f}")
+    camera_matrix = _get_camera_matrix(q_w_orig, q_h_orig, fov_deg=75)
+    camera_matrix[0,0] *= scale
+    camera_matrix[1,1] *= scale
+    camera_matrix[0,2] *= scale
+    camera_matrix[1,2] *= scale
+    log(f"📷 {q_w_orig}x{q_h_orig} → {q_w}x{q_h}")
 
-    # 2. 提取查询图像特征（使用下采样后的图像）
-    q_kp, q_des = _extract_features(q_small, feature_method)
-    if q_des is None or len(q_des) < 10:
-        return {"success": False, "error": f"Too few {feature_method} features", "tag": tag}
-    log(f"🔍 {feature_method}特征: {len(q_kp)} 个")
+    # 2. 提取查询图像 SIFT 特征（用于投影点附近搜索）
+    q_gray = cv2.cvtColor(q_small, cv2.COLOR_BGR2GRAY)
+    q_kp, q_des = cv2.SIFT_create(nfeatures=3000).detectAndCompute(q_gray, None)
+    if q_kp is None:
+        return {"success": False, "error": "No features", "tag": tag}
+    log(f"🔍 {len(q_kp)} 特征点")
 
-    # 3. 加载 COLMAP 数据（点云索引）
+    # 3. 加载点云
     known_points, known_images = load_colmap()
-    point_index = _POINT_INDEX["pts"]
-    point_ids = _POINT_INDEX["ids"]
+    pts_all = _POINT_INDEX["pts"]  # Nx3, 局部坐标
+    log(f"🗺️ {len(pts_all)} 个3D点")
 
-    # 4. 从多 tile 匹配获取 3D-2D 对应关系
-    log("🔗 从tile匹配获取3D-2D点对...")
-    tile_index_path = Path("projections/tile_index.json")
-    if not tile_index_path.exists():
-        return {"success": False, "error": "tile_index.json not found, run preprocess first", "tag": tag}
+    # 4. 加载 panoramicPoses 位姿
+    poses, ox, oy, oz = _load_poses_and_offset()
+    log(f"📐 {len(poses)} 个位姿")
 
-    with open(tile_index_path) as f:
-        tiles = json.load(f)
+    best_inliers = 0
+    best_rvec, best_tvec = None, None
+    best_3d, best_2d = None, None
 
-    # 按非零像素数排序（覆盖率高的优先）
-    log("  按覆盖率排序tile...")
-    tile_pixels = []
-    for tile in tiles:
-        p_img_check = cv2.imread(tile["image_path"], cv2.IMREAD_GRAYSCALE)
-        if p_img_check is not None:
-            nz = int((p_img_check > 0).sum())
-        else:
-            nz = 0
-        tile_pixels.append((nz, tile))
-    tile_pixels.sort(key=lambda x: -x[0])  # 覆盖率高的在前
-    tiles_sorted = [t for _, t in tile_pixels]
-    log(f"  覆盖率: {tile_pixels[0][0]/262144*100:.0f}%~{tile_pixels[-1][0]/262144*100:.0f}%")
+    # 5. 对每个位姿做投影匹配
+    half_range = 50.0  # 50m 投影范围
+    search_radius = 15  # 像素搜索半径
 
-    matched_3d = []
-    matched_2d = []
-    
-    # 预计算点云范围
-    pc_x_min, pc_x_max = float(point_index[:, 0].min()), float(point_index[:, 0].max())
-    pc_y_min, pc_y_max = float(point_index[:, 1].min()), float(point_index[:, 1].max())
-
-    for i, tile in enumerate(tiles_sorted):
-        if len(matched_3d) >= 15:
-            break
-
-        tile_path = tile["image_path"]
-        coord_path = tile["coord_map_path"]
-
-        # 读取 tile 图像
-        p_img = cv2.imread(tile_path)
-        if p_img is None:
+    for pi, pose in enumerate(poses[:min(50, len(poses))]):
+        # 筛选位姿附近的点云
+        near_mask = (
+            (pts_all[:, 0] >= pose['x'] - half_range) & (pts_all[:, 0] <= pose['x'] + half_range) &
+            (pts_all[:, 1] >= pose['y'] - half_range) & (pts_all[:, 1] <= pose['y'] + half_range)
+        )
+        pts_near = pts_all[near_mask]
+        if len(pts_near) < 50:
             continue
 
-        if match_method in ("lightglue", "loftr"):
-            # 深度学习方法：直接传图像
-            matches = _match_features(None, None, match_method, img1=query_img, img2=p_img)
-            if not matches:
-                continue
-            inlier_m = matches[:min(30, len(matches))]
-            # 从深度匹配中提取点坐标
-            dl_kpts0 = getattr(matches, 'kpts0', None)
-            dl_kpts1 = getattr(matches, 'kpts1', None)
-            if dl_kpts0 is None or dl_kpts1 is None:
-                continue
-        else:
-            # 传统方法
-            p_kp, p_des = _extract_features(tile_path, "sift")
-            if p_des is None or len(p_des) < 4:
-                continue
-            matches = _match_features(q_des, p_des, match_method)
+        # 计算旋转矩阵
+        R_cw = _quat_to_rotmat(pose['qx'], pose['qy'], pose['qz'], pose['qw'])
+        t_cw = np.array([pose['x'], pose['y'], pose['z']], dtype=np.float64)
 
-        if len(matches) < 4:
+        # 世界坐标 → 相机坐标
+        pts_cam = (pts_near - t_cw) @ R_cw.T  # Nx3
+
+        # 投影到图像平面
+        valid = pts_cam[:, 2] > 0.1  # 相机前方
+        if valid.sum() < 30:
+            continue
+        
+        pts_proj = pts_cam[valid]
+        px = pts_proj[:, 0] / pts_proj[:, 2] * camera_matrix[0,0] + camera_matrix[0,2]
+        py = pts_proj[:, 1] / pts_proj[:, 2] * camera_matrix[1,1] + camera_matrix[1,2]
+
+        # 筛选在图像范围内的点
+        in_img = (px >= 0) & (px < q_w) & (py >= 0) & (py < q_h)
+        if in_img.sum() < 10:
             continue
 
-        # RANSAC（仅对传统方法，深度学习方法跳过或简化）
-        if match_method in ("lightglue", "loftr"):
-            inlier_m = matches[:min(20, len(matches))]
-        else:
-            q_pts_m = np.float32([q_kp[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
-            p_pts_m = np.float32([p_kp[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
-            H, mask = cv2.findHomography(q_pts_m, p_pts_m, cv2.USAC_MAGSAC, 8.0, maxIters=5000, confidence=0.99)
-            if H is not None and mask is not None:
-                inlier_mask = mask.ravel().tolist()
-                inlier_m = [m for m, is_in in zip(matches, inlier_mask) if is_in]
-            else:
-                inlier_m = sorted(matches, key=lambda x: x.distance)[:min(10, len(matches))]
+        px_in = px[in_img].astype(np.int32)
+        py_in = py[in_img].astype(np.int32)
+        pts_3d_valid = pts_near[valid][in_img]
 
-        if H is not None and mask is not None:
-            inlier_mask = mask.ravel().tolist()
-            inlier_m = [m for m, is_in in zip(matches, inlier_mask) if is_in]
-        else:
-            inlier_m = sorted(matches, key=lambda x: x.distance)[:min(10, len(matches))]
+        # 在投影点附近搜索查询图像的关键点
+        local_3d, local_2d = [], []
+        used_pixels = set()
+        
+        for j in range(len(px_in)):
+            key = (px_in[j], py_in[j])
+            if key in used_pixels:
+                continue
+            used_pixels.add(key)
 
-        if len(inlier_m) < 3:
-            continue
-
-        # 读取该 tile 的坐标映射
-        with open(coord_path) as f:
-            coord_data = json.load(f)
-        tile_h = coord_data["height"]
-
-        for m in inlier_m:
-            if len(matched_3d) >= 10:
-                break
-            
-            if match_method in ("lightglue", "loftr"):
-                # 深度学习方法：从保存的关键点数组取坐标
-                idx0 = m.queryIdx if hasattr(m, 'queryIdx') else m
-                idx1 = m.trainIdx if hasattr(m, 'trainIdx') else m
-                if dl_kpts0 is not None and idx0 < len(dl_kpts0):
-                    qx, qy = float(dl_kpts0[idx0][0]), float(dl_kpts0[idx0][1])
-                else:
-                    continue
-                if dl_kpts1 is not None and idx1 < len(dl_kpts1):
-                    px, py = float(dl_kpts1[idx1][0]), float(dl_kpts1[idx1][1])
-                else:
-                    continue
-            else:
-                qx, qy = q_kp[m.queryIdx].pt
-                px, py = p_kp[m.trainIdx].pt
-            px_i, py_i = int(round(px)), int(round(py))
-
-            # 在 coord_map 中查找
-            found_3d = None
-            for dx in range(-2, 3):
-                for dy in range(-2, 3):
-                    key = f"{px_i+dx},{tile_h-1-(py_i+dy)}"
-                    if key in coord_data["pixels"]:
-                        val = coord_data["pixels"][key]
-                        found_3d = val[:3]
-                        break
-                if found_3d:
+            # 在搜索半径内找关键点
+            for kp in q_kp:
+                kx, ky = int(kp.pt[0]), int(kp.pt[1])
+                if abs(kx - px_in[j]) < search_radius and abs(ky - py_in[j]) < search_radius:
+                    local_3d.append(pts_3d_valid[j])
+                    local_2d.append([float(kx), float(ky)])
                     break
 
-            if found_3d and (pc_x_min <= found_3d[0] <= pc_x_max) and (pc_y_min <= found_3d[1] <= pc_y_max):
-                matched_3d.append(np.array(found_3d, dtype=np.float64))
-                matched_2d.append([float(qx), float(qy)])
+        if len(local_3d) < 4:
+            continue
 
-        if (i + 1) % 20 == 0:
-            log(f"  tile {i+1}/{len(tiles)}: 已收集 {len(matched_3d)} 个点")
+        # PnP
+        rvec_i, tvec_i, inliers_i = _solve_pnp(
+            np.array(local_3d, dtype=np.float64),
+            np.array(local_2d, dtype=np.float64),
+            camera_matrix
+        )
+        if rvec_i is not None:
+            ic = len(inliers_i) if inliers_i is not None else len(local_3d)
+            if ic > best_inliers:
+                best_inliers = ic
+                best_rvec, best_tvec = rvec_i, tvec_i
+                best_3d, best_2d = local_3d, local_2d
+                log(f"  pose#{pi}: {ic}内点 (最佳)")
 
-    log(f"  获取到 {len(matched_3d)} 个3D-2D点对")
+    if best_rvec is None:
+        return {"success": False, "error": "PnP failed for all poses", "tag": tag}
 
-    if len(matched_3d) < 4:
-        return {"success": False, "error": f"Too few 3D-2D matches ({len(matched_3d)})", "tag": tag}
+    log(f"✅ PnP成功: 内点={best_inliers}")
 
-    # 5. PnP 位姿估计
-    rvec, tvec, inliers = _solve_pnp(
-        np.array(matched_3d), np.array(matched_2d), camera_matrix
-    )
-    if rvec is None:
-        return {"success": False, "error": "PnP failed", "tag": tag}
+    # 6. 迭代优化
+    rvec, tvec = best_rvec, best_tvec
+    inlier_count = best_inliers
 
-    inlier_count = len(inliers) if inliers is not None else len(matched_3d)
-    log(f"✅ PnP成功: 内点={inlier_count}/{len(matched_3d)}")
-
-    # 5. 迭代优化
     for iteration in range(1, max_iterations):
         log(f"🔄 迭代 {iteration+1}/{max_iterations}...")
-        reprojected, valid_mask = reproject_points(
-            rvec, tvec, camera_matrix,
-            _POINT_INDEX["pts"], q_w, q_h
-        )
-        new_pts_3d, new_pts_2d = [], []
-        for i, (px, py) in enumerate(reprojected):
+        reprojected, valid_mask = reproject_points(rvec, tvec, camera_matrix, pts_all, q_w, q_h)
+        
+        new_3d, new_2d = [], []
+        for i, (x_p, y_p) in enumerate(reprojected):
             if not valid_mask[i]:
                 continue
-            px_i, py_i = int(round(px)), int(round(py))
+            xi, yi = int(round(x_p)), int(round(y_p))
             for kp in q_kp:
-                if abs(kp.pt[0]-px_i) < 10 and abs(kp.pt[1]-py_i) < 10:
+                if abs(kp.pt[0]-xi) < search_radius and abs(kp.pt[1]-yi) < search_radius:
                     pid = int(_POINT_INDEX["ids"][i])
-                    if pid in known_points:
-                        p3d = known_points[pid]
-                        new_pts_3d.append([p3d.x, p3d.y, p3d.z])
-                        new_pts_2d.append([kp.pt[0], kp.pt[1]])
+                    new_3d.append(pts_all[i].tolist())
+                    new_2d.append([kp.pt[0], kp.pt[1]])
                     break
-        if len(new_pts_3d) >= 4:
-            nr, nt, ni = _solve_pnp(np.array(new_pts_3d), np.array(new_pts_2d), camera_matrix)
+
+        if len(new_3d) >= 4:
+            nr, nt, ni = _solve_pnp(np.array(new_3d), np.array(new_2d), camera_matrix)
             if nr is not None:
-                nic = len(ni) if ni is not None else 0
+                nic = len(ni) if ni is not None else len(new_3d)
                 if nic > inlier_count:
                     rvec, tvec = nr, nt
                     inlier_count = nic
-                    log(f"  → 优化: {nic}内点")
+                    log(f"  → {nic}内点")
 
-    # 6. 生成重投影
+    # 7. 生成重投影
     log("🖼️ 生成重投影图像...")
-    all_pts_3d = np.array([(p.x, p.y, p.z) for p in known_points.values()], dtype=np.float64)
-    all_colors = np.array([(p.r, p.g, p.b) for p in known_points.values()], dtype=np.uint8)
+    all_pts = np.array([(p.x, p.y, p.z) for p in known_points.values()], dtype=np.float64)
+    all_col = np.array([(p.r, p.g, p.b) for p in known_points.values()], dtype=np.uint8)
 
     proj_path = str(out / f"reprojection_{tag}.png")
-    proj_path, coord_map = render_projection_image(
-        all_pts_3d, all_colors, rvec, tvec, camera_matrix, q_w, q_h, proj_path
-    )
+    proj_path, coord_map = render_projection_image(all_pts, all_col, rvec, tvec, camera_matrix, q_w, q_h, proj_path)
 
     coord_path = str(out / f"reprojection_coord_{tag}.json")
     with open(coord_path, "w") as f:
         json.dump({"width": q_w, "height": q_h, "pixels": coord_map}, f)
 
-    # 7. 双图对比 + 连线
+    # 8. 双图对比
     comparison_path = None
     if proj_path:
         proj_img = cv2.imread(proj_path)
-        if proj_img is not None:
+        if proj_img is not None and best_3d is not None and len(best_3d) > 0:
             h = max(q_h, proj_img.shape[0])
             w = q_w + proj_img.shape[1]
             canvas = np.zeros((h, w, 3), dtype=np.uint8)
-            canvas[:q_h, :q_w] = query_img
+            canvas[:q_h, :q_w] = q_small
             canvas[:proj_img.shape[0], q_w:] = proj_img
 
             colors = [(255,0,0),(0,255,0),(0,0,255),(255,255,0),(255,0,255)]
-            if best_inliers_idx is not None and best_pts_2d is not None:
-                for i in range(min(5, len(best_inliers_idx))):
-                    idx = best_inliers_idx[i][0]
-                    if idx < len(best_pts_2d):
-                        x1, y1 = int(best_pts_2d[idx][0]), int(best_pts_2d[idx][1])
-                        p3d = np.array([best_pts_3d[idx]], dtype=np.float64)
-                        pp, _ = cv2.projectPoints(p3d.reshape(1,1,3), rvec, tvec, camera_matrix, None)
-                        x2, y2 = int(pp[0,0,0]) + q_w, int(pp[0,0,1])
-                        c = colors[i % len(colors)]
-                        cv2.circle(canvas, (x1, y1), 6, c, -1)
-                        cv2.circle(canvas, (x2, y2), 6, c, -1)
-                        cv2.line(canvas, (x1, y1), (x2, y2), c, 2)
+            for i in range(min(5, len(best_3d))):
+                if i < len(best_2d):
+                    x1, y1 = int(best_2d[i][0]), int(best_2d[i][1])
+                    p3d = np.array([best_3d[i]], dtype=np.float64)
+                    pp, _ = cv2.projectPoints(p3d.reshape(1,1,3), rvec, tvec, camera_matrix, None)
+                    x2, y2 = int(pp[0,0,0]) + q_w, int(pp[0,0,1])
+                    c = colors[i % len(colors)]
+                    cv2.circle(canvas, (x1, y1), 6, c, -1)
+                    cv2.circle(canvas, (x2, y2), 6, c, -1)
+                    cv2.line(canvas, (x1, y1), (x2, y2), c, 2)
 
             comparison_path = str(out / f"comparison_{tag}.png")
             cv2.imwrite(comparison_path, canvas)
             log(f"✅ 双图对比: {comparison_path}")
 
-    # 8. 位姿
     rmat, _ = cv2.Rodrigues(rvec)
     quat = _rotation_matrix_to_quaternion(rmat)
 
     result = {
         "success": True,
         "tag": tag,
-        "feature_method": feature_method,
-        "match_method": match_method,
+        "feature_method": "pose_reprojection",
+        "match_method": "pnp",
         "pose": {
             "quaternion": [float(q) for q in quat],
             "translation": tvec.flatten().tolist(),
         },
         "inliers": int(inlier_count),
-        "total_3d_points": len(used_3d),
+        "total_3d_points": len(best_3d) if best_3d is not None else 0,
         "reprojection_image": proj_path,
         "comparison_image": comparison_path,
         "coord_map": coord_path,
