@@ -100,9 +100,21 @@ def load_colmap(las_dir: str = "las", force_reload: bool = False):
             self.r, self.g, self.b = r, g, b
 
     _COLMAP_POINTS = {}
-    xs = pts.x[::step]
-    ys = pts.y[::step]
-    zs = pts.z[::step]
+    xs_raw = np.array(pts.x[::step], dtype=np.float64)
+    ys_raw = np.array(pts.y[::step], dtype=np.float64)
+    zs_raw = np.array(pts.z[::step], dtype=np.float64)
+
+    # 检测并转为局部坐标（与位姿坐标系一致）
+    offset_x_l, offset_y_l, offset_z_l = 0.0, 0.0, 0.0
+    if xs_raw.min() > 100000:
+        map_cfg = os.path.join(las_dir, "map_config.json")
+        if os.path.exists(map_cfg):
+            with open(map_cfg) as _f:
+                _cfg = json.load(_f)
+            offset_x_l, offset_y_l, offset_z_l = _cfg["offset_xyz"]
+    xs = xs_raw - offset_x_l
+    ys = ys_raw - offset_y_l
+    zs = zs_raw - offset_z_l
 
     has_rgb = hasattr(pts, 'red') and hasattr(pts, 'green') and hasattr(pts, 'blue')
     rs = pts.red[::step] if has_rgb else None
