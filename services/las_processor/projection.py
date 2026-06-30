@@ -70,7 +70,11 @@ def _quat_to_rotmat(qx, qy, qz, qw):
 def _project_points(pts_3d, pose, view_dir):
     """
     根据位姿和视角方向投影3D点。
-    view_dir: 'top', 'front', 'side'
+    view_dir: 'top'顶视, 'front'前视(沿相机朝向), 'side'侧视
+    
+    1. top: 从正上方俯视（无视相机朝向，直接看地面）
+    2. front: 沿相机朝向方向平视
+    3. side: 从相机侧面90度看
     """
     x, y, z = pts_3d[:, 0], pts_3d[:, 1], pts_3d[:, 2]
     
@@ -82,28 +86,38 @@ def _project_points(pts_3d, pose, view_dir):
     # 旋转矩阵（世界→相机）
     R = _quat_to_rotmat(pose['qx'], pose['qy'], pose['qz'], pose['qw'])
     
-    # 根据视角方向调整
     if view_dir == 'top':
-        # 顶视图：俯视（绕X轴转-90度）
+        # 顶视图：俯视（Z轴朝下看）
+        # 绕X轴转-90度，使Z朝下
         R_view = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=np.float64)
-    elif view_dir == 'front':
-        # 前视图：平视
-        R_view = np.eye(3, dtype=np.float64)
+        R_total = R_view @ R
     elif view_dir == 'side':
-        # 侧视图：绕Z轴转90度
-        R_view = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]], dtype=np.float64)
+        # 侧视图：从侧面看，沿相机朝向的垂直方向
+        # 绕Z轴转-90度
+        R_view = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], dtype=np.float64)
+        R_total = R_view @ R
     else:
-        R_view = np.eye(3, dtype=np.float64)
+        # front视图：沿相机朝向看
+        R_total = R
     
-    R_total = R_view @ R
-    
-    # 投影
+    # 相机坐标系: X右, Y下, Z前（相机朝向）
     pts_cam = R_total @ np.vstack([x_local, y_local, z_local])
     
-    # 透视投影（忽略Z，只取XY作为图像坐标）
-    px = pts_cam[1, :]  # 图像X
-    py = -pts_cam[2, :]  # 图像Y（翻转）
-    depth = pts_cam[0, :]  # 深度（Z朝向）
+    # 透视投影：图像坐标 (u, v) = (X/Z, Y/Z) * f
+    # 深度 = Z（距离相机的距离）
+    depth = pts_cam[2, :]
+    # 只保留相机前方的点
+    valid = depth > 0
+    
+    if view_dir == 'top':
+        # 顶视图: 直接用X,Y作为图像坐标
+        px = pts_cam[0, :]
+        py = -pts_cam[1, :]  # Y轴翻转
+    else:
+        # 前/侧视图: 透视投影
+        f = 100.0  # 焦距
+        px = pts_cam[0, :] / np.maximum(depth, 1e-6) * f
+        py = -pts_cam[1, :] / np.maximum(depth, 1e-6) * f  # Y翻转
     
     return px, py, depth
 
