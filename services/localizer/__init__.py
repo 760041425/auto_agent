@@ -258,8 +258,10 @@ def render_projection_image(
         z_val = valid_3d[i, 2]
         if np.isnan(depth_img[py, px]) or z_val < depth_img[py, px]:
             depth_img[py, px] = z_val
-            r, g, b = valid_colors[i]
-            img[py, px] = [int(b), int(g), int(r)]
+            r = int(valid_colors[i, 0]) >> 8 if valid_colors[i, 0] > 255 else int(valid_colors[i, 0])
+            g = int(valid_colors[i, 1]) >> 8 if valid_colors[i, 1] > 255 else int(valid_colors[i, 1])
+            b = int(valid_colors[i, 2]) >> 8 if valid_colors[i, 2] > 255 else int(valid_colors[i, 2])
+            img[py, px] = [np.clip(b, 0, 255), np.clip(g, 0, 255), np.clip(r, 0, 255)]
             coord_map[f"{px},{py}"] = [float(v) for v in valid_3d[i]]
 
     # 深度着色（对无颜色的区域）
@@ -623,13 +625,22 @@ def localize_image(
 
     log(f"✅ PnP成功: 内点={best_inliers}")
 
-    # 6. 迭代优化
+    # 6. 迭代优化（只处理附近点云加速）
     rvec, tvec = best_rvec, best_tvec
     inlier_count = best_inliers
+    half_range_iter = 100.0  # 迭代时扩大范围
 
     for iteration in range(1, max_iterations):
         log(f"🔄 迭代 {iteration+1}/{max_iterations}...")
-        reprojected, valid_mask = reproject_points(rvec, tvec, camera_matrix, pts_all, q_w, q_h)
+        
+        # 只取位姿附近的点云
+        near_iter = (
+            (pts_all[:, 0] >= tvec[0,0] - half_range_iter) & (pts_all[:, 0] <= tvec[0,0] + half_range_iter) &
+            (pts_all[:, 1] >= tvec[1,0] - half_range_iter) & (pts_all[:, 1] <= tvec[1,0] + half_range_iter)
+        )
+        pts_near_iter = pts_all[near_iter]
+        
+        reprojected, valid_mask = reproject_points(rvec, tvec, camera_matrix, pts_near_iter, q_w, q_h)
         
         new_3d, new_2d = [], []
         for i, (x_p, y_p) in enumerate(reprojected):
@@ -638,8 +649,7 @@ def localize_image(
             xi, yi = int(round(x_p)), int(round(y_p))
             for kp in q_kp:
                 if abs(kp.pt[0]-xi) < search_radius and abs(kp.pt[1]-yi) < search_radius:
-                    pid = int(_POINT_INDEX["ids"][i])
-                    new_3d.append(pts_all[i].tolist())
+                    new_3d.append(pts_near_iter[i].tolist())
                     new_2d.append([kp.pt[0], kp.pt[1]])
                     break
 
