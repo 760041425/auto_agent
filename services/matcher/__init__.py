@@ -28,25 +28,54 @@ def log_match_step(msg: str, task_id: int | None = None):
     _logger.info(f"{prefix} {msg}")
 
 
-def _extract_sift(image_path: str, task_id: int | None = None):
+def _extract_features(image_path: str, method: str = "sift", task_id: int | None = None):
+    """提取图像特征，支持多种算法
+
+    算法: sift, orb, akaze, brisk, kaze
+    """
     img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         log_match_step(f"❌ 无法读取图像: {image_path}", task_id)
         return None, None, None
-    sift = cv2.SIFT_create(nfeatures=3000)
-    kp, des = sift.detectAndCompute(img, None)
+    
+    n_features = 5000
+    if method == "sift":
+        detector = cv2.SIFT_create(nfeatures=n_features)
+    elif method == "orb":
+        detector = cv2.ORB_create(nfeatures=n_features)
+    elif method == "akaze":
+        detector = cv2.AKAZE_create()
+    elif method == "brisk":
+        detector = cv2.BRISK_create()
+    elif method == "kaze":
+        detector = cv2.KAZE_create()
+    else:
+        detector = cv2.SIFT_create(nfeatures=n_features)
+    
+    kp, des = detector.detectAndCompute(img, None)
     n_kp = len(kp) if kp is not None else 0
-    log_match_step(f"📷 SIFT提取: {os.path.basename(image_path)} → {n_kp}个特征点, 图像尺寸={img.shape}", task_id)
+    n_des = des.shape if des is not None else (0,)
+    log_match_step(f"📷 {method.upper()}提取: {os.path.basename(image_path)} → {n_kp}个特征点, des={n_des}", task_id)
     return kp, des, img.shape  # (kp, des, (h, w))
 
 
+# 向后兼容
+_extract_sift = lambda *a, **kw: _extract_features(*a, method="sift", **kw)
+
+
 def _safe_knn_match(des1, des2, k=2):
-    """安全的 knnMatch，兼容不同 OpenCV 版本"""
+    """安全的 knnMatch，自动选择匹配器"""
     if des1 is None or des2 is None or len(des1) < 2 or len(des2) < 2:
         return []
-    flann = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
+    
+    is_binary = des1.dtype == np.uint8
+    if is_binary:
+        matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    else:
+        matcher = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=50))
+    
     try:
-        matches = flann.knnMatch(des1, des2, k=k)
+        matches = matcher.knnMatch(des1, des2, k=k)
     except cv2.error:
         return []
     result = []
@@ -56,7 +85,8 @@ def _safe_knn_match(des1, des2, k=2):
     return result
 
 
-def _match_with_flann(des1, des2, ratio=0.75, task_id=None):
+def _match_with_flann(des1, des2, ratio=0.75, task_id=None, method="sift"):
+    log_match_step(f"🔗 匹配: des1={des1.shape if des1 is not None else None}, des2={des2.shape if des2 is not None else None}, method={method}", task_id)
     knn = _safe_knn_match(des1, des2, k=2)
     good = []
     for pair in knn:
@@ -145,16 +175,16 @@ def _try_ransac(q_pts, p_pts, total_matches=0, task_id=None):
     return best_H, best_mask
 
 
-def _match_on_tile(q_kp, q_des, q_w, q_h, tile_info, task_id):
+def _match_on_tile(q_kp, q_des, q_w, q_h, tile_info, task_id, feature_method="sift"):
     """在单个 tile 上执行匹配"""
     tile_path = tile_info["image_path"]
     coord_path = tile_info["coord_map_path"]
 
-    p_kp, p_des, p_shape = _extract_sift(tile_path, task_id)
+    p_kp, p_des, p_shape = _extract_features(tile_path, feature_method, task_id)
     if p_des is None or len(p_des) < 4:
         return None
 
-    good = _match_with_flann(q_des, p_des, task_id=task_id)
+    good = _match_with_flann(q_des, p_des, task_id=task_id, method=feature_method)
     if len(good) < 4:
         return None
 
@@ -300,11 +330,12 @@ def match_query_to_projection(
     coord_map_path: str = "projections/coord_map.json",
     verify: bool = True,
     task_id: int | None = None,
+    feature_method: str = "sift",
 ) -> dict:
     log_match_step(f"{'='*60}", task_id)
-    log_match_step(f"🚀 开始匹配: 查询图像={os.path.basename(query_image_path)}", task_id)
+    log_match_step(f"🚀 开始匹配 [{feature_method}]: {os.path.basename(query_image_path)}", task_id)
 
-    q_kp, q_des, q_shape = _extract_sift(query_image_path, task_id)
+    q_kp, q_des, q_shape = _extract_features(query_image_path, feature_method, task_id)
     if q_des is None:
         return {"matched": False, "regions": [], "message": "Query image feature extraction failed"}
     q_h, q_w = q_shape if q_shape else (0, 0)
@@ -325,7 +356,7 @@ def match_query_to_projection(
 
     for i, tile in enumerate(tiles):
         log_match_step(f"🔍 Tile {i+1}/{len(tiles)}: {Path(tile['image_path']).name}", task_id)
-        result = _match_on_tile(q_kp, q_des, q_w, q_h, tile, task_id)
+        result = _match_on_tile(q_kp, q_des, q_w, q_h, tile, task_id, feature_method)
         if result is not None and len(result) > best_count:
             best_count = len(result)
             best_result = result
@@ -343,5 +374,6 @@ def compute_image_area_3d(
     query_image_path: str,
     region: dict | None = None,
     task_id: int | None = None,
+    feature_method: str = "sift",
 ) -> dict:
-    return match_query_to_projection(query_image_path, task_id=task_id)
+    return match_query_to_projection(query_image_path, task_id=task_id, feature_method=feature_method)
