@@ -22,7 +22,7 @@ import torch
 import kornia.feature as KF
 from kornia.utils import image_to_tensor
 
-from services.las_processor.projection import _load_poses_and_offset
+from services.las_processor.projection import _load_poses_and_offset, _quat_to_rotmat
 
 # ── 设备选择 ──
 try:
