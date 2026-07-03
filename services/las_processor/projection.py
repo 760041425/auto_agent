@@ -206,15 +206,15 @@ def project_las_multi_view(
     z = np.array(pts.z[::step], dtype=np.float64) - offset_z
     
     has_rgb = hasattr(pts, 'red') and hasattr(pts, 'green') and hasattr(pts, 'blue')
-    r_arr = np.array(pts.red[::step], dtype=np.uint8) if has_rgb else None
-    g_arr = np.array(pts.green[::step], dtype=np.uint8) if has_rgb else None
-    b_arr = np.array(pts.blue[::step], dtype=np.uint8) if has_rgb else None
+    r_arr = np.array(pts.red[::step], dtype=np.uint16) if has_rgb else None
+    g_arr = np.array(pts.green[::step], dtype=np.uint16) if has_rgb else None
+    b_arr = np.array(pts.blue[::step], dtype=np.uint16) if has_rgb else None
     
     colors = np.zeros((len(x), 3), dtype=np.uint8)
     if r_arr is not None:
-        colors[:, 0] = np.clip(r_arr, 0, 255)
-        colors[:, 1] = np.clip(g_arr, 0, 255)
-        colors[:, 2] = np.clip(b_arr, 0, 255)
+        colors[:, 0] = np.clip(r_arr >> 8, 0, 255).astype(np.uint8)
+        colors[:, 1] = np.clip(g_arr >> 8, 0, 255).astype(np.uint8)
+        colors[:, 2] = np.clip(b_arr >> 8, 0, 255).astype(np.uint8)
     else:
         colors[:, 0] = 128
         colors[:, 1] = 128

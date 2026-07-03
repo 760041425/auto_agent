@@ -117,9 +117,9 @@ def load_colmap(las_dir: str = "las", force_reload: bool = False):
     zs = zs_raw - offset_z_l
 
     has_rgb = hasattr(pts, 'red') and hasattr(pts, 'green') and hasattr(pts, 'blue')
-    rs = pts.red[::step] if has_rgb else None
-    gs = pts.green[::step] if has_rgb else None
-    bs = pts.blue[::step] if has_rgb else None
+    rs = (np.array(pts.red[::step], dtype=np.uint32) >> 8).astype(np.uint8) if has_rgb else None
+    gs = (np.array(pts.green[::step], dtype=np.uint32) >> 8).astype(np.uint8) if has_rgb else None
+    bs = (np.array(pts.blue[::step], dtype=np.uint32) >> 8).astype(np.uint8) if has_rgb else None
 
     for i in range(len(xs)):
         pid = i + 1
