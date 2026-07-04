@@ -65,42 +65,25 @@ def run_localize_task(task_id: int, image_id: int, feature_methods: list[str], m
             for mm in match_methods:
                 try:
                     out_dir = f"projections/localize/task_{task_id}"
+                    Path(out_dir).mkdir(parents=True, exist_ok=True)
                     result = localize_image(
                         img.path,
                         output_dir=out_dir,
                         feature_method=fm,
                         match_method=mm,
-                        max_iterations=3,
+                        max_iterations=2,
                     )
-                    comparison_path = None
-                    reprojection_path = None
-                    if result.get("comparison_image"):
-                        comparison_path = f"/projections/localize/task_{task_id}/comparison_{fm}_{mm}.png"
-                        src = result["comparison_image"]
-                        if src:
-                            dst = Path(out_dir) / f"comparison_{fm}_{mm}.png"
-                            if Path(src).exists():
-                                import shutil
-                                shutil.copy2(src, str(dst))
-                    if result.get("reprojection_image"):
-                        reprojection_path = f"/projections/localize/task_{task_id}/reprojection_{fm}_{mm}.png"
-                        src = result["reprojection_image"]
-                        if src:
-                            dst = Path(out_dir) / f"reprojection_{fm}_{mm}.png"
-                            if Path(src).exists():
-                                import shutil
-                                _dst = Path(out_dir)
-                                _dst.mkdir(parents=True, exist_ok=True)
-                                shutil.copy2(src, str(dst))
-
+                    tag = f"{fm}_{mm}"
+                    comp = result.get("comparison_image")
+                    reproj = result.get("reprojection_image")
                     results.append({
                         "feature_method": fm,
                         "match_method": mm,
                         "success": result.get("success", False),
                         "pose": result.get("pose"),
                         "inliers": result.get("inliers", 0),
-                        "comparison_image": comparison_path,
-                        "reprojection_image": reprojection_path,
+                        "comparison_image": f"/{comp}" if comp else None,
+                        "reprojection_image": f"/{reproj}" if reproj else None,
                         "matched_points": result.get("matched_points", []),
                     })
                 except Exception as e:
