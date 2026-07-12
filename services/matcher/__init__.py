@@ -177,8 +177,13 @@ def _try_ransac(q_pts, p_pts, total_matches=0, task_id=None):
 
 def _match_on_tile(q_kp, q_des, q_w, q_h, tile_info, task_id, feature_method="sift"):
     """在单个 tile 上执行匹配"""
-    tile_path = tile_info["image_path"]
-    coord_path = tile_info["coord_map_path"]
+    tile_path = tile_info.get("image_path", "")
+    if not tile_path or not os.path.exists(tile_path):
+        tile_path = str(Path("projections/tiles") / Path(tile_path).name)
+
+    coord_path = tile_info.get("coord_map_path", "")
+    if not coord_path or not os.path.exists(coord_path):
+        coord_path = str(Path("projections/tiles") / Path(coord_path).name)
 
     p_kp, p_des, p_shape = _extract_features(tile_path, feature_method, task_id)
     if p_des is None or len(p_des) < 4:

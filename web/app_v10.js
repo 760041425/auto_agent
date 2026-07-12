@@ -580,6 +580,15 @@ async function refreshLocalizeImages() {
   await loadLocalizeImages();
 }
 
+async function deleteLocalizeImage(imageId) {
+  try {
+    await fetch(API + '/images/' + imageId, { method: 'DELETE' });
+    loadLocalizeImages();
+  } catch(e) {
+    console.error('删除失败:', e);
+  }
+}
+
 async function loadLocalizeImages() {
   try {
     var resp = await fetch(API + '/images');
@@ -592,27 +601,43 @@ async function loadLocalizeImages() {
     grid.innerHTML = images.map(function(img) {
       return '<div class="image-card" data-id="' + img.id + '" onclick="selectLocalizeImage(' + img.id + ', \'' + img.filename + '\', \'' + img.original_name + '\')">' +
         '<img src="/images/' + img.filename + '">' +
+        '<button class="delete-btn" onclick="event.stopPropagation(); deleteLocalizeImage(' + img.id + ')">&#10006;</button>' +
         '<div class="info"><div class="name">' + img.original_name + '</div></div></div>';
       }).join('');
     } catch(e) { console.error(e); }
-    // 自动加载最近一次完成的定位结果
     loadLatestLocalizeResult();
+  }
+
+  function _fixImagePath(path) {
+    if (!path) return null;
+    var fixed = path;
+    if (!path.startsWith('/')) {
+      fixed = path.replace('projections/', '');
+      fixed = '/projections/' + fixed;
+    }
+    console.log('[DEBUG] _fixImagePath:', path, '->', fixed);
+    return fixed;
   }
 
   async function loadLatestLocalizeResult() {
     try {
       var resp = await fetch(API + '/tasks?limit=5');
       var tasks = await resp.json();
+      console.log('[DEBUG] loadLatestLocalizeResult tasks:', tasks.length);
       if (!tasks || tasks.length === 0) return;
       var latest = tasks.find(function(t) { return t.status === 'completed'; });
+      console.log('[DEBUG] latest task:', latest ? latest.id : null, latest ? latest.status : null);
       if (!latest) return;
       var resultData = latest.result_json;
+      console.log('[DEBUG] resultData exists:', !!resultData, 'has results:', resultData && !!resultData.results);
       if (!resultData || !resultData.results) return;
       var results = resultData.results;
+      console.log('[DEBUG] results count:', results.length);
       var resultsEl = document.getElementById('localize-results');
       var html = '<div style="margin-top:1rem"><h4>📋 上次定位结果 (task #' + latest.id + ')</h4></div>';
       var matchNames = { 'flann': 'FLANN kd-tree', 'bf': 'BruteForce', 'flann_lowes': 'FLANN严格(0.6)', 'bf_cross': 'BF交叉验证', 'knn_rank': 'KNN Top-50', 'lightglue': 'LightGlue (深度学习)', 'loftr': 'LoFTR (深度学习)', 'salad_roma': 'SALAD+RoMa (v3)' };
       results.forEach(function(r, idx) {
+        var compImg = _fixImagePath(r.comparison_image);
         html += '<div class="localize-card" style="background:#fff;border-radius:8px;padding:1rem;margin-top:0.8rem;box-shadow:0 1px 3px rgba(0,0,0,0.1)">';
         html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">';
         html += '<h4 style="margin:0">SIFT + ' + (matchNames[r.match_method] || r.match_method) + '</h4>';
@@ -626,13 +651,14 @@ async function loadLocalizeImages() {
            html += '<tr style="background:#f5f5f5"><th>轮</th><th>相似度</th><th>内点</th><th>位姿</th><th>对比图</th></tr>';
            r.all_candidates.forEach(function(c, ci) {
              var isBest = c.is_best || ci === 0;
+             var candCompImg = _fixImagePath(c.comparison_image);
              html += '<tr style="' + (isBest ? 'background:#e8f5e9' : '') + '">';
              html += '<td>' + c.round + (isBest ? '🏆' : '') + '</td>';
              html += '<td>' + c.salad_similarity.toFixed(4) + '</td>';
              html += '<td>' + c.pnp_inliers + '</td>';
              html += '<td style="font-size:0.65rem;font-family:monospace">[' + (c.translation || []).map(function(v) { return v.toFixed(1); }).join(',') + ']</td>';
-             if (c.comparison_image) {
-               html += '<td><a href="' + c.comparison_image + '" target="_blank"><img src="' + c.comparison_image + '" style="width:60px;height:auto;border-radius:2px;border:1px solid #ddd"></a></td>';
+             if (candCompImg) {
+               html += '<td><a href="' + candCompImg + '" target="_blank"><img src="' + candCompImg + '" style="width:60px;height:auto;border-radius:2px;border:1px solid #ddd"></a></td>';
              } else {
                html += '<td style="font-size:0.7rem;color:#999">-</td>';
              }
@@ -651,9 +677,9 @@ async function loadLocalizeImages() {
           if (r.pose && r.pose.translation) {
             html += '<p style="font-size:0.82rem;color:#666;font-family:monospace">位姿: [' + r.pose.translation.map(function(v) { return v.toFixed(2); }).join(', ') + ']</p>';
           }
-          if (r.comparison_image) {
+          if (compImg) {
             html += '<div style="margin-top:0.5rem;text-align:center">';
-            html += '<img src="' + r.comparison_image + '" style="max-width:100%;max-height:300px;border-radius:4px;border:1px solid #ddd" onerror="this.style.display=\'none\'">';
+            html += '<img src="' + compImg + '" style="max-width:100%;max-height:300px;border-radius:4px;border:1px solid #ddd" onerror="this.style.display=\'none\'">';
             html += '<p style="font-size:0.75rem;color:#888;margin-top:0.2rem">左: 原图 | 右: 重投影 | 彩色连线: 匹配点</p>';
             html += '</div>';
           }
@@ -718,7 +744,20 @@ async function startLocalize() {
         match_methods: ['flann', 'bf', 'flann_lowes', 'bf_cross', 'knn_rank', 'lightglue', 'loftr', 'salad_roma'],
       }),
     });
-    var data = await resp.json();
+    var text = await resp.text();
+    var data = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch (parseErr) {
+      console.error('localize start response is not valid json:', text);
+      data = { error: text || 'unknown error' };
+    }
+    if (!resp.ok || data.error) {
+      throw new Error(data.error || '定位启动失败');
+    }
+    if (!data.task_id) {
+      throw new Error('未返回 task_id');
+    }
     pollLocalize(data.task_id, btn, statusEl, resultsEl);
   } catch(e) {
     btn.disabled = false;
@@ -731,7 +770,14 @@ async function startLocalize() {
 async function pollLocalize(taskId, btn, statusEl, resultsEl) {
   try {
     var resp = await fetch(API + '/localize/' + taskId);
-    var data = await resp.json();
+    var text = await resp.text();
+    var data = {};
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch (parseErr) {
+      console.error('localize status response is not valid json:', text);
+      data = { status: 'failed', error: text || 'unknown error' };
+    }
 
     if (data.status === 'running') {
       statusEl.textContent = '定位中... (' + (data.results || []).filter(function(r) { return r.success; }).length + '/6 完成)';
@@ -743,7 +789,7 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
     btn.textContent = '开始定位';
 
     if (data.status === 'failed') {
-      statusEl.textContent = '定位失败';
+      statusEl.textContent = '定位失败: ' + (data.error || '未知错误');
       statusEl.className = 'status error';
       return;
     }
@@ -756,6 +802,7 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
     var results = data.results || [];
 
     results.forEach(function(r, idx) {
+      var compImg = _fixImagePath(r.comparison_image);
       html += '<div class="localize-card" style="background:#fff;border-radius:8px;padding:1rem;margin-top:0.8rem;box-shadow:0 1px 3px rgba(0,0,0,0.1)">';
       html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">';
       var matchNames = { 'flann': 'FLANN kd-tree', 'bf': 'BruteForce', 'flann_lowes': 'FLANN严格(0.6)', 'bf_cross': 'BF交叉验证', 'knn_rank': 'KNN Top-50', 'lightglue': 'LightGlue (深度学习)', 'loftr': 'LoFTR (深度学习)', 'salad_roma': 'SALAD+RoMa (v3)' };
@@ -773,13 +820,14 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
           html += '<tr style="background:#f5f5f5"><th>轮</th><th>相似度</th><th>内点</th><th>位姿</th><th>对比图</th></tr>';
           r.all_candidates.forEach(function(c, ci) {
             var isBest = c.is_best || ci === 0;
+            var candCompImg = _fixImagePath(c.comparison_image);
             html += '<tr style="' + (isBest ? 'background:#e8f5e9' : '') + '">';
             html += '<td>' + c.round + (isBest ? '🏆' : '') + '</td>';
             html += '<td>' + c.salad_similarity.toFixed(4) + '</td>';
             html += '<td>' + c.pnp_inliers + '</td>';
             html += '<td style="font-size:0.65rem;font-family:monospace">[' + (c.translation || []).map(function(v) { return v.toFixed(1); }).join(',') + ']</td>';
-            if (c.comparison_image) {
-              html += '<td><a href="' + c.comparison_image + '" target="_blank"><img src="' + c.comparison_image + '" style="width:60px;height:auto;border-radius:2px;border:1px solid #ddd"></a></td>';
+            if (candCompImg) {
+              html += '<td><a href="' + candCompImg + '" target="_blank"><img src="' + candCompImg + '" style="width:60px;height:auto;border-radius:2px;border:1px solid #ddd"></a></td>';
             } else {
               html += '<td style="font-size:0.7rem;color:#999">-</td>';
             }
@@ -800,11 +848,9 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
         if (r.pose && r.pose.translation) {
           html += '<p style="font-size:0.82rem;color:#666;font-family:monospace">位姿: [' + r.pose.translation.map(function(v) { return v.toFixed(2); }).join(', ') + ']</p>';
         }
-        if (r.comparison_image) {
-          // 后端的 comparison_image 已经是 /projections/localize/task_X/... 格式
-          var imgSrc = r.comparison_image;
+        if (compImg) {
           html += '<div style="margin-top:0.5rem;text-align:center">';
-          html += '<img src="' + imgSrc + '" style="max-width:100%;max-height:400px;border-radius:4px;border:1px solid #ddd" onerror="this.style.display=\'none\'">';
+          html += '<img src="' + compImg + '" style="max-width:100%;max-height:400px;border-radius:4px;border:1px solid #ddd" onerror="this.style.display=\'none\'">';
           html += '<p style="font-size:0.75rem;color:#888;margin-top:0.2rem">左: 原图 | 右: 重投影 | 彩色连线: 匹配点</p>';
           html += '</div>';
         }
@@ -836,7 +882,17 @@ async function refinePose(btn, taskId, methodIdx) {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({task_id: taskId, method_index: methodIdx}),
     });
-    var result = await resp.json();
+    var text = await resp.text();
+    var result = {};
+    try {
+      result = text ? JSON.parse(text) : {};
+    } catch (parseErr) {
+      console.error('refine response is not valid json:', text);
+      result = { success: false, error: text || 'unknown error' };
+    }
+    if (!resp.ok || result.error) {
+      throw new Error(result.error || '优化请求失败');
+    }
     if (result.success) {
       var msg = '✅ 优化完成';
       if (result.improved) {
@@ -846,7 +902,6 @@ async function refinePose(btn, taskId, methodIdx) {
       }
       btn.textContent = msg;
       btn.style.background = result.improved ? '#4caf50' : '#888';
-      // 刷新页面
       setTimeout(function() { location.reload(); }, 1500);
     } else {
       btn.textContent = '❌ 优化失败: ' + (result.error || '未知错误');
@@ -854,7 +909,8 @@ async function refinePose(btn, taskId, methodIdx) {
       btn.disabled = false;
     }
   } catch(e) {
-    btn.textContent = '❌ 请求失败';
+    btn.textContent = '❌ 请求失败: ' + e.message;
+    btn.style.background = '#f44336';
     btn.disabled = false;
   }
 }

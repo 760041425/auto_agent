@@ -43,45 +43,50 @@ def _run_preprocess():
         las_path = str(las_files[0])
         _preprocess_status["step"] = f"处理 {las_files[0].name}..."
 
-        # Step 2: 分块投影
-        _preprocess_status["step"] = "生成分块 LAS 投影图（20m×20m→512×512）..."
+        # Step 2: Octree 多视角投影
+        _preprocess_status["step"] = "构建 Octree 八叉树..."
         _preprocess_status["progress"] = 10
-        from services.las_processor.projection import project_las_multi_view
-        tiles = project_las_multi_view(las_path)
-        _preprocess_status["progress"] = 70
+        from services.las_processor.projection_octree import project_las_multi_view_octree
+        out_dir = Path("projections")
+        if out_dir.exists():
+            for child in out_dir.iterdir():
+                if child.is_file() and child.name not in {"tile_features_index.json", "tile_index.json", "projection_view_poses.json"}:
+                    child.unlink()
+                elif child.is_dir() and child.name != "octree_data":
+                    import shutil
+                    shutil.rmtree(child, ignore_errors=True)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        def _progress_callback(step, progress):
+            _preprocess_status["step"] = step
+            _preprocess_status["progress"] = progress
+
+        tiles = project_las_multi_view_octree(
+            las_path,
+            output_dir=str(out_dir),
+            max_poses=None,
+            force_rebuild=True,
+            progress_callback=_progress_callback,
+        )
         n_tiles = len(tiles)
-        total_pixels = sum(t["pixel_count"] for t in tiles)
-        _preprocess_status["step"] = (f"投影完成: {n_tiles} 张图, "
+        total_pixels = sum(t.get("pixel_count", 0) for t in tiles)
+        _preprocess_status["step"] = (f"Octree 投影完成: {n_tiles} 张图, "
                                       f"{total_pixels} 总像素")
 
-        # Step 3: 提取各 tile 的 SIFT 特征
-        _preprocess_status["step"] = "提取各图 SIFT 特征..."
+        # Step 3: 提取各 tile 的 SALAD 特征（DINOv2 全局描述子）
+        _preprocess_status["step"] = "提取各图 SALAD 特征 (DINOv2)..."
         _preprocess_status["progress"] = 75
-        import cv2
-        import numpy as np
-        feat_dir = Path("projections")
-        tile_features = {}
-        for i, tile in enumerate(tiles):
-            _preprocess_status["step"] = f"提取特征 {i+1}/{n_tiles}: {Path(tile['image_path']).name}"
-            _preprocess_status["progress"] = 75 + int(20 * (i + 1) / n_tiles)
-            proj_img = cv2.imread(tile["image_path"], cv2.IMREAD_GRAYSCALE)
-            if proj_img is None:
-                continue
-            sift = cv2.SIFT_create(nfeatures=1000)
-            kp, des = sift.detectAndCompute(proj_img, None)
-            if des is not None and kp is not None:
-                tile_features[Path(tile["image_path"]).stem] = {
-                    "n_kp": len(kp),
-                    "path": tile["image_path"],
-                }
-
-        # 保存特征索引
-        with open(feat_dir / "tile_features_index.json", "w") as f:
-            json.dump(tile_features, f, indent=2)
-
-        total_kp = sum(v["n_kp"] for v in tile_features.values())
+        
+        from services.localizer.salad_roma import _build_salad_index
+        
+        def _salad_progress_callback(processed, total, elapsed):
+            _preprocess_status["step"] = f"提取 SALAD 特征 {processed}/{total}, 已耗时 {elapsed:.1f}s"
+            _preprocess_status["progress"] = 75 + int(20 * processed / total)
+        
+        _build_salad_index(force_rebuild=True, progress_callback=_salad_progress_callback)
+        
         _preprocess_status["progress"] = 95
-        _preprocess_status["step"] = f"特征提取完成: {len(tile_features)} 张图, {total_kp} 特征点"
+        _preprocess_status["step"] = f"SALAD 特征提取完成: {n_tiles} 张图"
 
         # Step 4: 完成
         _preprocess_status["progress"] = 100
@@ -102,9 +107,12 @@ def start_preprocess():
     """启动 LAS 预处理（投影 + 特征提取）"""
     if _preprocess_status["running"]:
         return {"status": "running", "message": "预处理正在进行中"}
-    thread = threading.Thread(target=_run_preprocess, daemon=True)
-    thread.start()
-    return {"status": "started", "message": "预处理已启动"}
+    try:
+        thread = threading.Thread(target=_run_preprocess, daemon=True)
+        thread.start()
+        return {"status": "started", "message": "预处理已启动"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 @router.get("/preprocess/status")

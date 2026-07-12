@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -18,8 +19,8 @@ class ImageListResponse(BaseModel):
     filename: str
     original_name: str
     status: str
-    width: int | None = None
-    height: int | None = None
+    width: Optional[int] = None
+    height: Optional[int] = None
     created_at: datetime
 
 
@@ -32,10 +33,10 @@ class TaskResponse(BaseModel):
     id: int
     image_id: int
     status: str
-    result_json: dict | None = None
-    error_message: str | None = None
+    result_json: Optional[dict] = None
+    error_message: Optional[str] = None
     created_at: datetime
-    finished_at: datetime | None = None
+    finished_at: Optional[datetime] = None
 
 
 class ReportResponse(BaseModel):
@@ -44,9 +45,9 @@ class ReportResponse(BaseModel):
     task_id: int
     matched: bool
     total_matches: int
-    center_3d: dict | None = None
-    regions: list | None = None
-    confidence: float | None = None
+    center_3d: Optional[dict] = None
+    regions: Optional[list] = None
+    confidence: Optional[float] = None
     created_at: datetime
 
 
@@ -58,4 +59,4 @@ class MatchRegion(BaseModel):
 
 
 class RegionQueryRequest(BaseModel):
-    region: MatchRegion | None = None
+    region: Optional[MatchRegion] = None

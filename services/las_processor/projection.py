@@ -67,58 +67,206 @@ def _quat_to_rotmat(qx, qy, qz, qw):
     ], dtype=np.float64)
 
 
+def _estimate_surface_normals(points_3d, k=8):
+    """基于局部点云分布近似法线，用于软投影着色。"""
+    if points_3d is None or len(points_3d) < 3:
+        return np.zeros((0, 3), dtype=np.float64)
+
+    points = np.asarray(points_3d, dtype=np.float64)
+    if len(points) == 3:
+        return np.array([[0.0, 0.0, 1.0]] * 3, dtype=np.float64)
+
+    centroid = points.mean(axis=0)
+    centered = points - centroid
+    _, _, vh = np.linalg.svd(centered, full_matrices=False)
+    normals = vh[-1].reshape(1, 3)
+    normals = np.repeat(normals, len(points), axis=0)
+    normals = normals / (np.linalg.norm(normals, axis=1, keepdims=True) + 1e-8)
+    return normals
+
+
+def _get_camera_matrix(img_w, img_h, fov_deg=75):
+    """据图像尺寸和视场角构造相机内参。"""
+    f = max(img_w, img_h) / (2 * np.tan(np.deg2rad(fov_deg / 2)))
+    return np.array([
+        [f, 0, img_w / 2],
+        [0, f, img_h / 2],
+        [0, 0, 1],
+    ], dtype=np.float64)
+
+
+def _render_camera_like_points(points_3d, point_colors, camera_matrix, img_w, img_h, rvec=None, tvec=None, radius=1.2):
+    """用深度缓冲、软点扩散和轻微法线着色生成更像相机视图的投影图。"""
+    if points_3d is None or len(points_3d) == 0:
+        return np.zeros((img_h, img_w, 3), dtype=np.uint8)
+
+    if rvec is None:
+        rvec = np.zeros(3, dtype=np.float64)
+    if tvec is None:
+        tvec = np.zeros(3, dtype=np.float64)
+
+    points = np.asarray(points_3d, dtype=np.float64)
+    colors = np.asarray(point_colors, dtype=np.float32)
+    if colors.ndim == 1:
+        colors = colors.reshape(1, 3)
+
+    projected, _ = cv2.projectPoints(points, rvec, tvec, camera_matrix, None)
+    projected = projected.reshape(-1, 2)
+
+    img = np.zeros((img_h, img_w, 3), dtype=np.float32)
+    depth_map = np.full((img_h, img_w), np.inf, dtype=np.float32)
+
+    valid = (projected[:, 0] >= 0) & (projected[:, 0] < img_w) & (projected[:, 1] >= 0) & (projected[:, 1] < img_h) & (points[:, 2] > 1e-3)
+    if not np.any(valid):
+        return np.zeros((img_h, img_w, 3), dtype=np.uint8)
+
+    valid_pts = points[valid]
+    valid_proj = projected[valid]
+    valid_colors = colors[valid]
+    normals = _estimate_surface_normals(valid_pts)
+
+    for idx in range(len(valid_pts)):
+        px, py = int(round(valid_proj[idx, 0])), int(round(valid_proj[idx, 1]))
+        if px < 0 or px >= img_w or py < 0 or py >= img_h:
+            continue
+
+        z_val = float(valid_pts[idx, 2])
+        if not np.isfinite(z_val) or z_val >= depth_map[py, px]:
+            continue
+
+        depth_map[py, px] = z_val
+        color = np.array([valid_colors[idx, 2], valid_colors[idx, 1], valid_colors[idx, 0]], dtype=np.float32)
+        normal = normals[idx] if len(normals) > idx else np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        light_dir = np.array([0.2, -0.2, 1.0], dtype=np.float64)
+        light_dir = light_dir / (np.linalg.norm(light_dir) + 1e-8)
+        shading = 0.35 + 0.65 * np.clip(np.dot(normal, light_dir), 0.0, 1.0)
+        texture_bias = 0.05 * (np.sin((px + 1) * 0.1) + np.cos((py + 1) * 0.07))
+        view_factor = np.clip(1.0 - (z_val / max(abs(z_val), 1.0)), 0.6, 1.0)
+        img[py, px] = color * (0.7 + texture_bias + 0.3 * shading) * view_factor
+
+    for idx in range(len(valid_pts)):
+        px, py = int(round(valid_proj[idx, 0])), int(round(valid_proj[idx, 1]))
+        if px < 0 or px >= img_w or py < 0 or py >= img_h:
+            continue
+
+        z_val = float(valid_pts[idx, 2])
+        if not np.isfinite(z_val) or z_val >= depth_map[py, px]:
+            continue
+
+        color = np.array([valid_colors[idx, 2], valid_colors[idx, 1], valid_colors[idx, 0]], dtype=np.float32)
+        normal = normals[idx] if len(normals) > idx else np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        light_dir = np.array([0.2, -0.2, 1.0], dtype=np.float64)
+        light_dir = light_dir / (np.linalg.norm(light_dir) + 1e-8)
+        shading = 0.35 + 0.65 * np.clip(np.dot(normal, light_dir), 0.0, 1.0)
+        texture_bias = 0.05 * (np.sin((px + 1) * 0.1) + np.cos((py + 1) * 0.07))
+        view_factor = np.clip(1.0 - (z_val / max(abs(z_val), 1.0)), 0.6, 1.0)
+        for oy in range(-int(radius), int(radius) + 1):
+            for ox in range(-int(radius), int(radius) + 1):
+                nx, ny = px + ox, py + oy
+                if 0 <= nx < img_w and 0 <= ny < img_h:
+                    dist = np.sqrt(ox * ox + oy * oy)
+                    if dist <= radius:
+                        weight = max(0.0, 1.0 - dist / radius)
+                        if z_val < depth_map[ny, nx]:
+                            img[ny, nx] = np.maximum(img[ny, nx], color * (0.7 + texture_bias + 0.3 * shading) * view_factor * weight)
+
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    img = cv2.GaussianBlur(img, (3, 3), 0)
+    img = cv2.convertScaleAbs(img, alpha=1.05, beta=6)
+    return img
+
+
+def _apply_camera_like_shading(image, depth=None):
+    """对已有投影图做轻微的相机式明暗与纹理增强。"""
+    if image is None:
+        return None
+
+    img = np.array(image, copy=True)
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.ndim == 3 and img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+
+    img_float = img.astype(np.float32)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    grad_x = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    edge = np.sqrt(grad_x * grad_x + grad_y * grad_y)
+    edge_norm = edge / (edge.max() + 1e-6)
+
+    if depth is not None:
+        depth_arr = np.asarray(depth, dtype=np.float32)
+        depth_arr = np.nan_to_num(depth_arr, nan=0.0, posinf=0.0, neginf=0.0)
+        depth_min = depth_arr.min() if depth_arr.size else 0.0
+        depth_max = depth_arr.max() if depth_arr.size else 1.0
+        depth_norm = (depth_arr - depth_min) / (depth_max - depth_min + 1e-6)
+        depth_norm = np.clip(depth_norm, 0.0, 1.0)
+    else:
+        depth_norm = np.zeros_like(gray)
+
+    shading = (0.9 + 0.12 * edge_norm[..., None]) * (0.88 + 0.12 * (1.0 - depth_norm[..., None]))
+    img_float = img_float * shading
+    img_float = cv2.GaussianBlur(img_float, (3, 3), 0)
+    img_float = cv2.convertScaleAbs(img_float, alpha=1.03, beta=4)
+    return img_float
+
+
+def _get_view_rotation(pose, view_dir):
+    """返回用于 8 个斜向地面投影方向的相机旋转矩阵。"""
+    R_pose = _quat_to_rotmat(pose['qx'], pose['qy'], pose['qz'], pose['qw'])
+
+    heading_map = {
+        'n': 0.0,
+        'ne': 45.0,
+        'e': 90.0,
+        'se': 135.0,
+        's': 180.0,
+        'sw': 225.0,
+        'w': 270.0,
+        'nw': 315.0,
+    }
+    if isinstance(view_dir, str):
+        heading_deg = heading_map.get(view_dir.lower(), 0.0)
+    else:
+        heading_deg = float(view_dir)
+
+    yaw = np.deg2rad(heading_deg)
+    pitch = np.deg2rad(-35.0)
+    R_yaw = np.array([
+        [np.cos(yaw), -np.sin(yaw), 0.0],
+        [np.sin(yaw), np.cos(yaw), 0.0],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+    R_pitch = np.array([
+        [1.0, 0.0, 0.0],
+        [0.0, np.cos(pitch), -np.sin(pitch)],
+        [0.0, np.sin(pitch), np.cos(pitch)],
+    ], dtype=np.float64)
+    return R_pitch @ R_yaw @ R_pose
+
+
 def _project_points(pts_3d, pose, view_dir):
-    """
-    根据位姿和视角方向投影3D点。
-    view_dir: 'top'顶视, 'front'前视(沿相机朝向), 'side'侧视
-    
-    1. top: 从正上方俯视（无视相机朝向，直接看地面）
-    2. front: 沿相机朝向方向平视
-    3. side: 从相机侧面90度看
-    """
+    """根据位姿和斜向地面投影方向将3D点投到2D平面。"""
     x, y, z = pts_3d[:, 0], pts_3d[:, 1], pts_3d[:, 2]
-    
+
     # 平移：以位姿为中心
     x_local = x - pose['x']
     y_local = y - pose['y']
     z_local = z - pose['z']
-    
-    # 旋转矩阵（世界→相机）
-    R = _quat_to_rotmat(pose['qx'], pose['qy'], pose['qz'], pose['qw'])
-    
-    if view_dir == 'top':
-        # 顶视图：俯视（Z轴朝下看）
-        # 绕X轴转-90度，使Z朝下
-        R_view = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=np.float64)
-        R_total = R_view @ R
-    elif view_dir == 'side':
-        # 侧视图：从侧面看，沿相机朝向的垂直方向
-        # 绕Z轴转-90度
-        R_view = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], dtype=np.float64)
-        R_total = R_view @ R
-    else:
-        # front视图：沿相机朝向看
-        R_total = R
-    
+
+    R_total = _get_view_rotation(pose, view_dir)
+
     # 相机坐标系: X右, Y下, Z前（相机朝向）
     pts_cam = R_total @ np.vstack([x_local, y_local, z_local])
-    
+
     # 透视投影：图像坐标 (u, v) = (X/Z, Y/Z) * f
-    # 深度 = Z（距离相机的距离）
     depth = pts_cam[2, :]
-    # 只保留相机前方的点
     valid = depth > 0
-    
-    if view_dir == 'top':
-        # 顶视图: 直接用X,Y作为图像坐标
-        px = pts_cam[0, :]
-        py = -pts_cam[1, :]  # Y轴翻转
-    else:
-        # 前/侧视图: 透视投影
-        f = 100.0  # 焦距
-        px = pts_cam[0, :] / np.maximum(depth, 1e-6) * f
-        py = -pts_cam[1, :] / np.maximum(depth, 1e-6) * f  # Y翻转
-    
+
+    f = 100.0  # 焦距
+    px = pts_cam[0, :] / np.maximum(depth, 1e-6) * f
+    py = -pts_cam[1, :] / np.maximum(depth, 1e-6) * f  # Y翻转
+
     return px, py, depth
 
 
@@ -231,7 +379,7 @@ def project_las_multi_view(
             f.unlink(missing_ok=True)
     
     generated = []
-    view_dirs = ['top', 'front', 'side']
+    view_dirs = ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw']
     
     if poses:
         # 从位姿投影
@@ -268,28 +416,35 @@ def project_las_multi_view(
                 if len(col) < 30:
                     continue
                 
-                # 渲染
-                img = np.zeros((h, w, 3), dtype=np.uint8)
-                pts_mask = pts_local[mask][valid]
-                cols_local = colors_local[mask][valid]
-                for i in range(len(col)):
-                    cr, cg, cb = cols_local[i]
-                    img[row[i], col[i]] = [int(cb), int(cg), int(cr)]
-                
-                # 增强
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                s = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
-                sy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
-                edges = np.sqrt(s ** 2 + sy ** 2)
-                if edges.max() > 0:
-                    edges = (edges / edges.max() * 30).clip(0, 255).astype(np.uint8)
-                    for c in range(3):
-                        img[:, :, c] = np.clip(img[:, :, c].astype(np.int32) + edges, 0, 255).astype(np.uint8)
-                
-                pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-                pil = ImageEnhance.Contrast(pil).enhance(1.2)
-                pil = ImageEnhance.Sharpness(pil).enhance(1.5)
-                img = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+                # 渲染：先把点云变换到当前视角的相机坐标，再做软投影着色
+                pts_view = np.column_stack([
+                    pts_local[mask][valid][:, 0] - pose['x'],
+                    pts_local[mask][valid][:, 1] - pose['y'],
+                    pts_local[mask][valid][:, 2] - pose['z'],
+                ])
+                if len(pts_view) > 0:
+                    R_total = _get_view_rotation(pose, vd)
+                    pts_cam = (R_total @ pts_view.T).T
+                    valid_cam = pts_cam[:, 2] > 0
+                    pts_cam = pts_cam[valid_cam]
+                    cols_local = colors_local[mask][valid]
+                    cols_view = cols_local[valid_cam]
+                    if len(pts_cam) > 0:
+                        camera_matrix = _get_camera_matrix(w, h, fov_deg=75)
+                        img = _render_camera_like_points(
+                            pts_cam,
+                            cols_view,
+                            camera_matrix,
+                            w,
+                            h,
+                            radius=1.2,
+                        )
+                    else:
+                        img = np.zeros((h, w, 3), dtype=np.uint8)
+                else:
+                    img = np.zeros((h, w, 3), dtype=np.uint8)
+
+                img = _apply_camera_like_shading(img)
                 
                 # 坐标映射
                 coord_map = {}
@@ -306,9 +461,14 @@ def project_las_multi_view(
                 fx = f"{pose['x']:.1f}_{pose['y']:.1f}"
                 fname = f"view_{vd}_{fx}_{pi}.png"
                 cname = f"coord_{vd}_{fx}_{pi}.json"
+                out_path = out / fname
+                coord_path = out / cname
+                out.mkdir(parents=True, exist_ok=True)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                coord_path.parent.mkdir(parents=True, exist_ok=True)
                 
-                cv2.imwrite(str(out / fname), img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
-                with open(str(out / cname), "w") as f:
+                cv2.imwrite(str(out_path), img, [cv2.IMWRITE_PNG_COMPRESSION, 3])
+                with open(str(coord_path), "w") as f:
                     json.dump({
                         "width": w, "height": h,
                         "resolution": RES,
@@ -362,6 +522,7 @@ def project_las_multi_view(
                 
                 fname = f"tile_{row}_{col}.png"
                 cname = f"coord_tile_{row}_{col}.json"
+                out.mkdir(parents=True, exist_ok=True)
                 cv2.imwrite(str(out / fname), img)
                 with open(str(out / cname), "w") as f:
                     json.dump({"width": w, "height": h, "pixel_count": len(coord_map), "pixels": coord_map}, f)

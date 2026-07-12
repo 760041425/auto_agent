@@ -26,7 +26,7 @@ main { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
 .toolbar button:hover, .btn-primary:hover { background: #c23350; }
 
 .image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; }
-.image-card { background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); transition: transform 0.2s; }
+.image-card { position: relative; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1); transition: transform 0.2s; }
 .image-card:hover { transform: translateY(-2px); }
 .image-card img { width: 100%; height: 150px; object-fit: cover; cursor: pointer; }
 .image-card .info { padding: 0.5rem; font-size: 0.8rem; }
@@ -41,6 +41,7 @@ main { max-width: 1200px; margin: 2rem auto; padding: 0 1rem; }
 .image-card .match-btn.loading { background: #fff3e0; border-color: #ff9800; color: #ff9800; }
 .image-card .match-btn.done { background: #e8f5e9; border-color: #4caf50; color: #4caf50; cursor: default; }
 .image-card .match-btn.failed { background: #ffebee; border-color: #f44336; color: #f44336; cursor: default; }
+.image-card .delete-btn { position: absolute; bottom: 0.3rem; right: 0.3rem; width: 24px; height: 24px; border: none; background: rgba(244,67,54,0.9); border-radius: 50%; color: #fff; cursor: pointer; font-size: 0.75rem; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
 
 .task-list { display: flex; flex-direction: column; gap: 0.5rem; }
 .task-item { background: #fff; border-radius: 8px; padding: 0; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden; }

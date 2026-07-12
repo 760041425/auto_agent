@@ -1,10 +1,12 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from services.las_processor.colmap_reader import read_images_txt, read_points3d_txt
-from services.las_processor.projection import project_las_multi_view
+from services.las_processor.projection import project_las_multi_view, _render_camera_like_points
+from services.las_processor.projection_octree import build_projection_view_poses
 
 
 def test_read_images_txt():
@@ -22,14 +24,52 @@ def test_read_points3d_txt():
     assert first.x != 0
 
 
+def test_camera_like_projection_renders_nontrivial_image():
+    points = np.array([
+        [0.0, 0.0, 3.0],
+        [0.2, -0.1, 4.5],
+        [-0.2, 0.1, 5.0],
+    ], dtype=np.float32)
+    colors = np.array([
+        [255, 0, 0],
+        [0, 255, 0],
+        [0, 0, 255],
+    ], dtype=np.uint8)
+    camera_matrix = np.array([[180.0, 0.0, 32.0], [0.0, 180.0, 32.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+
+    img = _render_camera_like_points(points, colors, camera_matrix, 64, 64, radius=1.2)
+
+    assert img.shape == (64, 64, 3)
+    assert img.max() > 0
+    assert img.std() > 0
+
+
+def test_build_projection_view_poses_writes_eight_views(tmp_path):
+    poses = [
+        {"x": 0.0, "y": 0.0, "z": 1.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0, "name": "p0"},
+        {"x": 12.0, "y": 0.0, "z": 1.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0, "name": "p1"},
+    ]
+
+    pose_file = build_projection_view_poses(poses, output_dir=str(tmp_path), sample_interval_m=10.0, use_grid_sampling=False)
+
+    assert pose_file.exists()
+    with open(pose_file) as f:
+        payload = json.load(f)
+
+    assert payload["sample_interval_m"] == 10.0
+    assert len(payload["views"]) == 16  # 2 poses × 8 directions
+    assert all(view["view_dir"] in {"n", "ne", "e", "se", "s", "sw", "w", "nw"} for view in payload["views"])
+
+
 def test_las_projection():
     las_files = [f for f in sorted(Path("las").glob("*.las")) if "subsample" not in f.name]
     las_path = str(las_files[0]) if las_files else "las/default_2026-05-28-112428.las"
     result = project_las_multi_view(
         las_path,
         "projections/test_proj",
+        max_poses=1,
     )
-    assert len(result) > 0
+    assert len(result) >= 8
     first = result[0]
     assert first["width"] > 0
     assert first["height"] > 0
