@@ -154,12 +154,15 @@ def load_colmap(las_dir: str = "las", force_reload: bool = False):
     # ── 构建 KD-Tree 空间索引 ──
     log("构建3D点 KD-Tree 空间索引...")
     pts_array = []
+    colors_array = []
     pt_ids = []
     for pid, p in _COLMAP_POINTS.items():
         pts_array.append([p.x, p.y, p.z])
+        colors_array.append([p.r, p.g, p.b])
         pt_ids.append(pid)
     _POINT_INDEX = {
         "pts": np.array(pts_array, dtype=np.float32),
+        "colors": np.array(colors_array, dtype=np.uint8),
         "ids": np.array(pt_ids),
         "tree": cKDTree(np.array(pts_array, dtype=np.float64)),
     }
@@ -174,6 +177,12 @@ def load_colmap(las_dir: str = "las", force_reload: bool = False):
     log(f"  位姿: {len(poses)} 个")
 
     return _COLMAP_POINTS, _COLMAP_IMAGES
+
+
+def get_point_cloud_arrays():
+    """返回进程级缓存的点云数组，避免每次定位重建 500 万个 Python 对象。"""
+    load_colmap()
+    return _POINT_INDEX["pts"], _POINT_INDEX["colors"]
 
 
 def _build_3d_point_descriptors(
@@ -267,81 +276,97 @@ def _estimate_surface_normals(points_3d, k=8):
 
 
 def _render_point_cloud_splat(points_3d, point_colors, camera_matrix, img_w, img_h, rvec=None, tvec=None, radius=1.5):
-    """用深度缓冲、遮挡、法线和纹理感知的软投影点渲染，让点云更像真实相机图像。"""
+    """带软点扩散、法线光照和深度缓冲的相机式点云渲染。
+
+    与 projection.py 的 _render_camera_like_points 保持一致的渲染质量。
+    """
     if points_3d is None or len(points_3d) == 0:
         return np.zeros((img_h, img_w, 3), dtype=np.uint8)
 
     if rvec is None or tvec is None:
         return np.zeros((img_h, img_w, 3), dtype=np.uint8)
 
-    projected, _ = cv2.projectPoints(points_3d, rvec, tvec, camera_matrix, None)
-    projected = projected.reshape(-1, 2)
+    rmat, _ = cv2.Rodrigues(rvec)
+    points = np.asarray(points_3d, dtype=np.float64)
+    colors = np.asarray(point_colors, dtype=np.float32)
+    tvec_f = np.asarray(tvec, dtype=np.float64).reshape(1, 3)
 
-    img = np.zeros((img_h, img_w, 3), dtype=np.float32)
-    depth = np.full((img_h, img_w), np.inf, dtype=np.float32)
-
-    valid = (projected[:, 0] >= 0) & (projected[:, 0] < img_w) & (projected[:, 1] >= 0) & (projected[:, 1] < img_h)
+    # 世界坐标 → 相机坐标
+    camera_pts = points @ rmat.T + tvec_f
+    z = camera_pts[:, 2]
+    valid = np.isfinite(z) & (z > 1e-3)
     if not np.any(valid):
         return np.zeros((img_h, img_w, 3), dtype=np.uint8)
 
-    valid_pts = points_3d[valid]
-    valid_proj = projected[valid]
-    valid_colors = point_colors[valid]
-    normals = _estimate_surface_normals(valid_pts)
-    if len(normals) == 0:
-        normals = np.zeros((len(valid_pts), 3), dtype=np.float64)
+    camera_pts, z, colors = camera_pts[valid], z[valid], colors[valid]
 
-    # 先用相机坐标空间的 z 作为深度测试，做遮挡处理
-    for idx in range(len(valid_pts)):
-        px, py = int(round(valid_proj[idx, 0])), int(round(valid_proj[idx, 1]))
-        if px < 0 or px >= img_w or py < 0 or py >= img_h:
+    # 投影到图像平面
+    px = np.rint(camera_matrix[0, 0] * camera_pts[:, 0] / z + camera_matrix[0, 2]).astype(np.int32)
+    py = np.rint(camera_matrix[1, 1] * camera_pts[:, 1] / z + camera_matrix[1, 2]).astype(np.int32)
+
+    inside = (px >= 0) & (px < img_w) & (py >= 0) & (py < img_h)
+    if not np.any(inside):
+        return np.zeros((img_h, img_w, 3), dtype=np.uint8)
+
+    px, py, z, colors = px[inside], py[inside], z[inside], colors[inside]
+
+    # 法线估计（用SVD平面拟合）
+    centroid = camera_pts[inside].mean(axis=0)
+    centered = camera_pts[inside] - centroid
+    _, _, vh = np.linalg.svd(centered, full_matrices=False)
+    normal = vh[-1]
+    normal = normal / (np.linalg.norm(normal) + 1e-8)
+
+    # 深度缓冲 + 软点扩散
+    img = np.zeros((img_h, img_w, 3), dtype=np.float32)
+    depth_map = np.full((img_h, img_w), np.inf, dtype=np.float32)
+    light_dir = np.array([0.2, -0.2, 1.0], dtype=np.float64)
+    light_dir = light_dir / (np.linalg.norm(light_dir) + 1e-8)
+    shading_base = 0.35 + 0.65 * np.clip(np.dot(normal, light_dir), 0.0, 1.0)
+
+    int_radius = int(np.ceil(radius))
+
+    for idx in range(len(px)):
+        xi, yi = px[idx], py[idx]
+        zi = float(z[idx])
+        if zi >= depth_map[yi, xi]:
             continue
 
-        z_val = float(valid_pts[idx, 2])
-        if not np.isfinite(z_val):
-            continue
+        # RGB → BGR + 颜色uint16缩放到uint8
+        color = np.array([float(colors[idx, 2]), float(colors[idx, 1]), float(colors[idx, 0])], dtype=np.float32)
+        if color.max() > 255:
+            color /= 256.0
+        color = np.clip(color, 0, 255)
 
-        if z_val >= depth[py, px]:
-            continue
+        view_factor = np.clip(1.0 - (zi / max(zi, 1.0)), 0.6, 1.0)
+        base_val = color * view_factor * (0.7 + 0.3 * shading_base)
 
-        depth[py, px] = z_val
-        color = np.array([valid_colors[idx, 2], valid_colors[idx, 1], valid_colors[idx, 0]], dtype=np.float32)
-        normal = normals[idx]
-        # 近似 Lambert 光照 + 轻微纹理扰动
-        light_dir = np.array([0.2, -0.2, 1.0], dtype=np.float64)
-        light_dir = light_dir / (np.linalg.norm(light_dir) + 1e-8)
-        shading = 0.35 + 0.65 * np.clip(np.dot(normal, light_dir), 0.0, 1.0)
-        texture_bias = 0.05 * (np.sin((px + 1) * 0.1) + np.cos((py + 1) * 0.07))
-        view_factor = np.clip(1.0 - (z_val / max(abs(z_val), 1.0)), 0.6, 1.0)
-        img[py, px] = color * (0.7 + texture_bias + 0.3 * shading) * view_factor
-
-    # 将每个点扩散成软点，并进行深度缓冲遮挡
-    for idx in range(len(valid_pts)):
-        px, py = int(round(valid_proj[idx, 0])), int(round(valid_proj[idx, 1]))
-        if px < 0 or px >= img_w or py < 0 or py >= img_h:
-            continue
-        z_val = float(valid_pts[idx, 2])
-        if not np.isfinite(z_val) or z_val >= depth[py, px]:
-            continue
-
-        color = np.array([valid_colors[idx, 2], valid_colors[idx, 1], valid_colors[idx, 0]], dtype=np.float32)
-        normal = normals[idx]
-        light_dir = np.array([0.2, -0.2, 1.0], dtype=np.float64)
-        light_dir = light_dir / (np.linalg.norm(light_dir) + 1e-8)
-        shading = 0.35 + 0.65 * np.clip(np.dot(normal, light_dir), 0.0, 1.0)
-        texture_bias = 0.05 * (np.sin((px + 1) * 0.1) + np.cos((py + 1) * 0.07))
-        view_factor = np.clip(1.0 - (z_val / max(abs(z_val), 1.0)), 0.6, 1.0)
-        for oy in range(-int(radius), int(radius) + 1):
-            for ox in range(-int(radius), int(radius) + 1):
-                nx, ny = px + ox, py + oy
+        for oy in range(-int_radius, int_radius + 1):
+            for ox in range(-int_radius, int_radius + 1):
+                nx, ny = xi + ox, yi + oy
                 if 0 <= nx < img_w and 0 <= ny < img_h:
                     dist = np.sqrt(ox * ox + oy * oy)
                     if dist <= radius:
                         weight = max(0.0, 1.0 - dist / radius)
-                        if z_val < depth[ny, nx]:
-                            img[ny, nx] = np.maximum(img[ny, nx], color * (0.7 + texture_bias + 0.3 * shading) * view_factor * weight)
+                        if zi < depth_map[ny, nx]:
+                            img[ny, nx] = np.maximum(img[ny, nx], base_val * weight)
+                            depth_map[ny, nx] = zi
 
-    return np.clip(img, 0, 255).astype(np.uint8)
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    img = cv2.GaussianBlur(img, (3, 3), 0)
+    img = cv2.convertScaleAbs(img, alpha=1.05, beta=6)
+    return img
+
+
+def _filter_points_by_distance(points_3d, point_colors, tvec, max_dist=150.0):
+    """只保留位姿附近 max_dist 米内的3D点（避免远处稀疏点影响渲染质量）。"""
+    t = np.asarray(tvec, dtype=np.float64).flatten()
+    pts = np.asarray(points_3d, dtype=np.float64)
+    dists = np.linalg.norm(pts - t, axis=1)
+    mask = dists < max_dist
+    if mask.sum() < 100:
+        return points_3d, point_colors  # fallback: 使用全部
+    return pts[mask], np.asarray(point_colors)[mask]
 
 
 def render_projection_image(
@@ -349,12 +374,19 @@ def render_projection_image(
     rvec, tvec, camera_matrix,
     img_w, img_h, output_path,
     resolution_scale=1.0,
+    include_coord_map=False,
 ):
     """
     根据位姿将3D点云重新投影为2D图像。
 
+    只渲染位姿附近150m内的点，避免远处稀疏点影响画面质量。
+    使用与 projection.py 一致的软点渲染（法线光照+深度缓冲）。
+
     返回: (输出图像路径, 像素到3D坐标映射)
     """
+    # 只取位姿附近的点（避免全量点云投影后稀疏散点）
+    points_3d, point_colors = _filter_points_by_distance(points_3d, point_colors, tvec, max_dist=150.0)
+
     w = int(img_w * resolution_scale)
     h = int(img_h * resolution_scale)
 
@@ -368,13 +400,13 @@ def render_projection_image(
         return None, {}
 
     coord_map = {}
-    projected, valid = reproject_points(rvec, tvec, K, points_3d, w, h)
-    if len(projected) > 0:
+    if include_coord_map:
+        projected, valid = reproject_points(rvec, tvec, K, points_3d, w, h)
         valid_3d = points_3d[valid]
-        for i in range(len(projected)):
-            px, py = int(round(projected[i, 0])), int(round(projected[i, 1]))
-            if 0 <= px < w and 0 <= py < h:
-                coord_map[f"{px},{py}"] = [float(v) for v in valid_3d[i]]
+        coord_map = {
+            f"{int(round(p[0]))},{int(round(p[1]))}": [float(v) for v in xyz]
+            for p, xyz in zip(projected, valid_3d)
+        }
 
     cv2.imwrite(output_path, img)
 
@@ -686,6 +718,7 @@ def localize_image(
     feature_method: str = "sift",
     match_method: str = "flann",
     max_iterations: int = 3,
+    debug_visualizations: bool = False,
 ) -> dict:
     """
     端到端视觉定位主函数（v2 优化版）。
@@ -710,6 +743,7 @@ def localize_image(
             output_dir=output_dir,
             max_iterations=max_iterations,
             top_k_retrieval=3,
+            debug_visualizations=debug_visualizations,
         )
 
     tag = f"{feature_method}_{match_method}"
