@@ -231,22 +231,17 @@ def _rotate_colmap_line(colmap_line: str, axis: str = 'z', angle_deg: float = 90
     return f"{rw:.10f} {rx:.10f} {ry:.10f} {rz:.10f} {tx} {ty} {tz}"
 
 
-def _rvec_tvec_to_colmap_line(rvec, tvec, offset_xyz=(0, 0, 0), z_bias: float = 0.0):
+def _rvec_tvec_to_colmap_line(rvec, tvec, offset_xyz=(0, 0, 0)):
     """
     将 OpenCV PnP 输出的 rvec/tvec 转为 octree_render 所需的 colmap 行。
 
     OpenCV: rvec (Rodrigues旋转向量), tvec (平移, 局部坐标)
     COLMAP: qw qx qy qz tx ty tz (局部坐标, 含 offset)
 
-    与 _build_colmap_line 保持一致的 z_bias 处理：
-    预处理时 tz = pose['z'] + z_bias（相机抬高），
-    PnP 重投影也使用同样的 z_bias，否则相机高度低于点云，画面会黑。
-
     Args:
         rvec: (3,1) 或 (3,) Rodrigues 旋转向量 (OpenCV world→camera)
         tvec: (3,1) 或 (3,) 平移 (OpenCV world→camera, 已减 offset 的局部坐标)
         offset_xyz: UTM offset (offset_x, offset_y, offset_z)
-        z_bias: Z 轴偏移（相机抬高），与 _build_colmap_line 一致
 
     Returns:
         colmap_line: "qw qx qy qz tx ty tz" 格式字符串
@@ -270,7 +265,7 @@ def _rvec_tvec_to_colmap_line(rvec, tvec, offset_xyz=(0, 0, 0), z_bias: float = 
     # 所以: tvec = -R @ T  →  T = -R.T @ tvec
     # tvec 是局部坐标 (已减 offset)，octree 内部也是局部坐标
     T = -R.T @ tvec
-    tx, ty, tz = float(T[0]), float(T[1]), float(T[2] + z_bias)
+    tx, ty, tz = float(T[0]), float(T[1]), float(T[2])
 
     return f"{qw:.10f} {qx:.10f} {qy:.10f} {qz:.10f} {tx:.6f} {ty:.6f} {tz:.6f}"
 
@@ -283,7 +278,6 @@ def render_reprojection_octree(
     output_path: str,
     offset_xyz: tuple[float, float, float] = (0, 0, 0),
     config: Optional[str] = None,
-    z_bias: float = 0.0,
 ) -> bool:
     """
     用 octree_render 渲染 PnP 位姿的重投影图。
@@ -300,15 +294,12 @@ def render_reprojection_octree(
         output_path: 输出图像路径 (PNG)
         offset_xyz: UTM offset (offset_x, offset_y, offset_z)
         config: octree_render 配置文件路径
-        z_bias: Z 轴偏移（相机抬高），与 project_las_multi_view_octree
-                中的 _build_colmap_line 保持一致。
-                从 map_config.json 的 rtk_external_param[2] + 3.0 得来。
 
     Returns:
         True 渲染成功 / False 失败
     """
-    # 1. 构建 colmap 行（含 z_bias，与预处理保持一致）
-    colmap_line = _rvec_tvec_to_colmap_line(rvec, tvec, offset_xyz, z_bias=z_bias)
+    # 1. 构建 colmap 行
+    colmap_line = _rvec_tvec_to_colmap_line(rvec, tvec, offset_xyz)
 
     # 2. 计算归一化焦距 = f / max(w, h)
     f = camera_matrix[0, 0]  # fx
