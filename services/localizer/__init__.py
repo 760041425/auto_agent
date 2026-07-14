@@ -764,8 +764,10 @@ def localize_image(
             cached['inliers'], cached['best_3d'], cached['best_2d'],
             cached['known_points'], cached['camera_matrix'],
             cached['q_w'], cached['q_h'], cached['q_small'],
-            out, tag
+            out, tag,
+            query_image_path=query_image_path,
         )
+
 
     # ── 首次运行：完整 PnP 流程 ──
     # 1. 读取查询图像
@@ -947,7 +949,8 @@ def localize_image(
     return _render_results(
         rvec, tvec, inlier_count, best_3d, best_2d,
         known_points, camera_matrix, q_w, q_h, q_small,
-        out, tag
+        out, tag,
+        query_image_path=query_image_path,
     )
 
 
@@ -1092,9 +1095,13 @@ def _render_results(
     rvec, tvec, inlier_count, best_3d, best_2d,
     known_points, camera_matrix, q_w, q_h, q_small,
     out: Path, tag: str,
+    query_image_path: str = "",
 ) -> dict:
     """
     生成重投影图像和双图对比。
+    
+    优先使用 octree_render（C++八叉树引擎）高质量渲染重投影图；
+    octree 不可用时 fallback 到软件渲染（_render_point_cloud_splat）。
     
     对比图展示：
     - 左: 查询原图 (query)
@@ -1109,8 +1116,35 @@ def _render_results(
 
     proj_path = str(out / f"reprojection_{tag}.png")
     t0 = time.time()
-    proj_path, coord_map = render_projection_image(all_pts, all_col, rvec, tvec, camera_matrix, q_w, q_h, proj_path)
-    log(f"  重投影渲染耗时: {time.time()-t0:.1f}s")
+    
+    # ── 优先使用 octree_render 高质量渲染 ──
+    # octree 数据集位于 projections/octree_data/，与预处理共享
+    _octree_rendered = False
+    octree_dataset = Path("projections/octree_data")
+    if octree_dataset.exists() and (octree_dataset / "manifest.json").exists():
+        try:
+            from services.las_processor.projection_octree import render_reprojection_octree
+            from services.las_processor.projection import _load_poses_and_offset
+            _, ox, oy, oz = _load_poses_and_offset()
+            ok = render_reprojection_octree(
+                str(octree_dataset),
+                rvec, tvec,
+                camera_matrix,
+                q_w, q_h,
+                proj_path,
+                offset_xyz=(ox, oy, oz),
+            )
+            if ok:
+                _octree_rendered = True
+                log(f"  重投影渲染(octree): {time.time()-t0:.1f}s")
+        except Exception as e:
+            log(f"  Octree渲染失败, fallback: {e}")
+    
+    if not _octree_rendered:
+        proj_path, coord_map = render_projection_image(all_pts, all_col, rvec, tvec, camera_matrix, q_w, q_h, proj_path)
+        log(f"  重投影渲染(软件): {time.time()-t0:.1f}s")
+    else:
+        coord_map = {}
 
     coord_path = str(out / f"reprojection_coord_{tag}.json")
     with open(coord_path, "w") as f:
