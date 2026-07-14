@@ -259,8 +259,13 @@ def _rvec_tvec_to_colmap_line(rvec, tvec, offset_xyz=(0, 0, 0)):
     qy = (R[0, 2] - R[2, 0]) / (4.0 * qw + 1e-10)
     qz = (R[1, 0] - R[0, 1]) / (4.0 * qw + 1e-10)
 
+    # 转换平移：OpenCV tvec → COLMAP T
+    # OpenCV:  P_cam = R @ P_world + tvec
+    # COLMAP:  P_cam = R @ (P_world - T) = R @ P_world - R @ T
+    # 所以: tvec = -R @ T  →  T = -R.T @ tvec
     # tvec 是局部坐标 (已减 offset)，octree 内部也是局部坐标
-    tx, ty, tz = tvec[0], tvec[1], tvec[2]
+    T = -R.T @ tvec
+    tx, ty, tz = float(T[0]), float(T[1]), float(T[2])
 
     return f"{qw:.10f} {qx:.10f} {qy:.10f} {qz:.10f} {tx:.6f} {ty:.6f} {tz:.6f}"
 
