@@ -310,9 +310,10 @@ def render_reprojection_octree(
     # 1. 构建 colmap 行（不加 z_bias，Pnp算出来是什么就是什么）
     colmap_line = _rvec_tvec_to_colmap_line(rvec, tvec, offset_xyz)
 
-    # 2. 计算归一化焦距 = f / max(w, h)
-    f = camera_matrix[0, 0]  # fx
-    focal_norm = f / max(img_w, img_h)
+    # 2. 计算归一化焦距，与 slam-map 的 render_panoramic_poses.py 保持一致
+    #    slam-map: fx=256, focal_norm = 256/512 = 0.5（对应约 90°FOV）
+    #    之前用 75°FOV（focal_norm≈0.65）视角偏小，看到的范围窄
+    focal_norm = 0.5
 
     # 3. 调用 octree_render 渲染
     with tempfile.TemporaryDirectory(prefix="octree_reproj_") as tmpdir:
