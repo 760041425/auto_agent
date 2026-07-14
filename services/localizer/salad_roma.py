@@ -20,6 +20,7 @@ RoMa 密集匹配 + 多轮 PnP:
 import json
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Optional
@@ -67,6 +68,8 @@ _TILE_INDEX: list[dict] | None = None
 _SALAD_INDEX: dict[str, np.ndarray] | None = None  # tile_key → global_descriptor
 _TILE_IMAGES: dict[str, np.ndarray] | None = None   # tile_key → image (cached)
 _ROMA_MODEL = None
+_DINO_MODEL = None
+_DINO_SCALE = None
 _PNP_CACHE: dict[str, dict] = {}
 
 
@@ -120,6 +123,9 @@ def _get_dinov2_model(prefer_small: bool = True):
     SALAD 使用 DINOv2 作为 backbone 提取全局描述子。
     默认使用 DINOv2-S（速度快），可选 DINOv2-L（精度高）。
     """
+    global _DINO_MODEL, _DINO_SCALE
+    if _DINO_MODEL is not None:
+        return _DINO_MODEL, _DINO_SCALE
     models = [('dinov2_vits14', 'DINOv2-S'), ('dinov2_vitl14', 'DINOv2-L')]
     if not prefer_small:
         models = models[::-1]
@@ -132,7 +138,8 @@ def _get_dinov2_model(prefer_small: bool = True):
             for p in model.parameters():
                 p.requires_grad = False
             log(f"  使用 {model_desc} 模型")
-            return model, 1.0
+            _DINO_MODEL, _DINO_SCALE = model, 1.0
+            return _DINO_MODEL, _DINO_SCALE
         except Exception as e:
             log(f"  {model_desc} 加载失败: {e}")
     
@@ -332,10 +339,82 @@ def _get_roma_model():
     global _ROMA_MODEL
     if _ROMA_MODEL is None:
         t0 = time.time()
-        from romatch import tiny_roma_v1_outdoor
-        _ROMA_MODEL = tiny_roma_v1_outdoor(device=DEVICE)
+        from romatch.models.model_zoo import tiny_roma_v1_model
+        from romatch.models.model_zoo import weight_urls
+
+        # 1. 加载 RoMa 权重（从本地缓存）
+        url = weight_urls["tiny_roma_v1"]["outdoor"]
+        cache_dir = os.path.expanduser("~/.cache/torch/hub/checkpoints")
+        os.makedirs(cache_dir, exist_ok=True)
+        fname = os.path.basename(url)
+        cached_path = os.path.join(cache_dir, fname)
+
+        if os.path.exists(cached_path):
+            log(f"  使用本地缓存权重: {cached_path}")
+            weights = torch.load(cached_path, map_location=DEVICE, weights_only=True)
+        else:
+            log(f"  下载权重: {url}")
+            weights = torch.hub.load_state_dict_from_url(url, map_location=DEVICE)
+
+        # 2. 加载 XFeat（从本地缓存，绕过 torch.hub.load 的 GitHub 验证）
+        xfeat = _load_xfeat_local(device=DEVICE)
+        if xfeat is None:
+            raise RuntimeError("无法加载 XFeat 模型")
+
+        _ROMA_MODEL = tiny_roma_v1_model(weights=weights, xfeat=xfeat).to(DEVICE)
         log(f"  RoMa 模型加载: {time.time()-t0:.1f}s")
     return _ROMA_MODEL
+
+
+# XFeat 模型缓存（避免重复加载）
+_XFEAT_MODEL = None
+
+def _load_xfeat_local(device):
+    """
+    从本地缓存加载 XFeat 模型，绕过 torch.hub.load 的 GitHub 验证。
+
+    旧版 torch.hub.load("verlab/accelerated_features", "XFeat") 会访问
+    github.com 验证仓库存在，网络受限时返回 403 Forbidden。
+
+    这里直接从本地缓存 ~/.cache/torch/hub/verlab_accelerated_features_main/
+    加载 XFeat，权重文件在 {cache_dir}/weights/xfeat.pt。
+    """
+    global _XFEAT_MODEL
+    if _XFEAT_MODEL is not None:
+        return _XFEAT_MODEL
+
+    hub_cache = os.path.expanduser(
+        "~/.cache/torch/hub/verlab_accelerated_features_main"
+    )
+
+    if os.path.exists(hub_cache):
+        if hub_cache not in sys.path:
+            sys.path.insert(0, hub_cache)
+
+        try:
+            from modules.xfeat import XFeat
+            # XFeat.__init__ 默认加载本地权重 {cache_dir}/weights/xfeat.pt
+            xfeat_full = XFeat(top_k=4096)
+            xfeat_full = xfeat_full.to(device).eval()
+            # tiny_roma_v1_model 需要 xfeat.net（XFeatModel backbone）
+            _XFEAT_MODEL = xfeat_full.net
+            log(f"  XFeat 本地加载成功: {hub_cache}/weights/xfeat.pt")
+            return _XFEAT_MODEL
+        except Exception as e:
+            log(f"  XFeat 本地加载失败: {e}")
+
+    # Fallback: torch.hub.load
+    log(f"  XFeat 本地缓存未找到，尝试 torch.hub.load")
+    try:
+        xfeat = torch.hub.load(
+            "verlab/accelerated_features", "XFeat", pretrained=True, top_k=4096
+        ).net
+        _XFEAT_MODEL = xfeat
+        return _XFEAT_MODEL
+    except Exception as e:
+        log(f"  XFeat torch.hub 加载失败: {e}")
+
+    return None
 
 
 def _roma_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000) -> tuple:
@@ -530,7 +609,7 @@ def _reproject_point_cloud(rvec, tvec, camera_matrix, pts_3d, img_w, img_h):
 
 def render_projection_image(
     points_3d, point_colors, rvec, tvec, camera_matrix,
-    img_w, img_h, output_path,
+    img_w, img_h, output_path, include_coord_map=False,
 ):
     """渲染重投影图像"""
     w, h = int(img_w), int(img_h)
@@ -564,33 +643,20 @@ def render_projection_image(
         log(f"  [RENDER] 重投影失败: 无有效投影点")
         return None, {}
     
-    img = np.zeros((h, w, 3), dtype=np.uint8)
-    depth_img = np.full((h, w), np.nan, dtype=np.float32)
+    from services.localizer import _render_point_cloud_splat
+    img = _render_point_cloud_splat(points_3d, point_colors, camera_matrix, w, h, rvec, tvec_local, radius=1.2)
     coord_map = {}
-    
-    valid_3d = points_3d[valid]
-    valid_colors = point_colors[valid]
-    
-    for i in range(len(projected)):
-        px, py = int(round(projected[i, 0])), int(round(projected[i, 1]))
-        if px < 0 or px >= w or py < 0 or py >= h:
-            continue
-        z_val = valid_3d[i, 2]
-        if np.isnan(depth_img[py, px]) or z_val < depth_img[py, px]:
-            depth_img[py, px] = z_val
-            r = int(valid_colors[i, 0])
-            g = int(valid_colors[i, 1])
-            b = int(valid_colors[i, 2])
-            img[py, px] = [np.clip(b, 0, 255), np.clip(g, 0, 255), np.clip(r, 0, 255)]
-            coord_map[f"{px},{py}"] = [float(v) for v in valid_3d[i]]
-    
-    valid_depth = ~np.isnan(depth_img)
-    if valid_depth.any() and img.sum() == 0:
-        d_min, d_max = np.nanmin(depth_img[valid_depth]), np.nanmax(depth_img[valid_depth])
-        if d_max > d_min:
-            norm = np.zeros((h, w), dtype=np.uint8)
-            norm[valid_depth] = (255 * (depth_img[valid_depth] - d_min) / (d_max - d_min)).astype(np.uint8)
-            img = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
+    if include_coord_map:
+        # 只在 RoMa 迭代需要像素→3D 映射时构建，且每像素最多一个点。
+        valid_3d = points_3d[valid]
+        px = np.rint(projected[:, 0]).astype(np.int32)
+        py = np.rint(projected[:, 1]).astype(np.int32)
+        pixel_ids = py * w + px
+        _, unique_indices = np.unique(pixel_ids, return_index=True)
+        coord_map = {
+            f"{px[i]},{py[i]}": [float(v) for v in valid_3d[i]]
+            for i in unique_indices
+        }
     
     try:
         cv2.imwrite(output_path, img)
@@ -608,6 +674,7 @@ def localize_with_salad_roma(
     output_dir: str = "projections/localize",
     max_iterations: int = 3,
     top_k_retrieval: int = 3,
+    debug_visualizations: bool = False,
 ) -> dict:
     """
     SALAD 全局检索 → RoMa 密集匹配 → PnP → 多轮迭代 视觉定位。
@@ -619,7 +686,7 @@ def localize_with_salad_roma(
     4. PnP 位姿估计
     5. 多轮迭代: 每轮用 PnP 结果重投影点云 → RoMa 匹配原图vs重投影图 → PnP 优化
     """
-    from services.localizer import load_colmap, _POINT_INDEX
+    from services.localizer import load_colmap, _POINT_INDEX, get_point_cloud_arrays
     
     tag = "salad_roma"  # 固定 tag 用于文件命名，不依赖外部 feature/match_method
     log(f"{'='*60}")
@@ -666,8 +733,7 @@ def localize_with_salad_roma(
     # 2. 加载点云
     known_points, _ = load_colmap()
     pts_all = _POINT_INDEX["pts"]
-    all_pts = np.array([(p.x, p.y, p.z) for p in known_points.values()], dtype=np.float64)
-    all_col = np.array([(p.r, p.g, p.b) for p in known_points.values()], dtype=np.uint8)
+    all_pts, all_col = get_point_cloud_arrays()
     log(f"🗺️ {len(pts_all)} 个3D点")
     
     # 3. SALAD 全局检索
@@ -907,9 +973,10 @@ def localize_with_salad_roma(
             'all_pts': all_pts, 'all_col': all_col,
         }
         
-        # 为每个候选轮次生成对比图（最多 5 个，避免太慢）
+        # 候选图只在显式调试时生成；普通定位只输出最终最佳图。
         all_candidates_out = []
-        for idx, (s, rv, tv, ic, err, b3d, b2d) in enumerate(candidates[:5]):
+        candidates_to_render = candidates[:5] if debug_visualizations else []
+        for idx, (s, rv, tv, ic, err, b3d, b2d) in enumerate(candidates_to_render):
             round_tag = f"salad_roma_r{idx}"
             round_result = _render_comparison(
                 rv, tv, ic, b3d, b2d,
@@ -934,16 +1001,14 @@ def localize_with_salad_roma(
                 'is_best': idx == 0,
             })
         
-        # 最佳候选的对比图直接复用（不加后缀）
-        if all_candidates_out:
-            result = _render_comparison(
-                best_rvec, best_tvec, best_inliers, best_3d, best_2d,
-                known_points, camera_matrix, q_w, q_h, q_small,
-                out, tag, q_small,
-            )
-            result['iter_history'] = iter_history
-            result['total_rounds'] = len(candidates)
-            result['all_candidates'] = all_candidates_out
+        result = _render_comparison(
+            best_rvec, best_tvec, best_inliers, best_3d, best_2d,
+            known_points, camera_matrix, q_w, q_h, q_small,
+            out, tag, q_small, all_pts=all_pts, all_col=all_col,
+        )
+        result['iter_history'] = iter_history
+        result['total_rounds'] = len(candidates)
+        result['all_candidates'] = all_candidates_out
         return result
     
     return {"success": False, "error": "SALAD+RoMa PnP 失败", "tag": tag}
@@ -983,7 +1048,8 @@ def refine_pose_with_roma(
     # 渲染重投影图
     ref_proj = str(out / f"_refine_{tag}_proj.png")
     ref_proj_path, ref_coord = render_projection_image(
-        all_pts, all_col, rvec, tvec, camera_matrix, q_w, q_h, ref_proj
+        all_pts, all_col, rvec, tvec, camera_matrix, q_w, q_h, ref_proj,
+        include_coord_map=True,
     )
     if ref_proj_path is None:
         return {"success": False, "error": "Render failed"}
@@ -1123,14 +1189,15 @@ def _localize_from_tile_matches(
 def _render_comparison(
     rvec, tvec, inlier_count, best_3d, best_2d,
     known_points, camera_matrix, q_w, q_h, q_small,
-    out: Path, tag: str, query_img_small,
+    out: Path, tag: str, query_img_small, all_pts=None, all_col=None,
 ) -> dict:
     """
     生成重投影图和双图对比。
     匹配连线：原图和重投影图之间的 RoMa/SIFT 匹配点。
     """
-    all_pts = np.array([(p.x, p.y, p.z) for p in known_points.values()], dtype=np.float64)
-    all_col = np.array([(p.r, p.g, p.b) for p in known_points.values()], dtype=np.uint8)
+    if all_pts is None or all_col is None:
+        from services.localizer import get_point_cloud_arrays
+        all_pts, all_col = get_point_cloud_arrays()
     
     # 1. 重投影
     proj_path = str(out / f"reprojection_{tag}.png")
@@ -1138,9 +1205,7 @@ def _render_comparison(
     proj_path, coord_map = render_projection_image(all_pts, all_col, rvec, tvec, camera_matrix, q_w, q_h, proj_path)
     log(f"  重投影渲染耗时: {time.time()-t0:.1f}s")
     
-    coord_path = str(out / f"reprojection_coord_{tag}.json")
-    with open(coord_path, "w") as f:
-        json.dump({"width": q_w, "height": q_h, "pixels": coord_map}, f)
+    coord_path = None
     
     # 2. 双图对比：原图 SIFT vs 重投影图 SIFT
     comparison_path = None
