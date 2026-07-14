@@ -122,27 +122,47 @@ def _get_dinov2_model(prefer_small: bool = True):
     """
     SALAD 使用 DINOv2 作为 backbone 提取全局描述子。
     默认使用 DINOv2-S（速度快），可选 DINOv2-L（精度高）。
+
+    从本地缓存加载，绕过 torch.hub.load 的 GitHub 验证。
+    将本地 hub 缓存加入 sys.path 后直接 import dinov2.hub.backbones，
+    权重由 torch.hub.load_state_dict_from_url 自动使用本地缓存
+    (~/.cache/torch/hub/checkpoints/dinov2_vits14_pretrain.pth)。
     """
     global _DINO_MODEL, _DINO_SCALE
     if _DINO_MODEL is not None:
         return _DINO_MODEL, _DINO_SCALE
-    models = [('dinov2_vits14', 'DINOv2-S'), ('dinov2_vitl14', 'DINOv2-L')]
-    if not prefer_small:
-        models = models[::-1]
-    
-    for model_name, model_desc in models:
+
+    hub_cache = os.path.expanduser(
+        "~/.cache/torch/hub/facebookresearch_dinov2_main"
+    )
+
+    if os.path.exists(hub_cache) and hub_cache not in sys.path:
+        sys.path.insert(0, hub_cache)
+
+    models = ['dinov2_vits14', 'dinov2_vitl14'] if prefer_small else ['dinov2_vitl14', 'dinov2_vits14']
+    model_descs = {'dinov2_vits14': 'DINOv2-S', 'dinov2_vitl14': 'DINOv2-L'}
+    hub_fns = {}
+
+    for model_name in models:
         try:
-            model = torch.hub.load('facebookresearch/dinov2', model_name, trust_repo=True)
+            if not hub_fns:
+                # 只在首次加载时 import
+                from dinov2.hub.backbones import dinov2_vits14, dinov2_vitl14
+                hub_fns = {'dinov2_vits14': dinov2_vits14, 'dinov2_vitl14': dinov2_vitl14}
+
+            fn = hub_fns[model_name]
+            # pretrained=True 会从 dl.fbaipublicfiles.com 下载/使用缓存权重
+            model = fn(pretrained=True)
             model = model.to(DEVICE)
             model.eval()
             for p in model.parameters():
                 p.requires_grad = False
-            log(f"  使用 {model_desc} 模型")
+            log(f"  使用 {model_descs[model_name]} 模型")
             _DINO_MODEL, _DINO_SCALE = model, 1.0
             return _DINO_MODEL, _DINO_SCALE
         except Exception as e:
-            log(f"  {model_desc} 加载失败: {e}")
-    
+            log(f"  {model_descs.get(model_name, model_name)} 加载失败: {e}")
+
     log(f"  DINOv2 所有模型加载失败")
     return None, 0.0
 
