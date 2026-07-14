@@ -354,7 +354,8 @@ def _render_point_cloud_splat(points_3d, point_colors, camera_matrix, img_w, img
 
     img = np.clip(img, 0, 255).astype(np.uint8)
     img = cv2.GaussianBlur(img, (3, 3), 0)
-    img = cv2.convertScaleAbs(img, alpha=1.05, beta=6)
+    # 画面偏暗，需要加大提亮（view_factor和shading把颜色压到了50-70%）
+    img = cv2.convertScaleAbs(img, alpha=1.1, beta=15)
     return img
 
 
