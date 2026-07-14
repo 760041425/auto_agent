@@ -307,8 +307,8 @@ def render_reprojection_octree(
     Returns:
         True 渲染成功 / False 失败
     """
-    # 1. 构建 colmap 行（不加 z_bias，Pnp算出来是什么就是什么）
-    colmap_line = _rvec_tvec_to_colmap_line(rvec, tvec, offset_xyz)
+    # 1. 构建 colmap 行（含 z_bias，与预处理保持一致）
+    colmap_line = _rvec_tvec_to_colmap_line(rvec, tvec, offset_xyz, z_bias=z_bias)
 
     # 2. 计算归一化焦距 = f / max(w, h)
     f = camera_matrix[0, 0]  # fx
@@ -330,23 +330,12 @@ def render_reprojection_octree(
             print(f"[OCTREE] 重投影渲染失败")
             return False
 
-        # PPM → PNG + 自适应亮度增强
+        # PPM → PNG
         with Image.open(color_ppm) as img:
-            color_img = np.array(img.convert("RGB"), dtype=np.uint8)
-
-            # 1. 直方图拉伸：将颜色范围从 [min, max] 扩展到 [0, 255]
-            color_float = color_img.astype(np.float32)
-            low, high = np.percentile(color_float, [2, 98])
-            if high > low:
-                color_float = np.clip((color_float - low) / (high - low) * 255.0, 0, 255)
-
-            # 2. 轻微相机式明暗增强
+            color_img = np.array(img.convert("RGB"))
+            # 相机式明暗增强
             from services.las_processor.projection import _apply_camera_like_shading
-            color_img = _apply_camera_like_shading(color_float.astype(np.uint8))
-
-            # 3. 再加一档对比度提亮（投影图偏暗，需要比预处理更强的增强）
-            color_img = cv2.convertScaleAbs(color_img, alpha=1.08, beta=8)
-
+            color_img = _apply_camera_like_shading(color_img)
             Image.fromarray(color_img).save(output_path, quality=95)
 
         return True

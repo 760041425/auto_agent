@@ -1123,9 +1123,11 @@ def _render_results(
     octree_dataset = Path("projections/octree_data")
     if octree_dataset.exists() and (octree_dataset / "manifest.json").exists():
         try:
-            from services.las_processor.projection_octree import render_reprojection_octree
+            from services.las_processor.projection_octree import render_reprojection_octree, _load_z_bias
             from services.las_processor.projection import _load_poses_and_offset
             _, ox, oy, oz = _load_poses_and_offset()
+            # 使用与预处理一致的 z_bias（相机抬高），否则相机高度低于点云画面全黑
+            zb = _load_z_bias("las")
             ok = render_reprojection_octree(
                 str(octree_dataset),
                 rvec, tvec,
@@ -1133,6 +1135,7 @@ def _render_results(
                 q_w, q_h,
                 proj_path,
                 offset_xyz=(ox, oy, oz),
+                z_bias=zb,
             )
             if ok:
                 _octree_rendered = True
