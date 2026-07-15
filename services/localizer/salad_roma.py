@@ -740,15 +740,17 @@ def localize_with_salad_roma(
         return {"success": False, "error": "Cannot read query image", "tag": tag}
     
     q_h_orig, q_w_orig = query_img.shape[:2]
-    scale = 512 / max(q_h_orig, q_w_orig)
-    q_small = cv2.resize(query_img, (int(q_w_orig * scale), int(q_h_orig * scale))) if scale < 1.0 else query_img
-    q_h, q_w = q_small.shape[:2]
+    # 统一缩放到 512x512 正方形
+    q_small = cv2.resize(query_img, (512, 512))
+    q_h, q_w = 512, 512
+    scale_x = 512 / q_w_orig
+    scale_y = 512 / q_h_orig
     camera_matrix = _get_camera_matrix(q_w_orig, q_h_orig, fov_deg=75)
-    camera_matrix[0,0] *= scale
-    camera_matrix[1,1] *= scale
-    camera_matrix[0,2] *= scale
-    camera_matrix[1,2] *= scale
-    log(f"📷 {q_w_orig}x{q_h_orig} → {q_w}x{q_h}")
+    camera_matrix[0,0] *= scale_x
+    camera_matrix[1,1] *= scale_y
+    camera_matrix[0,2] = 256.0
+    camera_matrix[1,2] = 256.0
+    log(f"📷 {q_w_orig}x{q_h_orig} → {q_w}x{q_h} (512x512)")
     
     # 2. 加载点云
     known_points, _ = load_colmap()
@@ -1062,8 +1064,7 @@ def refine_pose_with_roma(
         return {"success": False, "error": "Cannot read query image"}
     
     h_orig, w_orig = query_img.shape[:2]
-    scale = 512 / max(h_orig, w_orig)
-    q_small = cv2.resize(query_img, (int(w_orig * scale), int(h_orig * scale))) if scale < 1.0 else query_img
+    q_small = cv2.resize(query_img, (512, 512))
     
     # 渲染重投影图
     ref_proj = str(out / f"_refine_{tag}_proj.png")

@@ -774,16 +774,19 @@ def localize_image(
     if query_img is None:
         return {"success": False, "error": "Cannot read query image", "tag": tag}
     q_h_orig, q_w_orig = query_img.shape[:2]
-    scale = 512 / max(q_h_orig, q_w_orig)
-    q_small = cv2.resize(query_img, (int(q_w_orig * scale), int(q_h_orig * scale))) if scale < 1.0 else query_img
-    q_h, q_w = q_small.shape[:2]
+    # 统一缩放到 512x512 正方形，与批量投影(TILE_PX=512)和slam-map一致
+    # PnP计算、重投影渲染统一用这个尺寸
+    q_small = cv2.resize(query_img, (512, 512))
+    q_h, q_w = 512, 512
+    scale_x = 512 / q_w_orig
+    scale_y = 512 / q_h_orig
     
     camera_matrix = _get_camera_matrix(q_w_orig, q_h_orig, fov_deg=75)
-    camera_matrix[0,0] *= scale
-    camera_matrix[1,1] *= scale
-    camera_matrix[0,2] *= scale
-    camera_matrix[1,2] *= scale
-    log(f"📷 {q_w_orig}x{q_h_orig} → {q_w}x{q_h}")
+    camera_matrix[0,0] *= scale_x
+    camera_matrix[1,1] *= scale_y
+    camera_matrix[0,2] = 256.0
+    camera_matrix[1,2] = 256.0
+    log(f"📷 {q_w_orig}x{q_h_orig} → {q_w}x{q_h} (512x512)")
 
     # 2. 提取查询图像 SIFT 特征
     q_gray = cv2.cvtColor(q_small, cv2.COLOR_BGR2GRAY)
