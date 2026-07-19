@@ -2,12 +2,19 @@ const API = '/api';
 let currentImageId = null;
 
 document.addEventListener('DOMContentLoaded', () => {
+  // 恢复上次停留的 tab
+  const savedTab = localStorage.getItem('activeTab');
+  if (savedTab) {
+    switchTab(savedTab);
+  }
+
   document.querySelectorAll('.tab').forEach(btn => {
     btn.addEventListener('click', () => {
+      const tab = btn.dataset.tab;
+      localStorage.setItem('activeTab', tab);
       document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
       document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
       btn.classList.add('active');
-      const tab = btn.dataset.tab;
       document.getElementById('tab-' + tab).classList.add('active');
       if (tab === 'list') loadImages();
       if (tab === 'tasks') loadTasks();
@@ -29,6 +36,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function switchTab(name) {
+  localStorage.setItem('activeTab', name);
   document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
   document.querySelector('.tab[data-tab="' + name + '"]').classList.add('active');
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -547,6 +555,7 @@ async function pollPreprocessStatus(btn, statusEl, progressWrap, progressBar) {
 // ====== 视觉定位 ======
 
 var localizeSelectedId = null;
+var localizeAlgorithmNames = { 'flann': 'SIFT + FLANN kd-tree', 'bf': 'SIFT + BruteForce', 'flann_lowes': 'SIFT + FLANN严格(0.6)', 'bf_cross': 'SIFT + BF交叉验证', 'knn_rank': 'SIFT + KNN Top-50', 'lightglue': 'SIFT + LightGlue', 'loftr': 'SIFT + LoFTR', 'salad_roma': 'SALAD+RoMa (v3)' };
 
 // 定位页面上传
 document.addEventListener('DOMContentLoaded', function() {
@@ -726,6 +735,8 @@ async function startLocalize() {
   var btn = document.getElementById('localize-btn');
   var statusEl = document.getElementById('localize-status');
   var resultsEl = document.getElementById('localize-results');
+  var algorithms = Array.prototype.map.call(document.querySelectorAll('#localize-algorithms input[type="checkbox"]:checked:not(#localize-debug)'), function(input) { return input.value; });
+  if (!algorithms.length) { alert('请至少选择一种定位算法'); return; }
 
   btn.disabled = true;
   btn.textContent = '定位中...';
@@ -740,8 +751,9 @@ async function startLocalize() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         image_id: imageId,
-        feature_methods: ['sift'],
-        match_methods: ['flann', 'bf', 'flann_lowes', 'bf_cross', 'knn_rank', 'lightglue', 'loftr', 'salad_roma'],
+        algorithms: algorithms,
+        max_iterations: 2,
+        debug_visualizations: document.getElementById('localize-debug').checked,
       }),
     });
     var text = await resp.text();
@@ -780,7 +792,7 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
     }
 
     if (data.status === 'running') {
-      statusEl.textContent = '定位中... (' + (data.results || []).filter(function(r) { return r.success; }).length + '/6 完成)';
+      statusEl.textContent = '定位中... (' + (data.results || []).length + '/' + (data.total || '?') + ' 完成)';
       setTimeout(function() { pollLocalize(taskId, btn, statusEl, resultsEl); }, 2000);
       return;
     }
@@ -805,9 +817,8 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
       var compImg = _fixImagePath(r.comparison_image);
       html += '<div class="localize-card" style="background:#fff;border-radius:8px;padding:1rem;margin-top:0.8rem;box-shadow:0 1px 3px rgba(0,0,0,0.1)">';
       html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">';
-      var matchNames = { 'flann': 'FLANN kd-tree', 'bf': 'BruteForce', 'flann_lowes': 'FLANN严格(0.6)', 'bf_cross': 'BF交叉验证', 'knn_rank': 'KNN Top-50', 'lightglue': 'LightGlue (深度学习)', 'loftr': 'LoFTR (深度学习)', 'salad_roma': 'SALAD+RoMa (v3)' };
-      var matchName = matchNames[r.match_method] || r.match_method;
-      html += '<h4 style="margin:0">SIFT + ' + matchName + '</h4>';
+      var matchName = localizeAlgorithmNames[r.match_method] || r.match_method;
+      html += '<h4 style="margin:0">' + matchName + '</h4>';
       html += '<span class="status-badge ' + (r.success ? 'completed' : 'failed') + '">' + (r.success ? '✓ 成功' : '✗ 失败') + '</span>';
       html += '</div>';
 

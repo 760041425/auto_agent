@@ -379,30 +379,93 @@ def render_projection_image(
 ):
     """
     根据位姿将3D点云重新投影为2D图像。
-
-    只渲染位姿附近150m内的点，避免远处稀疏点影响画面质量。
-    使用与 projection.py 一致的软点渲染（法线光照+深度缓冲）。
+    优先使用 octree_render (C++引擎) 获得高质量渲染，fallback 到 Python 渲染。
 
     返回: (输出图像路径, 像素到3D坐标映射)
     """
-    # 只取位姿附近的点（避免全量点云投影后稀疏散点）
-    points_3d, point_colors = _filter_points_by_distance(points_3d, point_colors, tvec, max_dist=150.0)
-
     w = int(img_w * resolution_scale)
     h = int(img_h * resolution_scale)
 
-    # 缩放内参
+    tvec_local = np.array(tvec).flatten()[:3]
+
+    # ── 尝试 octree_render（高质量）──
+    try:
+        from services.las_processor.projection_octree import (
+            render_pose_octree, _depth_to_xyz_map, OCTREE_CONFIG
+        )
+        from services.las_processor.projection import _apply_camera_like_shading
+        from PIL import Image
+        import tempfile, os
+
+        octree_dataset = 'projections/octree_data'
+        if os.path.exists(os.path.join(octree_dataset, 'manifest.json')):
+            # rvec → 旋转矩阵 → 四元数
+            R, _ = cv2.Rodrigues(rvec)
+            q = _rotation_matrix_to_quaternion(R)
+            qw, qx, qy, qz = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+            tx, ty, tz = float(tvec_local[0]), float(tvec_local[1]), float(tvec_local[2])
+            colmap_line = f"{qw:.10f} {qx:.10f} {qy:.10f} {qz:.10f} {tx:.6f} {ty:.6f} {tz:.6f}"
+
+            fov_deg = 75
+            f = max(w, h) / (2 * np.tan(np.deg2rad(fov_deg / 2)))
+            focal_norm = f / max(w, h)
+
+            with tempfile.TemporaryDirectory(prefix='pnp_render_') as tmpdir:
+                color_ppm = os.path.join(tmpdir, 'color.ppm')
+                depth_raw = os.path.join(tmpdir, 'depth.raw')
+                ok = render_pose_octree(octree_dataset, colmap_line, w, h, focal_norm, color_ppm, depth_raw)
+
+                if ok and os.path.exists(color_ppm):
+                    with Image.open(color_ppm) as img:
+                        color_img = np.array(img.convert('RGB'))
+                    if os.path.exists(depth_raw):
+                        depth = np.fromfile(depth_raw, dtype=np.float32)
+                        if depth.size == w * h:
+                            depth = depth.reshape(h, w)
+                            color_img = _apply_camera_like_shading(color_img, depth=depth)
+                    else:
+                        color_img = _apply_camera_like_shading(color_img)
+
+                    cv2.imwrite(output_path, cv2.cvtColor(color_img, cv2.COLOR_RGB2BGR))
+                    log(f"  [RENDER] octree_render 成功")
+
+                    coord_map = {}
+                    if include_coord_map and os.path.exists(depth_raw):
+                        depth = np.fromfile(depth_raw, dtype=np.float32)
+                        if depth.size == w * h:
+                            depth = depth.reshape(h, w)
+                            fx = fy = f
+                            cx_ = (w - 1) / 2.0
+                            cy_ = (h - 1) / 2.0
+                            _, world_array = _depth_to_xyz_map(
+                                depth, fx, fy, cx_, cy_,
+                                qw, qx, qy, qz, tx, ty, tz, (0, 0, 0)
+                            )
+                            valid_mask = np.any(world_array != 0, axis=2)
+                            for py_i in range(h):
+                                for px_i in range(w):
+                                    if valid_mask[py_i, px_i]:
+                                        coord_map[f"{px_i},{py_i}"] = [
+                                            float(world_array[py_i, px_i, 0]),
+                                            float(world_array[py_i, px_i, 1]),
+                                            float(world_array[py_i, px_i, 2]),
+                                        ]
+                    return output_path, coord_map
+    except Exception as e:
+        log(f"  [RENDER] octree_render 异常: {e}，fallback")
+
+    # ── Fallback: Python 渲染 ──
+    points_3d, point_colors = _filter_points_by_distance(points_3d, point_colors, tvec, max_dist=150.0)
     K = camera_matrix.copy()
     K[:2] *= resolution_scale
 
-    img = _render_point_cloud_splat(points_3d, point_colors, K, w, h, rvec=rvec, tvec=tvec, radius=1.2)
-
+    img = _render_point_cloud_splat(points_3d, point_colors, K, w, h, rvec=rvec, tvec=tvec_local, radius=1.2)
     if img.size == 0:
         return None, {}
 
     coord_map = {}
     if include_coord_map:
-        projected, valid = reproject_points(rvec, tvec, K, points_3d, w, h)
+        projected, valid = reproject_points(rvec, tvec_local, K, points_3d, w, h)
         valid_3d = points_3d[valid]
         coord_map = {
             f"{int(round(p[0]))},{int(round(p[1]))}": [float(v) for v in xyz]
@@ -410,7 +473,6 @@ def render_projection_image(
         }
 
     cv2.imwrite(output_path, img)
-
     return output_path, coord_map
 
 
@@ -757,16 +819,9 @@ def localize_image(
     # ── PnP 缓存检查 ──
     cache_key = f"{os.path.abspath(query_image_path)}"
     if cache_key in _PNP_CACHE:
-        cached = _PNP_CACHE[cache_key]
-        log(f"📦 命中 PnP 缓存，复用位姿")
-        # 直接使用缓存的 PnP 结果生成图像（跳过完整的 PnP 迭代）
-        return _render_results(
-            cached['rvec'], cached['tvec'],
-            cached['inliers'], cached['best_3d'], cached['best_2d'],
-            cached['known_points'], cached['camera_matrix'],
-            cached['q_w'], cached['q_h'], cached['q_small'],
-            out, tag
-        )
+        # 删除缓存，强制重新定位（用户修改定位参数后需要重新跑）
+        del _PNP_CACHE[cache_key]
+        log(f"🔄 清除旧缓存，强制重新定位")
 
     # ── 首次运行：完整 PnP 流程 ──
     # 1. 读取查询图像
@@ -893,15 +948,16 @@ def localize_image(
 
     log(f"✅ PnP成功: 内点={best_inliers}")
 
-    # 6. 迭代优化（向量化版）
+    # 6. 迭代优化（向量化版），最大10轮
+    MAX_ROUNDS = 10
     rvec, tvec = best_rvec, best_tvec
     inlier_count = best_inliers
 
     tree = _POINT_INDEX["tree"]
     half_range_iter = 100.0
 
-    for iteration in range(1, max_iterations):
-        log(f"🔄 迭代 {iteration+1}/{max_iterations}...")
+    for iteration in range(1, MAX_ROUNDS + 1):
+        log(f"🔄 迭代 {iteration}/{MAX_ROUNDS}...")
         
         tvec_flat = tvec.flatten()
         near_indices = tree.query_ball_point(tvec_flat, r=half_range_iter)

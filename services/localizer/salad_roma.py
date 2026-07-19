@@ -627,47 +627,114 @@ def _reproject_point_cloud(rvec, tvec, camera_matrix, pts_3d, img_w, img_h):
     return projected[valid], valid
 
 
+def _rvec_tvec_to_colmap_line(rvec, tvec):
+    """将 PnP 的 rvec/tvec 转为 octree_render 需要的 colmap 行格式。
+
+    rvec: Rodrigues 旋转向量 → 旋转矩阵 → 四元数
+    tvec: 平移向量（局部坐标）
+
+    COLMAP 约定: X_cam = R_wc * (X_world - t_wc)
+    所以 tvec = t_wc (世界坐标下的相机位置经旋转后的值)
+    四元数表示 R_wc (world→camera 旋转)
+    """
+    R, _ = cv2.Rodrigues(rvec)
+    q = _rotation_matrix_to_quaternion(R)
+    qw, qx, qy, qz = float(q[0]), float(q[1]), float(q[2]), float(q[3])
+    tx, ty, tz = float(tvec.flatten()[0]), float(tvec.flatten()[1]), float(tvec.flatten()[2])
+    return f"{qw:.10f} {qx:.10f} {qy:.10f} {qz:.10f} {tx:.6f} {ty:.6f} {tz:.6f}"
+
+
 def render_projection_image(
     points_3d, point_colors, rvec, tvec, camera_matrix,
     img_w, img_h, output_path, include_coord_map=False,
 ):
-    """渲染重投影图像"""
+    """渲染重投影图像 — 优先用 octree_render (C++引擎)，fallback 到 Python 渲染。"""
     w, h = int(img_w), int(img_h)
-    
     tvec_local = np.array(tvec).flatten()[:3]
-    log(f"  [RENDER] 点云数={len(points_3d)}, 图像={w}x{h}")
-    log(f"  [RENDER] tvec(原始)={tvec_local}")
-    
-    if len(points_3d) > 0:
-        pts_min = points_3d.min(axis=0)
-        pts_max = points_3d.max(axis=0)
-        pts_range = pts_max - pts_min
-        
-        if np.max(np.abs(tvec_local)) > 10000 and np.max(pts_range) < 1000:
-            log(f"  [RENDER] 检测到 tvec 是全局坐标，转换为局部坐标")
-            _, offset_x, offset_y, offset_z = _load_poses_and_offset()
-            offset_xyz = (offset_x, offset_y, offset_z)
-            if offset_xyz is not None:
-                tvec_local = tvec_local - np.array(offset_xyz)
-                log(f"  [RENDER] tvec(局部)={tvec_local}")
-    
-    log(f"  [RENDER] 使用局部坐标 tvec={tvec_local}")
-    
+
+    # ── 尝试 octree_render（高质量）──
+    try:
+        from services.las_processor.projection_octree import (
+            render_pose_octree, _depth_to_xyz_map, OCTREE_CONFIG
+        )
+        from services.las_processor.projection import _apply_camera_like_shading
+        from PIL import Image
+        import tempfile
+
+        octree_dataset = 'projections/octree_data'
+        if os.path.exists(os.path.join(octree_dataset, 'manifest.json')):
+            colmap_line = _rvec_tvec_to_colmap_line(rvec, tvec_local)
+            log(f"  [RENDER] octree_render colmap: {colmap_line}")
+
+            # 计算 focal_norm（与批量投影一致）
+            fov_deg = 75
+            f = max(w, h) / (2 * np.tan(np.deg2rad(fov_deg / 2)))
+            focal_norm = f / max(w, h)
+            fx = fy = f
+            cx = (w - 1) / 2.0
+            cy = (h - 1) / 2.0
+
+            with tempfile.TemporaryDirectory(prefix='pnp_render_') as tmpdir:
+                color_ppm = os.path.join(tmpdir, 'color.ppm')
+                depth_raw = os.path.join(tmpdir, 'depth.raw')
+
+                ok = render_pose_octree(
+                    octree_dataset, colmap_line,
+                    w, h, focal_norm,
+                    color_ppm, depth_raw,
+                )
+
+                if ok and os.path.exists(color_ppm):
+                    # 后处理（与批量投影一致）
+                    with Image.open(color_ppm) as img:
+                        color_img = np.array(img.convert('RGB'))
+
+                    coord_map = {}
+                    if os.path.exists(depth_raw):
+                        depth = np.fromfile(depth_raw, dtype=np.float32)
+                        if depth.size == w * h:
+                            depth = depth.reshape(h, w)
+                            color_img = _apply_camera_like_shading(color_img, depth=depth)
+
+                            if include_coord_map:
+                                rl_parts = colmap_line.split()
+                                rl_q = [float(x) for x in rl_parts[:4]]
+                                rl_t = [float(x) for x in rl_parts[4:7]]
+                                _, world_array = _depth_to_xyz_map(
+                                    depth, fx, fy, cx, cy,
+                                    *rl_q, *rl_t, (0, 0, 0)
+                                )
+                                valid = np.any(world_array != 0, axis=2)
+                                for py_i in range(h):
+                                    for px_i in range(w):
+                                        if valid[py_i, px_i]:
+                                            coord_map[f"{px_i},{py_i}"] = [
+                                                float(world_array[py_i, px_i, 0]),
+                                                float(world_array[py_i, px_i, 1]),
+                                                float(world_array[py_i, px_i, 2]),
+                                            ]
+                    else:
+                        color_img = _apply_camera_like_shading(color_img)
+
+                    # 保存为 PNG
+                    cv2.imwrite(output_path, cv2.cvtColor(color_img, cv2.COLOR_RGB2BGR))
+                    log(f"  [RENDER] octree_render 成功: {output_path}")
+                    return output_path, coord_map
+                else:
+                    log(f"  [RENDER] octree_render 无输出，fallback 到 Python 渲染")
+    except Exception as e:
+        log(f"  [RENDER] octree_render 异常: {e}，fallback 到 Python 渲染")
+
+    # ── Fallback: Python 渲染 ──
+    log(f"  [RENDER] 使用 Python 渲染 (fallback)")
     projected, valid = _reproject_point_cloud(rvec, tvec_local, camera_matrix, points_3d, w, h)
-    
-    log(f"  [RENDER] 投影后有效点={len(projected)}/{len(points_3d)}")
     if len(projected) == 0:
-        # 检查点云范围和相机位置
-        if len(points_3d) > 0:
-            log(f"  [RENDER] 点云范围: X={points_3d[:,0].min():.1f}~{points_3d[:,0].max():.1f}, Y={points_3d[:,1].min():.1f}~{points_3d[:,1].max():.1f}, Z={points_3d[:,2].min():.1f}~{points_3d[:,2].max():.1f}")
-        log(f"  [RENDER] 重投影失败: 无有效投影点")
         return None, {}
-    
+
     from services.localizer import _render_point_cloud_splat
     img = _render_point_cloud_splat(points_3d, point_colors, camera_matrix, w, h, rvec, tvec_local, radius=1.2)
     coord_map = {}
     if include_coord_map:
-        # 只在 RoMa 迭代需要像素→3D 映射时构建，且每像素最多一个点。
         valid_3d = points_3d[valid]
         px = np.rint(projected[:, 0]).astype(np.int32)
         py = np.rint(projected[:, 1]).astype(np.int32)
@@ -677,7 +744,7 @@ def render_projection_image(
             f"{px[i]},{py[i]}": [float(v) for v in valid_3d[i]]
             for i in unique_indices
         }
-    
+
     try:
         cv2.imwrite(output_path, img)
     except Exception as e:
@@ -718,21 +785,9 @@ def localize_with_salad_roma(
     # ── PnP 缓存检查 ──
     cache_key = os.path.abspath(query_image_path)
     if cache_key in _PNP_CACHE:
-        cached = _PNP_CACHE[cache_key]
-        log(f"📦 命中 PnP 缓存，复用位姿")
-        q_small = cached['q_small']
-        known_points = cached['known_points']
-        result = _render_comparison(
-            cached['rvec'], cached['tvec'], cached['inliers'],
-            cached['best_3d'], cached['best_2d'],
-            known_points, cached['camera_matrix'],
-            cached['q_w'], cached['q_h'], q_small,
-            out, tag, q_small,
-        )
-        result['total_rounds'] = cached.get('total_rounds', 1)
-        result['iter_history'] = cached.get('iter_history', [])
-        result['all_candidates'] = cached.get('all_candidates', [])
-        return result
+        # 删除缓存，强制重新定位（用户修改定位参数后需要重新跑）
+        del _PNP_CACHE[cache_key]
+        log(f"🔄 清除旧缓存，强制重新定位")
     
     # 1. 读取查询图像
     query_img = cv2.imread(query_image_path)
@@ -857,17 +912,43 @@ def localize_with_salad_roma(
         for tmp_path in [init_proj]:
             if os.path.exists(tmp_path): os.remove(tmp_path)
         
-        # 迭代优化
+        # ── 10 轮迭代优化：相似度不再提升时停止，取最佳 ──
+        MAX_ROUNDS = 10
+
         rvec, tvec = best_rvec, best_tvec
         inlier_count = best_inliers
         current_error = init_error
-        
-        for iteration in range(1, max_iterations):
+
+        # 用当前最佳位姿先评估一轮 SALAD 相似度
+        check_proj = str(out / f"_check_{tag}.png")
+        check_proj_path, _ = render_projection_image(
+            all_pts, all_col, best_rvec, best_tvec, camera_matrix, q_w, q_h, check_proj
+        )
+        current_salad_sim = 0.0
+        if check_proj_path and salad_model is not None:
+            check_img = cv2.imread(check_proj_path)
+            if check_img is not None:
+                check_desc = _extract_dinov2_descriptor(salad_model, check_img, salad_scale)
+                q_desc = _extract_dinov2_descriptor(salad_model, q_small, salad_scale)
+                if check_desc is not None and q_desc is not None:
+                    current_salad_sim = float(np.dot(check_desc, q_desc) / (np.linalg.norm(check_desc) * np.linalg.norm(q_desc) + 1e-8))
+                    log(f"  初始 SALAD 相似度: {current_salad_sim:.4f}")
+        if os.path.exists(check_proj): os.remove(check_proj)
+
+        prev_best_sim = current_salad_sim  # 记录上一轮最佳相似度
+        no_improve_count = 0  # 连续无提升轮数
+
+        for iteration in range(1, MAX_ROUNDS + 1):
+            # 连续2轮相似度未提升 → 停止（说明已收敛或发散）
+            if no_improve_count >= 2:
+                log(f"  ⏹ 相似度连续{no_improve_count}轮未提升 (当前={current_salad_sim:.4f}, 历史最佳={prev_best_sim:.4f}), 停止 (第{iteration}轮)")
+                break
+
             log(f"\n  {'─'*30}")
-            log(f"  迭代 {iteration}/{max_iterations-1}...")
+            log(f"  迭代 {iteration}/{MAX_ROUNDS} (当前相似度={current_salad_sim:.4f})...")
             log(f"    当前状态: 内点={inlier_count}, 重投影误差={current_error:.3f}")
             log(f"    当前位姿: tvec={tvec.flatten()[:3] if hasattr(tvec, 'flatten') else tvec[:3]}")
-            
+
             # 用当前位姿渲染重投影图
             iter_proj = str(out / f"_iter_{tag}_{iteration}.png")
             iter_proj_path, _ = render_projection_image(
@@ -875,57 +956,36 @@ def localize_with_salad_roma(
             )
             if iter_proj_path is None:
                 log(f"    重投影失败, 停止迭代")
-                # 记录最后一次成功的候选
-                candidates.append((0.0, rvec, tvec, inlier_count, current_error, best_3d, best_2d))
                 break
-            
-            # SALAD 相似度评估：重投影图 vs 原图
-            iter_sim = 0.0
-            if salad_model is not None:
-                iter_proj_img = cv2.imread(iter_proj_path)
-                if iter_proj_img is not None:
-                    iter_desc = _extract_dinov2_descriptor(salad_model, iter_proj_img, salad_scale)
-                    q_desc = _extract_dinov2_descriptor(salad_model, q_small, salad_scale)
-                    if iter_desc is not None and q_desc is not None:
-                        iter_sim = float(np.dot(iter_desc, q_desc) / (np.linalg.norm(iter_desc) * np.linalg.norm(q_desc) + 1e-8))
-                        log(f"    SALAD 相似度: {iter_sim:.4f}")
-            
-            # 如果当前几何解已经足够稳定，直接收敛；SALAD 相似度仅作记录
-            if inlier_count >= 20 and current_error < 8.0:
-                log(f"    几何解已稳定, 收敛")
-                candidates.append((iter_sim, rvec, tvec, inlier_count, current_error, best_3d, best_2d))
-                break
-            
+
             # RoMa 匹配原图 vs 重投影图
             iter_img = cv2.imread(iter_proj_path)
             if iter_img is None:
                 log(f"    无法读取重投影图, 停止迭代")
                 break
-            
+
             kpts_q2, kpts_proj, cert2 = _roma_match(q_small, iter_img, sample_num=2000)
             if len(kpts_q2) < 10:
                 log(f"    迭代匹配点太少, 停止")
-                candidates.append((iter_sim, rvec, tvec, inlier_count, current_error, best_3d, best_2d))
                 break
-            
+
             # 通过重投影获取 coord_map（像素→3D 映射）
             iter_coord = _compute_reprojection_coords(
                 all_pts, all_col, rvec, tvec, camera_matrix, q_w, q_h
             )
-            
+
             obj_pts2, img_pts2 = _build_3d_2d_matches(kpts_q2, kpts_proj, cert2, iter_coord, min_cert=0.03)
             log(f"    3D-2D: {len(obj_pts2)} 对")
-            
+
             if len(obj_pts2) < 4:
                 log(f"    3D-2D 匹配不足, 停止迭代")
-                candidates.append((iter_sim, rvec, tvec, inlier_count, current_error, best_3d, best_2d))
                 break
-            
+
             nr, nt, ni = _solve_pnp(obj_pts2, img_pts2, camera_matrix)
             if nr is not None:
                 nic = len(ni) if ni is not None else len(obj_pts2)
                 log(f"    PnP: {nic}/{len(obj_pts2)} 内点")
-                
+
                 # 用新位姿渲染并评估 SALAD 相似度
                 new_proj = str(out / f"_new_{tag}_{iteration}.png")
                 new_proj_path, _ = render_projection_image(
@@ -936,13 +996,26 @@ def localize_with_salad_roma(
                     new_img = cv2.imread(new_proj_path)
                     if new_img is not None:
                         new_desc = _extract_dinov2_descriptor(salad_model, new_img, salad_scale)
+                        q_desc = _extract_dinov2_descriptor(salad_model, q_small, salad_scale)
                         if new_desc is not None and q_desc is not None:
                             new_sim = float(np.dot(new_desc, q_desc) / (np.linalg.norm(new_desc) * np.linalg.norm(q_desc) + 1e-8))
                             log(f"    新位姿 SALAD 相似度: {new_sim:.4f}")
-                
+
                 candidate_error = _compute_reprojection_error(nr, nt, camera_matrix, obj_pts2, img_pts2)
                 candidates.append((new_sim, nr, nt, nic, candidate_error, obj_pts2, img_pts2))
-                
+
+                # 更新当前相似度用于下一轮判断
+                current_salad_sim = new_sim
+
+                # 判断相似度是否提升（允许 0.01 容差，避免微小波动）
+                if new_sim > prev_best_sim + 0.01:
+                    prev_best_sim = new_sim
+                    no_improve_count = 0
+                    log(f"    ✅ 相似度提升: {new_sim:.4f} (最佳)")
+                else:
+                    no_improve_count += 1
+                    log(f"    相似度未提升: {new_sim:.4f} (连续{no_improve_count}轮)")
+
                 if _is_pose_better(nic, candidate_error, inlier_count, current_error):
                     rvec, tvec = nr, nt
                     inlier_count = nic
@@ -951,7 +1024,7 @@ def localize_with_salad_roma(
                     log(f"    ✅ 几何解提升: 内点={nic}, 重投影误差={candidate_error:.3f}")
                 else:
                     log(f"    几何解未提升: 内点={nic}, 重投影误差={candidate_error:.3f} (当前={inlier_count}, {current_error:.3f})")
-            
+
             # 清理中间文件
             tmp_files = [iter_proj]
             if 'new_proj' in dir():
@@ -959,8 +1032,8 @@ def localize_with_salad_roma(
             for tmp in tmp_files:
                 if os.path.exists(tmp):
                     os.remove(tmp)
-        
-        # 选择几何上最优的结果；SALAD 相似度仅用于日志
+
+        # 从所有候选中选择最佳结果：内点数优先，重投影误差次优
         candidates.sort(key=lambda x: (-x[3], x[4]))
         best_sim, best_rvec, best_tvec, best_inliers, best_reproj_error, best_3d, best_2d = candidates[0]
         

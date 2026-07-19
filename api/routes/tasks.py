@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from api.database import get_db
+from api.database import get_db, SessionLocal
 from api.models import ImageModel, TaskModel, ReportModel
 from api.schemas import TaskCreate, TaskResponse, ReportResponse
 
@@ -14,13 +14,9 @@ CST = ZoneInfo("Asia/Shanghai")
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
-def run_comparison_task(task_id: int, image_id: int, db_url: str):
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    engine = create_engine(db_url, connect_args={"check_same_thread": False})
-    Session = sessionmaker(bind=engine)
-
-    db = Session()
+def run_comparison_task(task_id: int, image_id: int):
+    # 和 API 请求使用同一数据库，避免任务写到 projections/app.db 而前端读 query_images/app.db。
+    db = SessionLocal()
     try:
         task = db.query(TaskModel).filter(TaskModel.id == task_id).first()
         if not task:
@@ -36,7 +32,7 @@ def run_comparison_task(task_id: int, image_id: int, db_url: str):
             return
 
         from services.matcher import compute_image_area_3d, log_match_step
-        log_match_step(f"⏳ 开始处理任务: image={img.path}, image_id={image_id}, task_id={task_id}, db={db_url}", task_id)
+        log_match_step(f"⏳ 开始处理任务: image={img.path}, image_id={image_id}, task_id={task_id}", task_id)
         result = compute_image_area_3d(img.path, task_id=task_id)
 
         task.result_json = result
@@ -73,14 +69,14 @@ def create_comparison_task(req: TaskCreate, db: Session = Depends(get_db)):
     if not img:
         raise HTTPException(404, "Image not found")
 
-    task = TaskModel(image_id=req.image_id, status="pending")
+    task = TaskModel(image_id=req.image_id, status="pending", task_type="compare")
     db.add(task)
     db.commit()
     db.refresh(task)
 
     threading.Thread(
         target=run_comparison_task,
-        args=(task.id, req.image_id, f"sqlite:///{os.path.abspath('projections/app.db')}"),
+        args=(task.id, req.image_id),
         daemon=True,
     ).start()
 

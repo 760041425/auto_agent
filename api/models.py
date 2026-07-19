@@ -34,6 +34,9 @@ class TaskModel(Base):
     id = Column(Integer, primary_key=True, index=True)
     image_id = Column(Integer, ForeignKey("images.id"), nullable=False)
     status = Column(String, default="pending")
+    # 任务类型和请求参数必须持久化；进程重启后可安全恢复 pending 任务。
+    task_type = Column(String, default="compare", nullable=False)
+    request_json = Column(JSON, nullable=True)
     result_json = Column(JSON, nullable=True)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=_cst_now)

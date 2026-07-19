@@ -11,12 +11,25 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from api.database import get_db
-from api.models import TaskModel
+from api.database import get_db, SessionLocal
+from api.models import ImageModel, TaskModel
 
 CST = ZoneInfo("Asia/Shanghai")
 
 router = APIRouter(prefix="/api/localize", tags=["localize"])
+
+ALGORITHMS = {
+    "salad_roma": {"feature": "dino", "matcher": "salad_roma", "label": "SALAD+RoMa (v3)"},
+    "flann": {"feature": "sift", "matcher": "flann", "label": "SIFT + FLANN"},
+    "bf": {"feature": "sift", "matcher": "bf", "label": "SIFT + BruteForce"},
+    "flann_lowes": {"feature": "sift", "matcher": "flann_lowes", "label": "SIFT + FLANN (严格)"},
+    "bf_cross": {"feature": "sift", "matcher": "bf_cross", "label": "SIFT + BF 交叉验证"},
+    "knn_rank": {"feature": "sift", "matcher": "knn_rank", "label": "SIFT + KNN Rank"},
+    "lightglue": {"feature": "sift", "matcher": "lightglue", "label": "SIFT + LightGlue"},
+    "loftr": {"feature": "sift", "matcher": "loftr", "label": "SIFT + LoFTR"},
+}
+_queued_task_ids: set[int] = set()
+_queue_lock = threading.Lock()
 
 def log(msg: str):
     print(f"[LOCALIZE] {msg}")
@@ -24,8 +37,12 @@ def log(msg: str):
 
 class LocalizeRequest(BaseModel):
     image_id: int
-    feature_methods: list[str] = ["dino"]
-    match_methods: list[str] = ["salad_roma"]
+    algorithms: list[str] = ["salad_roma"]
+    # 兼容旧页面/API；新调用请传 algorithms。
+    feature_methods: Optional[list[str]] = None
+    match_methods: Optional[list[str]] = None
+    max_iterations: int = 2
+    debug_visualizations: bool = False
 
 
 class LocalizeResult(BaseModel):
@@ -67,25 +84,46 @@ def _append_result(results, fm, mm, result):
     })
 
 
-def run_localize_task(task_id: int, image_id: int, feature_methods: list[str], match_methods: list[str], db_url: str, max_iterations_override: int = None):
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    engine = create_engine(db_url, connect_args={"check_same_thread": False})
-    Session = sessionmaker(bind=engine)
-    db = Session()
+def _normalize_algorithms(req: LocalizeRequest) -> list[str]:
+    selected = req.algorithms or []
+    if req.match_methods is not None:  # legacy request takes precedence when supplied
+        selected = req.match_methods
+    selected = list(dict.fromkeys(selected))
+    invalid = [name for name in selected if name not in ALGORITHMS]
+    if invalid:
+        raise HTTPException(422, f"不支持的定位算法: {', '.join(invalid)}")
+    if not selected:
+        raise HTTPException(422, "至少选择一种定位算法")
+    return selected
+
+
+def _queue_localize_task(task_id: int):
+    with _queue_lock:
+        if task_id in _queued_task_ids:
+            return
+        _queued_task_ids.add(task_id)
+    threading.Thread(target=run_localize_task, args=(task_id,), daemon=True).start()
+
+
+def run_localize_task(task_id: int):
+    db = SessionLocal()
     try:
         task = db.query(TaskModel).filter(TaskModel.id == task_id).first()
         if not task:
             return
+        request = task.request_json or {}
+        algorithms = request.get("algorithms", ["salad_roma"])
+        max_iterations = max(1, min(int(request.get("max_iterations", 2)), 10))
+        debug_visualizations = bool(request.get("debug_visualizations", False))
         task.status = "running"
+        task.result_json = {"results": [], "total": len(algorithms)}
         db.commit()
 
         from services.localizer import load_colmap, localize_image
 
         load_colmap()
 
-        from api.models import ImageModel
-        img = db.query(ImageModel).filter(ImageModel.id == image_id).first()
+        img = db.query(ImageModel).filter(ImageModel.id == task.image_id).first()
         if not img:
             task.status = "failed"
             task.error_message = "Image not found"
@@ -96,24 +134,25 @@ def run_localize_task(task_id: int, image_id: int, feature_methods: list[str], m
         out_dir = f"projections/localize/task_{task_id}"
         Path(out_dir).mkdir(parents=True, exist_ok=True)
 
-        # 遍历所有匹配方法
-        for fm in feature_methods:
-            for mm in match_methods:
-                log(f"  定位方法: {fm} + {mm}")
-                try:
-                    result = localize_image(
-                        img.path,
-                        output_dir=out_dir,
-                        feature_method=fm,
-                        match_method=mm,
-                        max_iterations=8 if max_iterations_override is None else max_iterations_override,
-                    )
-                    _append_result(results, fm, mm, result)
-                except Exception as e:
-                    log(f"    方法 {fm}+{mm} 失败: {e}")
-                    _append_result(results, fm, mm, {"success": False, "error": str(e)})
+        for algorithm in algorithms:
+            config = ALGORITHMS[algorithm]
+            log(f"  定位算法: {config['label']}")
+            try:
+                result = localize_image(
+                    img.path, output_dir=out_dir,
+                    feature_method=config["feature"], match_method=config["matcher"],
+                    max_iterations=max_iterations, debug_visualizations=debug_visualizations,
+                )
+                _append_result(results, config["feature"], algorithm, result)
+            except Exception as e:
+                log(f"    算法 {algorithm} 失败: {e}")
+                _append_result(results, config["feature"], algorithm, {"success": False, "error": str(e)})
+            task.result_json = {"results": results, "total": len(algorithms)}
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(task, "result_json")
+            db.commit()
 
-        task.result_json = {"results": results}
+        task.result_json = {"results": results, "total": len(algorithms)}
         task.status = "completed"
         task.finished_at = datetime.datetime.now(CST)
         db.commit()
@@ -123,6 +162,8 @@ def run_localize_task(task_id: int, image_id: int, feature_methods: list[str], m
         db.commit()
     finally:
         db.close()
+        with _queue_lock:
+            _queued_task_ids.discard(task_id)
 
 
 @router.get("/check")
@@ -142,18 +183,39 @@ def check_colmap():
 
 @router.post("")
 def create_localize_task(req: LocalizeRequest, db: Session = Depends(get_db)):
-    task = TaskModel(image_id=req.image_id, status="pending")
+    if not db.query(ImageModel).filter(ImageModel.id == req.image_id).first():
+        raise HTTPException(404, "Image not found")
+    algorithms = _normalize_algorithms(req)
+    task = TaskModel(
+        image_id=req.image_id, status="pending", task_type="localize",
+        request_json={
+            "algorithms": algorithms,
+            "max_iterations": max(1, min(req.max_iterations, 10)),
+            "debug_visualizations": req.debug_visualizations,
+        },
+    )
     db.add(task)
     db.commit()
     db.refresh(task)
 
-    threading.Thread(
-        target=run_localize_task,
-        args=(task.id, req.image_id, req.feature_methods, req.match_methods, f"sqlite:///{os.path.abspath('query_images/app.db')}", None),
-        daemon=True,
-    ).start()
+    _queue_localize_task(task.id)
 
     return {"task_id": task.id}
+
+
+def resume_pending_localize_tasks():
+    """启动时恢复被中断的定位任务。"""
+    db = SessionLocal()
+    try:
+        tasks = db.query(TaskModel).filter(
+            TaskModel.task_type == "localize", TaskModel.status.in_(["pending", "running"])
+        ).all()
+        for task in tasks:
+            task.status = "pending"
+            _queue_localize_task(task.id)
+        db.commit()
+    finally:
+        db.close()
 
 
 @router.get("/{task_id}")
@@ -201,14 +263,13 @@ def refine_pose(req: RefineRequest, db: Session = Depends(get_db)):
         raise HTTPException(400, "No pose to refine")
     
     from services.localizer.salad_roma import refine_pose_with_roma
-    from services.localizer import load_colmap, _POINT_INDEX
+    from services.localizer import load_colmap, get_point_cloud_arrays
     from services.las_processor.projection import _load_poses_and_offset
     import cv2, numpy as np
     from services.localizer import _get_camera_matrix
     
     known_points, _ = load_colmap()
-    all_pts = np.array([(p.x, p.y, p.z) for p in known_points.values()], dtype=np.float64)
-    all_col = np.array([(p.r, p.g, p.b) for p in known_points.values()], dtype=np.uint8)
+    all_pts, all_col = get_point_cloud_arrays()
     
     # 找对应的查询图
     from api.models import ImageModel

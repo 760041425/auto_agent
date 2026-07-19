@@ -43,8 +43,9 @@ TILE_PX = 512
 VIEW_RANGE = 50.0
 VIEW_DIRS = [('n', 0.0), ('ne', 45.0), ('e', 90.0), ('se', 135.0), ('s', 180.0), ('sw', 225.0), ('w', 270.0), ('nw', 315.0)]
 SAMPLE_INTERVAL_M = 5.0
+GRID_INTERVAL_M = 10.0  # 网格位姿间隔（每张tile覆盖~77m，10m间距保证充分重叠）
 BLACK_PIXEL_THRESHOLD = 0.90
-PITCH_DEG = -15.0
+PITCH_DEG = -35.0
 
 
 def build_octree(
@@ -138,22 +139,100 @@ def render_pose_octree(
     return True
 
 
-def _build_colmap_line(pose: dict, offset_xyz: tuple[float, float, float], z_bias: float = 0.0) -> str:
+def _rotmat_to_quat(R: np.ndarray) -> tuple[float, float, float, float]:
+    """3x3 旋转矩阵 → 四元数 (qw, qx, qy, qz)"""
+    tr = R[0, 0] + R[1, 1] + R[2, 2]
+    if tr > 0:
+        s = 2.0 * np.sqrt(tr + 1.0)
+        qw = 0.25 * s
+        qx = (R[2, 1] - R[1, 2]) / s
+        qy = (R[0, 2] - R[2, 0]) / s
+        qz = (R[1, 0] - R[0, 1]) / s
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+        qw = (R[2, 1] - R[1, 2]) / s
+        qx = 0.25 * s
+        qy = (R[0, 1] + R[1, 0]) / s
+        qz = (R[0, 2] + R[2, 0]) / s
+    elif R[1, 1] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+        qw = (R[0, 2] - R[2, 0]) / s
+        qx = (R[0, 1] + R[1, 0]) / s
+        qy = 0.25 * s
+        qz = (R[1, 2] + R[2, 1]) / s
+    else:
+        s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+        qw = (R[1, 0] - R[0, 1]) / s
+        qx = (R[0, 2] + R[2, 0]) / s
+        qy = (R[1, 2] + R[2, 1]) / s
+        qz = 0.25 * s
+    return _normalize_quat(qw, qx, qy, qz)
+
+
+def _look_at_colmap_quat(forward_world: np.ndarray, up_world: np.ndarray = None) -> tuple:
+    """
+    给定世界坐标下的相机前方方向和上方方向，计算 COLMAP 四元数 (world→camera)。
+
+    COLMAP 相机坐标系: X=右, Y=下, Z=前（看向场景方向）
+    R_wc: world → camera
+    """
+    if up_world is None:
+        up_world = np.array([0.0, 0.0, 1.0])  # Z-up 世界坐标系
+
+    fwd = forward_world / (np.linalg.norm(forward_world) + 1e-10)
+    right = np.cross(fwd, up_world)
+    right_norm = np.linalg.norm(right)
+    if right_norm < 1e-6:
+        # forward 和 up 平行，换一个 up
+        up_world = np.array([0.0, 1.0, 0.0])
+        right = np.cross(fwd, up_world)
+        right_norm = np.linalg.norm(right)
+    right = right / (right_norm + 1e-10)
+    down = np.cross(fwd, right)  # COLMAP Y 轴向下
+
+    # R_wc: 行是相机轴在世界坐标中的方向
+    # R_wc = [right; down; forward] (每行是一个相机轴)
+    R_wc = np.array([right, down, fwd], dtype=np.float64)
+    return _rotmat_to_quat(R_wc)
+
+
+def _build_colmap_line(pose: dict, offset_xyz: tuple[float, float, float], z_bias: float = 0.0,
+                       heading_deg: float = 0.0, pitch_deg: float = 0.0) -> str:
     """
     从位姿字典构建 octree_render 需要的 colmap 行。
-    与 slam-map 的 batch_render_octree_colmap_direct.py 一致：
-    - 使用局部坐标（UTM - offset），与 octree_build 的 --position-offset 对应
-    - LAS: P_local = P_utm - offset_xyz
-    - COLMAP: t_local = t_utm - offset_xyz + z_bias
-    z_bias: 相机Z轴偏移（抬高），默认从 rtk_external_param[2] + 3.0
+
+    对于网格位姿（qw=1 identity），直接用 look-at 方法生成正确的朝向四元数。
+    对于有位姿信息的条目，使用原始四元数。
     """
+    tx = pose['x']
+    ty = pose['y']
+    tz = pose['z'] + z_bias
+
     qw = pose.get('qw', 1.0)
     qx = pose.get('qx', 0.0)
     qy = pose.get('qy', 0.0)
     qz = pose.get('qz', 0.0)
-    tx = pose['x']
-    ty = pose['y']
-    tz = pose['z'] + z_bias
+
+    # 网格位姿（identity 四元数）：用 heading + pitch 直接计算朝向
+    is_grid = abs(qw - 1.0) < 0.01 and abs(qx) < 0.01 and abs(qy) < 0.01 and abs(qz) < 0.01
+
+    if is_grid:
+        import math
+        yaw_rad = math.radians(heading_deg)
+        pitch_rad = math.radians(pitch_deg)
+        # 世界坐标系: X=East, Y=North, Z=Up
+        # 水平方向: heading 从 North(Y+) 顺时针
+        horiz_x = math.sin(yaw_rad)   # East 分量
+        horiz_y = math.cos(yaw_rad)   # North 分量
+        horiz_z = 0.0
+        # 加入 pitch（负值=向下看）
+        fwd = np.array([
+            horiz_x * math.cos(pitch_rad),
+            horiz_y * math.cos(pitch_rad),
+            math.sin(pitch_rad),  # Z=Up, 负值=向下
+        ])
+        qw, qx, qy, qz = _look_at_colmap_quat(fwd)
+
     return f"{qw:.10f} {qx:.10f} {qy:.10f} {qz:.10f} {tx:.6f} {ty:.6f} {tz:.6f}"
 
 
@@ -331,18 +410,36 @@ def build_projection_view_poses(
     sampled = pose_candidates
 
     if use_grid_sampling and poses:
-        xs = np.array([p["x"] for p in poses], dtype=np.float64)
-        ys = np.array([p["y"] for p in poses], dtype=np.float64)
+        # 网格覆盖范围：优先用点云边界（octree manifest），fallback 到轨迹范围
+        manifest_path = Path(output_dir) / "octree_data" / "manifest.json"
+        if manifest_path.exists():
+            with open(manifest_path) as f:
+                manifest = json.load(f)
+            xmin_pc, ymin_pc, _ = manifest["root_min"]
+            xmax_pc, ymax_pc, _ = manifest["root_max"]
+            # 缩进 margin 避免边缘空白
+            margin = grid_interval_m * 1.5
+            x_min = xmin_pc + margin
+            x_max = xmax_pc - margin
+            y_min = ymin_pc + margin
+            y_max = ymax_pc - margin
+            print(f"[OCTREE] 网格范围: 点云边界 X[{x_min:.0f},{x_max:.0f}] Y[{y_min:.0f},{y_max:.0f}]")
+        else:
+            xs_all = np.array([p["x"] for p in poses], dtype=np.float64)
+            ys_all = np.array([p["y"] for p in poses], dtype=np.float64)
+            margin = grid_interval_m * 3
+            x_min = xs_all.min() - margin
+            x_max = xs_all.max() + margin
+            y_min = ys_all.min() - margin
+            y_max = ys_all.max() + margin
+            print(f"[OCTREE] 网格范围: 轨迹+margin X[{x_min:.0f},{x_max:.0f}] Y[{y_min:.0f},{y_max:.0f}]")
+
         zs = np.array([p["z"] for p in poses], dtype=np.float64)
-        
-        x_min, x_max = xs.min(), xs.max()
-        y_min, y_max = ys.min(), ys.max()
         z_mean = zs.mean()
-        
-        margin = grid_interval_m * 2
-        grid_x = np.arange(x_min - margin, x_max + margin, grid_interval_m)
-        grid_y = np.arange(y_min - margin, y_max + margin, grid_interval_m)
-        
+
+        grid_x = np.arange(x_min, x_max, grid_interval_m)
+        grid_y = np.arange(y_min, y_max, grid_interval_m)
+
         grid_poses = []
         for gx in grid_x:
             for gy in grid_y:
@@ -356,8 +453,8 @@ def build_projection_view_poses(
                     "qw": 1.0,
                     "name": f"grid_{gx:.1f}_{gy:.1f}",
                 })
-        
-        print(f"[OCTREE] 轨迹位姿: {len(sampled)} 个, 网格位姿: {len(grid_poses)} 个")
+
+        print(f"[OCTREE] 轨迹位姿: {len(sampled)} 个, 网格位姿: {len(grid_poses)} 个 ({len(grid_x)}x{len(grid_y)})")
         sampled.extend(grid_poses)
 
     views = []
@@ -478,8 +575,8 @@ def project_las_multi_view_octree(
                 y_min, y_max = min(ys), max(ys)
                 z_mean = sum(zs) / len(zs)
                 
-                grid_interval_m = SAMPLE_INTERVAL_M
-                margin = grid_interval_m * 2
+                grid_interval_m = GRID_INTERVAL_M
+                margin = grid_interval_m * 1.5
                 grid_x = np.arange(x_min - margin, x_max + margin, grid_interval_m)
                 grid_y = np.arange(y_min - margin, y_max + margin, grid_interval_m)
                 
@@ -500,9 +597,9 @@ def project_las_multi_view_octree(
                 pose_file = build_projection_view_poses(
                     poses,
                     output_dir=output_dir,
-                    sample_interval_m=SAMPLE_INTERVAL_M,
+                    sample_interval_m=GRID_INTERVAL_M,
                     max_poses=None,
-                    grid_interval_m=SAMPLE_INTERVAL_M,
+                    grid_interval_m=GRID_INTERVAL_M,
                     use_grid_sampling=False,
                 )
             else:
@@ -519,7 +616,7 @@ def project_las_multi_view_octree(
             output_dir=output_dir,
             sample_interval_m=SAMPLE_INTERVAL_M,
             max_poses=max_poses,
-            grid_interval_m=SAMPLE_INTERVAL_M,
+            grid_interval_m=GRID_INTERVAL_M,
             use_grid_sampling=True,
         )
     
@@ -592,13 +689,8 @@ def project_las_multi_view_octree(
             progress_callback(f"渲染投影图 {current_render}/{total_renders}...", render_progress)
         t0 = time.time()
 
-        # 构建 colmap 行，使用局部坐标，包含 z_bias 相机抬高
-        colmap_line = _build_colmap_line(pose, offset_xyz, z_bias)
-
-        # 旋转顺序与 slam-map 一致：yaw_q * pitch_q * base_q
-        # 先在世界系偏航，再施加向下俯仰，最后应用基础姿态
-        render_line = _rotate_colmap_line(colmap_line, 'z', heading_deg)
-        render_line = _rotate_colmap_line(render_line, 'x', PITCH_DEG)
+        # 构建 colmap 行：heading 和 pitch 直接传入（网格位姿用 look-at 计算朝向）
+        render_line = _build_colmap_line(pose, offset_xyz, z_bias, heading_deg, PITCH_DEG)
 
         # 每个视角的输出路径，统一放进 tiles/ 目录，和图像产物绑定
         fname = f"view_{vd}_{fx_str}_{pi}.png"

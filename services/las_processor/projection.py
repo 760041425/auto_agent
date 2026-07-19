@@ -177,7 +177,7 @@ def _render_camera_like_points(points_3d, point_colors, camera_matrix, img_w, im
 
 
 def _apply_camera_like_shading(image, depth=None):
-    """对已有投影图做轻微的相机式明暗与纹理增强。"""
+    """对已有投影图做相机式明暗增强与对比度/饱和度提升。"""
     if image is None:
         return None
 
@@ -204,10 +204,22 @@ def _apply_camera_like_shading(image, depth=None):
     else:
         depth_norm = np.zeros_like(gray)
 
-    shading = (0.9 + 0.12 * edge_norm[..., None]) * (0.88 + 0.12 * (1.0 - depth_norm[..., None]))
+    # 边缘增强 + 深度衰减
+    shading = (0.85 + 0.15 * edge_norm[..., None]) * (0.85 + 0.15 * (1.0 - depth_norm[..., None]))
     img_float = img_float * shading
+
+    # 轻微高斯模糊去除点云噪点
     img_float = cv2.GaussianBlur(img_float, (3, 3), 0)
-    img_float = cv2.convertScaleAbs(img_float, alpha=1.03, beta=4)
+
+    # 提升对比度和亮度（关键！）
+    img_float = cv2.convertScaleAbs(img_float, alpha=1.15, beta=15)
+
+    # 饱和度增强（让点云颜色更鲜明）
+    if img_float.shape[2] >= 3:
+        hsv = cv2.cvtColor(img_float, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[..., 1] = np.clip(hsv[..., 1] * 1.2, 0, 255)
+        img_float = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
     return img_float
 
 
