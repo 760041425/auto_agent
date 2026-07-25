@@ -594,12 +594,25 @@ def _compute_normal_map(world_array: np.ndarray) -> np.ndarray:
         return np.zeros((h, w, 3), dtype=np.float32)
     
     # 双边滤波平滑 XYZ（降噪保边）
+    # 注意：XYZ 坐标值很大（UTM ~500000），需归一化到 [0,1] 再滤波
     smooth = np.zeros_like(world_array)
     for c in range(3):
         ch = world_array[..., c].copy()
-        # 只对有效区域滤波
-        ch_filtered = cv2.bilateralFilter(ch, d=5, sigmaColor=50, sigmaSpace=5)
-        smooth[..., c] = np.where(valid, ch_filtered, ch)
+        # 仅对有效区域做 min-max 归一化后滤波，再还原
+        ch_valid = ch[valid]
+        if len(ch_valid) == 0:
+            smooth[..., c] = ch
+            continue
+        c_min, c_max = float(ch_valid.min()), float(ch_valid.max())
+        if c_max - c_min < 1e-6:
+            smooth[..., c] = ch
+            continue
+        ch_norm = (ch - c_min) / (c_max - c_min)
+        ch_norm = np.nan_to_num(ch_norm, nan=0.0, posinf=0.0, neginf=0.0)
+        ch_filtered = cv2.bilateralFilter(ch_norm.astype(np.float32), d=5, sigmaColor=50, sigmaSpace=5)
+        # 还原到原始数值范围
+        smooth[..., c] = ch_filtered * (c_max - c_min) + c_min
+        smooth[..., c] = np.where(valid, smooth[..., c], ch)
     
     x, y, z = smooth[..., 0], smooth[..., 1], smooth[..., 2]
     
