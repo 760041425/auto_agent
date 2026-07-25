@@ -555,8 +555,8 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
             # 用 DISK 提特征
             fe = _SUPERPOINT_MODEL  # DISK 实例
 
-            img1_t = kornia.image_to_tensor(img1, keepdim=False).float() / 255.0
-            img2_t = kornia.image_to_tensor(img2, keepdim=False).float() / 255.0
+            img1_t = kornia.image.image_to_tensor(img1, keepdim=False).float() / 255.0
+            img2_t = kornia.image.image_to_tensor(img2, keepdim=False).float() / 255.0
 
             if img1_t.dim() == 3:
                 img1_t = img1_t.unsqueeze(0)
@@ -566,18 +566,31 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
             img2_t = img2_t.to(DEVICE)
 
             with torch.no_grad():
-                feat1 = fe(img1_t, features=True)  # DISK 返回 dict: keypoints, descriptors, scores
-                feat2 = fe(img2_t, features=True)
+                # DISK 返回 list[DISKFeatures]
+                feat1_list = fe(img1_t, n=2048)
+                feat2_list = fe(img2_t, n=2048)
+                feat1 = feat1_list[0]
+                feat2 = feat2_list[0]
 
+                # DISKFeatures 有 .keypoints, .descriptors, .scores
+                kpts1_3d = feat1.keypoints  # (N, 3) - x, y, score
+                kpts2_3d = feat2.keypoints
+                desc1 = feat1.descriptors  # (N, 128)
+                desc2 = feat2.descriptors
+
+                if len(kpts1_3d) < 2 or len(kpts2_3d) < 2:
+                    raise ValueError("DISK 特征点太少")
+
+                # 整理成 LightGlue 需要的格式
                 data = {
                     "image0": {
-                        "keypoints": feat1["keypoints"],
-                        "descriptors": feat1["descriptors"],
+                        "keypoints": kpts1_3d[None, :, :2],  # [1, N, 2]
+                        "descriptors": desc1[None],  # [1, N, 128]
                         "image_size": torch.tensor([[H1, W1]], device=DEVICE),
                     },
                     "image1": {
-                        "keypoints": feat2["keypoints"],
-                        "descriptors": feat2["descriptors"],
+                        "keypoints": kpts2_3d[None, :, :2],
+                        "descriptors": desc2[None],
                         "image_size": torch.tensor([[H2, W2]], device=DEVICE),
                     },
                 }
@@ -586,15 +599,15 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
                 matches = out.get("matches0", None)
                 if matches is not None:
                     match_mask = matches > -1
-                    kpts0 = feat1["keypoints"][0][match_mask[0]].cpu().numpy()
-                    kpts1 = feat2["keypoints"][0][matches[0][match_mask[0]]].cpu().numpy()
+                    kpts0_np = kpts1_3d[..., :2][match_mask[0]].cpu().numpy()
+                    kpts1_np = kpts2_3d[..., :2][matches[0][match_mask[0]]].cpu().numpy()
                     confidence = out.get("matching_scores0", None)
                     if confidence is not None:
                         cert = confidence[0][match_mask[0]].cpu().numpy().flatten()
                     else:
-                        cert = np.ones(len(kpts0))
-                    if len(kpts0) > 0:
-                        return kpts0, kpts1, cert
+                        cert = np.ones(len(kpts0_np))
+                    if len(kpts0_np) > 0:
+                        return kpts0_np, kpts1_np, cert
         except Exception as e:
             log(f"  DISK+LightGlue 匹配失败: {e}, fallback 到 SIFT+FLANN")
             import traceback
