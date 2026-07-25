@@ -13,7 +13,9 @@ Octree 加速的点云投影生成器
 """
 
 import json
+import math
 import os
+import shutil
 import subprocess
 import time
 import tempfile
@@ -23,29 +25,184 @@ from typing import Optional
 import cv2
 import numpy as np
 from PIL import Image
+import laspy
 
 from services.las_processor.projection import _apply_camera_like_shading, _load_poses_and_offset
 
+OCTREE_SOURCE_DIR = "/Users/pangjinfu/code/slam-map/slam-map-engine/octree"
 OCTREE_BUILD_BIN = os.environ.get(
     "OCTREE_BUILD_BIN",
-    str(Path.home() / "code/slam-map/slam-map-engine/octree/build/octree_build"),
+    str(Path(OCTREE_SOURCE_DIR) / "build" / "octree_build"),
 )
 OCTREE_RENDER_BIN = os.environ.get(
     "OCTREE_RENDER_BIN",
-    str(Path.home() / "code/slam-map/slam-map-engine/octree/build/octree_render"),
+    str(Path(OCTREE_SOURCE_DIR) / "build" / "octree_render"),
 )
 OCTREE_CONFIG = os.environ.get(
     "OCTREE_CONFIG",
-    str(Path.home() / "code/slam-map/slam-map-engine/octree/config/octree_render_100m.yaml"),
+    str(Path(OCTREE_SOURCE_DIR) / "config" / "octree_render_100m.yaml"),
 )
 
 TILE_PX = 512
 VIEW_RANGE = 50.0
-VIEW_DIRS = [('n', 0.0), ('ne', 45.0), ('e', 90.0), ('se', 135.0), ('s', 180.0), ('sw', 225.0), ('w', 270.0), ('nw', 315.0)]
 SAMPLE_INTERVAL_M = 5.0
 GRID_INTERVAL_M = 10.0  # 网格位姿间隔（每张tile覆盖~77m，10m间距保证充分重叠）
 BLACK_PIXEL_THRESHOLD = 0.90
-PITCH_DEG = -35.0
+PITCH_DEG = -15.0
+EULER_VIEW_DIRECTIONS = [
+    ('yaw0', 0.0, PITCH_DEG, 0.0),
+    ('yaw90', 90.0, PITCH_DEG, 0.0),
+    ('yaw180', 180.0, PITCH_DEG, 0.0),
+    ('yaw270', 270.0, PITCH_DEG, 0.0),
+]
+
+
+def _filter_trajectory_poses(
+    poses: list[dict],
+    min_time_sec: float = 1.0,
+    min_dist_m: float = 2.0,
+) -> list[dict]:
+    """按时间和位置间隔对轨迹位姿做下采样。"""
+    if not poses:
+        return []
+
+    filtered: list[dict] = [poses[0]]
+    last_kept = poses[0]
+    for pose in poses[1:]:
+        ts = float(pose.get("ts", 0.0))
+        last_ts = float(last_kept.get("ts", 0.0))
+        dx = float(pose.get("x", 0.0)) - float(last_kept.get("x", 0.0))
+        dy = float(pose.get("y", 0.0)) - float(last_kept.get("y", 0.0))
+        dz = float(pose.get("z", 0.0)) - float(last_kept.get("z", 0.0))
+        dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+        time_gap = ts - last_ts
+        if time_gap >= min_time_sec or dist >= min_dist_m:
+            filtered.append(pose)
+            last_kept = pose
+    return filtered
+
+
+def _check_octree_binaries() -> None:
+    """检查 octree 可执行文件是否存在。"""
+    missing = []
+    for name, path in [("octree_build", OCTREE_BUILD_BIN), ("octree_render", OCTREE_RENDER_BIN)]:
+        if not os.path.exists(path):
+            missing.append(f"{name}: {path}")
+    if missing:
+        raise FileNotFoundError(
+            "缺少 octree 引擎二进制，无法执行预处理。请先在 slam-map 工程中编译 octree_build/octree_render，或设置 OCTREE_BUILD_BIN/OCTREE_RENDER_BIN。\n"
+            + "\n".join(missing)
+        )
+
+
+def _resolve_pdal_binary() -> Optional[str]:
+    """从 PATH、环境变量和常见安装路径中解析 PDAL 可执行文件。"""
+    candidates: list[str] = []
+    env_bin = os.environ.get("PDAL_BIN")
+    if env_bin:
+        candidates.append(env_bin)
+
+    resolved = shutil.which("pdal")
+    if resolved:
+        candidates.append(resolved)
+
+    candidates.extend([
+        "/opt/homebrew/bin/pdal",
+        "/usr/local/bin/pdal",
+        "/opt/homebrew/Caskroom/miniconda/base/bin/pdal",
+        "/usr/bin/pdal",
+        "/bin/pdal",
+    ])
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        path = Path(candidate)
+        if path.exists() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
+def _downsample_las_with_laspy(
+    source_path: Path,
+    out_path: Path,
+    voxel_size_m: float = 0.02,
+) -> None:
+    """使用 laspy 做一个简单的空间下采样，作为 PDAL 的降级方案。"""
+    print(f"[OCTREE] 使用 laspy 降级下采样 LAS: {source_path} -> {out_path}")
+    in_las = laspy.read(source_path)
+    header = in_las.header
+    points = np.column_stack([
+        in_las.x,
+        in_las.y,
+        in_las.z,
+    ])
+
+    if len(points) == 0:
+        raise RuntimeError("LAS 文件中没有点云数据")
+
+    scale = np.floor(points / voxel_size_m).astype(np.int64)
+    unique = np.unique(scale, axis=0)
+    keep_idx = []
+    for cell in unique:
+        mask = np.all(scale == cell, axis=1)
+        if np.any(mask):
+            keep_idx.append(int(np.argmax(mask)))
+
+    keep_idx_array = np.array(keep_idx, dtype=np.int64)
+    if keep_idx_array.size == 0:
+        raise RuntimeError("LAS 降采样后没有保留任何点")
+
+    selected = in_las[keep_idx_array]
+    header = laspy.LasHeader(point_format=3, version="1.2")
+    header.scale = in_las.header.scale
+    header.offset = in_las.header.offset
+    out_las = laspy.LasData(header)
+    out_las.points = selected.points
+    out_las.write(out_path)
+
+
+def _prepare_downsampled_las(
+    las_path: str,
+    output_dir: str,
+    force: bool = False,
+    voxel_size_m: float = 0.02,
+) -> str:
+    """在 octree_build 前对 LAS 做体素下采样。优先尝试 PDAL，失败时回退到 laspy。"""
+    source_path = Path(las_path)
+    if not source_path.exists():
+        raise FileNotFoundError(f"LAS 文件不存在: {las_path}")
+
+    out_dir = Path(output_dir) / "downsampled_las"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{source_path.stem}_downsampled.las"
+
+    if out_path.exists() and not force:
+        print(f"[OCTREE] 使用已有下采样 LAS: {out_path}")
+        return str(out_path)
+
+    pdal_bin = _resolve_pdal_binary()
+    if pdal_bin:
+        cmd = [
+            pdal_bin,
+            "translate",
+            str(source_path),
+            str(out_path),
+            "filters.voxeldownsize",
+            f"--filters.voxeldownsize.cell={voxel_size_m}",
+            "--writers.las.dataformat_id=3",   # 强制写 format 3 以兼容 octree_build（不支持 format 4+）
+        ]
+        print(f"[OCTREE] 使用 PDAL 下采样 LAS: {source_path} -> {out_path}")
+        print(f"[OCTREE]   PDAL 路径: {pdal_bin}")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode == 0:
+            return str(out_path)
+        print(f"[OCTREE] PDAL 降采样失败，回退到 laspy: {result.stderr[:500]}")
+
+    _downsample_las_with_laspy(source_path, out_path, voxel_size_m=voxel_size_m)
+    return str(out_path)
 
 
 def build_octree(
@@ -59,6 +216,8 @@ def build_octree(
     
     返回: octree 数据集目录路径
     """
+    _check_octree_binaries()
+
     octree_dir = Path(output_dir) / "octree_data"
     manifest_path = octree_dir / "manifest.json"
     
@@ -87,9 +246,21 @@ def build_octree(
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     
     if result.returncode != 0:
+        # octree_build 的输出可能写入日志文件而非 stderr，附加读取日志兜底
+        build_log_path = octree_dir / "logs" / "octree_build.log"
+        log_tail = ""
+        if build_log_path.exists():
+            try:
+                with open(build_log_path) as lf:
+                    lines = lf.readlines()
+                log_tail = "\n".join(lines[-20:])  # 取最后 20 行
+            except Exception as exc:
+                log_tail = f"(读取日志失败: {exc})"
         raise RuntimeError(
             f"octree_build 失败 (code={result.returncode}):\n"
-            f"stderr: {result.stderr[:500]}"
+            f"stderr: {result.stderr[:500]}\n"
+            f"--- octree_build.log tail (最后20行) ---\n"
+            f"{log_tail}"
         )
     
     elapsed = time.time() - t0
@@ -113,6 +284,8 @@ def render_pose_octree(
     
     返回: True 成功 / False 失败
     """
+    _check_octree_binaries()
+
     cmd = [
         OCTREE_RENDER_BIN,
         "--dataset", octree_dataset,
@@ -197,12 +370,11 @@ def _look_at_colmap_quat(forward_world: np.ndarray, up_world: np.ndarray = None)
 
 
 def _build_colmap_line(pose: dict, offset_xyz: tuple[float, float, float], z_bias: float = 0.0,
-                       heading_deg: float = 0.0, pitch_deg: float = 0.0) -> str:
+                       heading_deg: float = 0.0, pitch_deg: float = 0.0, roll_deg: float = 0.0) -> str:
     """
     从位姿字典构建 octree_render 需要的 colmap 行。
 
-    对于网格位姿（qw=1 identity），直接用 look-at 方法生成正确的朝向四元数。
-    对于有位姿信息的条目，使用原始四元数。
+    现在优先使用轨迹位姿 + Euler 角生成朝向；当位姿自带四元数且没有明确的 Euler 参数时，兼容使用原始四元数。
     """
     tx = pose['x']
     ty = pose['y']
@@ -213,23 +385,51 @@ def _build_colmap_line(pose: dict, offset_xyz: tuple[float, float, float], z_bia
     qy = pose.get('qy', 0.0)
     qz = pose.get('qz', 0.0)
 
-    # 网格位姿（identity 四元数）：用 heading + pitch 直接计算朝向
-    is_grid = abs(qw - 1.0) < 0.01 and abs(qx) < 0.01 and abs(qy) < 0.01 and abs(qz) < 0.01
-
-    if is_grid:
+    use_euler = abs(float(pose.get('yaw_deg', 0.0))) > 1e-9 or abs(float(pose.get('pitch_deg', 0.0))) > 1e-9 or abs(float(pose.get('roll_deg', 0.0))) > 1e-9
+    if use_euler:
+        yaw_deg = float(pose.get('yaw_deg', heading_deg))
+        pitch_deg = float(pose.get('pitch_deg', pitch_deg))
+        roll_deg = float(pose.get('roll_deg', roll_deg))
         import math
-        yaw_rad = math.radians(heading_deg)
+        yaw_rad = math.radians(yaw_deg)
         pitch_rad = math.radians(pitch_deg)
-        # 世界坐标系: X=East, Y=North, Z=Up
-        # 水平方向: heading 从 North(Y+) 顺时针
-        horiz_x = math.sin(yaw_rad)   # East 分量
-        horiz_y = math.cos(yaw_rad)   # North 分量
-        horiz_z = 0.0
-        # 加入 pitch（负值=向下看）
+        roll_rad = math.radians(roll_deg)
+
+        horiz_x = math.sin(yaw_rad)
+        horiz_y = math.cos(yaw_rad)
         fwd = np.array([
             horiz_x * math.cos(pitch_rad),
             horiz_y * math.cos(pitch_rad),
-            math.sin(pitch_rad),  # Z=Up, 负值=向下
+            math.sin(pitch_rad),
+        ])
+        fwd = fwd / (np.linalg.norm(fwd) + 1e-10)
+
+        if abs(roll_rad) > 1e-9:
+            up_world = np.array([0.0, 0.0, 1.0])
+            right = np.cross(fwd, up_world)
+            right_norm = np.linalg.norm(right)
+            if right_norm < 1e-6:
+                up_world = np.array([0.0, 1.0, 0.0])
+                right = np.cross(fwd, up_world)
+                right_norm = np.linalg.norm(right)
+            right = right / (right_norm + 1e-10)
+            down = np.cross(fwd, right)
+            right_rot = right * math.cos(roll_rad) + down * math.sin(roll_rad)
+            down_rot = -right * math.sin(roll_rad) + down * math.cos(roll_rad)
+            R_wc = np.array([right_rot, down_rot, fwd], dtype=np.float64)
+            qw, qx, qy, qz = _rotmat_to_quat(R_wc)
+        else:
+            qw, qx, qy, qz = _look_at_colmap_quat(fwd)
+    elif abs(qw - 1.0) < 0.01 and abs(qx) < 0.01 and abs(qy) < 0.01 and abs(qz) < 0.01:
+        import math
+        yaw_rad = math.radians(heading_deg)
+        pitch_rad = math.radians(pitch_deg)
+        horiz_x = math.sin(yaw_rad)
+        horiz_y = math.cos(yaw_rad)
+        fwd = np.array([
+            horiz_x * math.cos(pitch_rad),
+            horiz_y * math.cos(pitch_rad),
+            math.sin(pitch_rad),
         ])
         qw, qx, qy, qz = _look_at_colmap_quat(fwd)
 
@@ -376,28 +576,19 @@ def _depth_to_xyz_map(
     return coord_map, world
 
 
-def build_projection_view_poses(
+def prepare_octree_render_plan(
     poses: list[dict],
     output_dir: str = "projections",
     sample_interval_m: float = SAMPLE_INTERVAL_M,
     max_poses: Optional[int] = None,
     grid_interval_m: float = 10.0,
     use_grid_sampling: bool = True,
-) -> Path:
+) -> tuple[Path, list[dict]]:
     """
-    生成投影位姿文件。
-    
-    两种采样模式：
-    1. 轨迹位姿采样：按空间间隔采样已有位姿
-    2. 网格均匀采样：在点云区域按网格均匀生成虚拟位姿（覆盖整个区域）
-    
-    Args:
-        poses: 原始位姿列表
-        output_dir: 输出目录
-        sample_interval_m: 轨迹位姿采样间隔（米）
-        max_poses: 最大轨迹位姿数
-        grid_interval_m: 网格采样间隔（米）
-        use_grid_sampling: 是否启用网格采样
+    生成 octree_render 的投影位姿计划。
+
+    该阶段只负责把轨迹位姿和网格位姿展开为可渲染的视角列表，
+    后续渲染阶段再基于这些视角调用 octree_render 生成图像。
     """
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -459,11 +650,14 @@ def build_projection_view_poses(
 
     views = []
     for pose in sampled:
-        for view_dir, heading_deg in VIEW_DIRS:
+        for view_dir, yaw_deg, pitch_deg, roll_deg in EULER_VIEW_DIRECTIONS:
             views.append({
                 "name": pose.get("name", "pose"),
                 "view_dir": view_dir,
-                "heading_deg": heading_deg,
+                "heading_deg": yaw_deg,
+                "yaw_deg": float(yaw_deg),
+                "pitch_deg": float(pitch_deg),
+                "roll_deg": float(roll_deg),
                 "x": float(pose["x"]),
                 "y": float(pose["y"]),
                 "z": float(pose["z"]),
@@ -482,6 +676,26 @@ def build_projection_view_poses(
     }
     with open(pose_file, "w") as f:
         json.dump(payload, f, indent=2)
+    return pose_file, views
+
+
+def build_projection_view_poses(
+    poses: list[dict],
+    output_dir: str = "projections",
+    sample_interval_m: float = SAMPLE_INTERVAL_M,
+    max_poses: Optional[int] = None,
+    grid_interval_m: float = 10.0,
+    use_grid_sampling: bool = True,
+) -> Path:
+    """兼容旧接口：返回投影位姿文件路径。"""
+    pose_file, _ = prepare_octree_render_plan(
+        poses,
+        output_dir=output_dir,
+        sample_interval_m=sample_interval_m,
+        max_poses=max_poses,
+        grid_interval_m=grid_interval_m,
+        use_grid_sampling=use_grid_sampling,
+    )
     return pose_file
 
 
@@ -540,21 +754,28 @@ def project_las_multi_view_octree(
     if not poses:
         poses, offset_x, offset_y, offset_z = _load_poses_and_offset(las_dir)
         offset_xyz = (offset_x, offset_y, offset_z)
+
+    if poses:
+        poses = _filter_trajectory_poses(poses, min_time_sec=1.0, min_dist_m=4.0)
     
     z_bias = _load_z_bias("las")
     if z_bias == 0.0:
         z_bias = _load_z_bias(las_dir)
     print(f"[OCTREE] z_bias = {z_bias:.2f} (rtk_external + lift)")
     
-    if not os.path.exists(OCTREE_BUILD_BIN):
-        raise FileNotFoundError(f"octree_build 不存在: {OCTREE_BUILD_BIN}")
-    if not os.path.exists(OCTREE_RENDER_BIN):
-        raise FileNotFoundError(f"octree_render 不存在: {OCTREE_RENDER_BIN}")
+    try:
+        _check_octree_binaries()
+    except FileNotFoundError as exc:
+        raise RuntimeError(str(exc)) from exc
     
-    # 1. 构建八叉树
+    # 1. 先对 LAS 做 0.02m 下采样，再构建八叉树
+    if progress_callback:
+        progress_callback("下采样 LAS 数据...", 8)
+    sampled_las_path = _prepare_downsampled_las(las_path, output_dir, force=force_rebuild)
+
     if progress_callback:
         progress_callback("构建 Octree 八叉树...", 10)
-    octree_dataset = build_octree(las_path, output_dir, offset_xyz, force=force_rebuild)
+    octree_dataset = build_octree(sampled_las_path, output_dir, offset_xyz, force=force_rebuild)
     
     if progress_callback:
         progress_callback("加载位姿数据...", 20)
@@ -594,7 +815,7 @@ def project_las_multi_view_octree(
                             "name": f"grid_{gx:.1f}_{gy:.1f}",
                         })
                 print(f"[OCTREE] 从已有边界生成网格位姿: {len(poses)} 个")
-                pose_file = build_projection_view_poses(
+                pose_file, _ = prepare_octree_render_plan(
                     poses,
                     output_dir=output_dir,
                     sample_interval_m=GRID_INTERVAL_M,
@@ -611,7 +832,7 @@ def project_las_multi_view_octree(
             selected_poses = poses
         else:
             selected_poses = poses[:min(max_poses, len(poses))]
-        pose_file = build_projection_view_poses(
+        pose_file, _ = prepare_octree_render_plan(
             selected_poses,
             output_dir=output_dir,
             sample_interval_m=SAMPLE_INTERVAL_M,
@@ -631,7 +852,13 @@ def project_las_multi_view_octree(
     all_poses = []
     seen_coords = set()
     for view in pose_data.get("views", []):
-        key = (round(view["x"], 1), round(view["y"], 1), view["view_dir"])
+        key = (
+            round(view["x"], 1),
+            round(view["y"], 1),
+            view.get("yaw_deg", view.get("heading_deg", 0.0)),
+            view.get("pitch_deg", PITCH_DEG),
+            view.get("roll_deg", 0.0),
+        )
         if key not in seen_coords:
             seen_coords.add(key)
             all_poses.append(view)
@@ -678,9 +905,12 @@ def project_las_multi_view_octree(
             "qy": view.get("qy", 0.0),
             "qz": view.get("qz", 0.0),
             "qw": view.get("qw", 1.0),
+            "yaw_deg": view.get("yaw_deg", view.get("heading_deg", 0.0)),
+            "pitch_deg": view.get("pitch_deg", PITCH_DEG),
+            "roll_deg": view.get("roll_deg", 0.0),
         }
         vd = view["view_dir"]
-        heading_deg = view["heading_deg"]
+        heading_deg = view.get("heading_deg", view.get("yaw_deg", 0.0))
         fx_str = f"{pose['x']:.1f}_{pose['y']:.1f}"
         
         current_render += 1
@@ -690,7 +920,14 @@ def project_las_multi_view_octree(
         t0 = time.time()
 
         # 构建 colmap 行：heading 和 pitch 直接传入（网格位姿用 look-at 计算朝向）
-        render_line = _build_colmap_line(pose, offset_xyz, z_bias, heading_deg, PITCH_DEG)
+        render_line = _build_colmap_line(
+            pose,
+            offset_xyz,
+            z_bias,
+            heading_deg,
+            pose.get("pitch_deg", PITCH_DEG),
+            pose.get("roll_deg", 0.0),
+        )
 
         # 每个视角的输出路径，统一放进 tiles/ 目录，和图像产物绑定
         fname = f"view_{vd}_{fx_str}_{pi}.png"
