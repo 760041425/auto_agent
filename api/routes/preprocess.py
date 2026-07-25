@@ -135,7 +135,6 @@ def _run_preprocess(mode: str = "full"):
                 _preprocess_status["running"] = False
                 return
             _preprocess_status["progress"] = 100
-            _preprocess_status["step"] = f"SALAD 特征提取完成: {n_tiles} 张图"
 
         _preprocess_status["progress"] = 100
         _preprocess_status["step"] = "预处理完成"
