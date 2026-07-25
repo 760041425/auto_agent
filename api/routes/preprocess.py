@@ -72,11 +72,13 @@ def _run_preprocess(mode: str = "full"):
 
             _preprocess_status["step"] = "渲染投影图与坐标映射..."
             _preprocess_status["progress"] = 30
+            # render 模式强制重绘（法线图算法等更新时需要刷新）
+            force_rebuild = (mode == "render")
             tiles = project_las_multi_view_octree(
                 las_path,
                 output_dir=str(out_dir),
                 max_poses=None,
-                force_rebuild=False,
+                force_rebuild=force_rebuild,
                 progress_callback=_progress_callback,
             )
             n_tiles = len(tiles)
