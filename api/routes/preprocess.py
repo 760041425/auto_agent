@@ -54,9 +54,19 @@ def _run_preprocess(mode: str = "full"):
         if mode in {"build", "full"}:
             from services.las_processor.projection_octree import _prepare_downsampled_las, build_octree
 
-            _preprocess_status["step"] = "下采样 LAS..."
+            # 加载 offset
+            _offset_x, _offset_y, _offset_z = 0.0, 0.0, 0.0
+            try:
+                with open("las/map_config.json") as _f:
+                    _cfg = json.load(_f)
+                    _offset_x, _offset_y, _offset_z = _cfg["offset_xyz"]
+            except Exception:
+                pass
+            _offset_xyz = (_offset_x, _offset_y, _offset_z)
+
+            _preprocess_status["step"] = "下采样 LAS + 坐标平移..."
             _preprocess_status["progress"] = 10
-            sampled_las_path = _prepare_downsampled_las(las_path, str(out_dir), force=True)
+            sampled_las_path = _prepare_downsampled_las(las_path, str(out_dir), force=True, offset_xyz=_offset_xyz)
 
             _preprocess_status["step"] = "构建 Octree 八叉树..."
             _preprocess_status["progress"] = 20
