@@ -125,37 +125,6 @@ def _resolve_pdal_binary() -> Optional[str]:
     return None
 
 
-def _normalize_intensity_in_las(las_path: str | Path) -> None:
-    """将 LAS 文件的 intensity 拉伸到 0-65535 范围。
-    
-    octree_render 使用 intensity 着色，但原始 intensity 值偏低（均值 ~30/255），
-    导致渲染图近乎全黑。此函数读取 LAS，将 intensity 线性拉伸到完整的 uint16 范围。
-    
-    使用 laspy 原地修改再写回，保留原始 LAS header 版本和点格式。
-    """
-    las_path = Path(las_path)
-    if not las_path.exists():
-        return
-    try:
-        in_las = laspy.read(las_path)
-    except Exception:
-        return
-    if not hasattr(in_las, 'intensity') or in_las.intensity.size == 0:
-        return
-    i = in_las.intensity.astype(np.float64)
-    i_min, i_max = float(i.min()), float(i.max())
-    
-    if i_max - i_min < 1.0:
-        in_las.intensity = np.full_like(in_las.intensity, 32768, dtype=np.uint16)
-    else:
-        i_norm = (i - i_min) / (i_max - i_min) * 65535.0
-        in_las.intensity = np.clip(np.round(i_norm), 0, 65535).astype(np.uint16)
-    
-    tmp = las_path.with_suffix(las_path.suffix + ".tmp")
-    in_las.write(tmp)
-    tmp.replace(las_path)
-    print(f"[OCTREE] intensity 归一化完成: {las_path.name}  ({i_min:.0f}→{i_max:.0f} → 0→65535)")
-
 
 def _downsample_las_with_laspy(
     source_path: Path,
@@ -230,12 +199,10 @@ def _prepare_downsampled_las(
         print(f"[OCTREE]   PDAL 路径: {pdal_bin}")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode == 0:
-            _normalize_intensity_in_las(out_path)
             return str(out_path)
         print(f"[OCTREE] PDAL 降采样失败，回退到 laspy: {result.stderr[:500]}")
 
     _downsample_las_with_laspy(source_path, out_path, voxel_size_m=voxel_size_m)
-    _normalize_intensity_in_las(out_path)
     return str(out_path)
 
 
