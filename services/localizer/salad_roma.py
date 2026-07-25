@@ -537,8 +537,8 @@ def _get_lightglue_model(device):
 
 def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000) -> tuple:
     """
-    LightGlue 稀疏匹配两张图像。
-
+    LightGlue 稀疏匹配两张图像（使用 SuperPoint 提特征 + LightGlue 匹配）。
+    
     返回: (kpts1_np, kpts2_np, certainty_np)
         - kpts1_np: (N, 2) 原图上的关键点坐标（像素）
         - kpts2_np: (N, 2) 目标图上的对应点坐标（像素）
@@ -549,6 +549,11 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
         try:
             H1, W1 = img1.shape[:2]
             H2, W2 = img2.shape[:2]
+
+            # SuperPoint 特征提取
+            from kornia.feature import SuperPoint
+            sp = SuperPoint(max_num_features=2048).to(DEVICE)
+            sp.eval()
 
             img1_t = kornia.image_to_tensor(img1, keepdim=False).float() / 255.0
             img2_t = kornia.image_to_tensor(img2, keepdim=False).float() / 255.0
@@ -561,13 +566,29 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
             img2_t = img2_t.to(DEVICE)
 
             with torch.no_grad():
-                out = model({"image0": img1_t, "image1": img2_t})
+                feat1 = sp(img1_t)
+                feat2 = sp(img2_t)
+
+                data = {
+                    "image0": {
+                        "keypoints": feat1["keypoints"],  # [B, M, 2]
+                        "descriptors": feat1["descriptors"],  # [B, M, 256]
+                        "image": img1_t,
+                    },
+                    "image1": {
+                        "keypoints": feat2["keypoints"],
+                        "descriptors": feat2["descriptors"],
+                        "image": img2_t,
+                    },
+                }
+
+                out = model(data)
                 matches = out.get("matches0", None)
                 if matches is not None:
                     match_mask = matches > -1
-                    kpts0 = out["keypoints0"][0][match_mask[0]].cpu().numpy()
-                    kpts1 = out["keypoints1"][0][matches[0][match_mask[0]]].cpu().numpy()
-                    confidence = out.get("match_confidence", None)
+                    kpts0 = feat1["keypoints"][0][match_mask[0]].cpu().numpy()
+                    kpts1 = feat2["keypoints"][0][matches[0][match_mask[0]]].cpu().numpy()
+                    confidence = out.get("matching_scores0", None)
                     if confidence is not None:
                         cert = confidence[0][match_mask[0]].cpu().numpy().flatten()
                     else:
