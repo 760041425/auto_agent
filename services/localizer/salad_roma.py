@@ -506,9 +506,22 @@ def _load_xfeat_local(device):
 def _get_lightglue_model(device):
     global _LIGHTGLUE_MODEL, _SUPERPOINT_MODEL
     if _LIGHTGLUE_MODEL is not None:
+        # 已加载成功
         return _SUPERPOINT_MODEL, _LIGHTGLUE_MODEL
+    if _LIGHTGLUE_MODEL is False:
+        # 之前已确认加载失败，跳过重试
+        return None, None
 
     try:
+        import ssl
+        # kornia LightGlue 构造时会尝试下载权重（可能 SSL 失败）
+        try:
+            _create_unverified_https_context = ssl._create_unverified_context
+        except AttributeError:
+            pass
+        else:
+            ssl._create_default_https_context = _create_unverified_https_context
+
         from kornia.feature import LightGlue as _LG
         lightglue = _LG(backbone='superpoint').to(device)
         lightglue.eval()
@@ -518,6 +531,7 @@ def _get_lightglue_model(device):
         return _SUPERPOINT_MODEL, _LIGHTGLUE_MODEL
     except Exception as e:
         log(f"  LightGlue 加载失败: {e}, 将使用 SIFT+FLANN fallback")
+        _LIGHTGLUE_MODEL = False  # 标记失败，不再重试
         return None, None
 
 
@@ -563,9 +577,17 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
         except Exception as e:
             log(f"  LightGlue 匹配失败: {e}, fallback 到 SIFT+FLANN")
 
-    # Fallback: SIFT + FLANN
-    img1_gray = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY) if img1.ndim == 3 else img1
-    img2_gray = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY) if img2.ndim == 3 else img2
+    # Fallback: SIFT + FLANN（先做 CLAHE 增强暗图对比度）
+    def _prepare_gray(img):
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img.copy()
+        # 如果图像整体偏暗（均值 < 100），用 CLAHE 提升对比度
+        if gray.mean() < 100:
+            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+            gray = clahe.apply(gray)
+        return gray
+
+    img1_gray = _prepare_gray(img1)
+    img2_gray = _prepare_gray(img2)
 
     sift = cv2.SIFT_create()
     kp1, desc1 = sift.detectAndCompute(img1_gray, None)
