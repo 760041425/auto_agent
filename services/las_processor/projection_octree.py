@@ -930,11 +930,11 @@ def project_las_multi_view_octree(
     tile_dir.mkdir(parents=True, exist_ok=True)
     
     # 清理旧投影产物，避免上一次结果污染本次生成
-    for pattern in ["view_*.png", "view_*.npy", "coord_*.json", "render_color*.ppm", "render_depth*.pgm"]:
+    for pattern in ["view_*.png", "view_*.npy", "view_*_normal.npy", "coord_*.json", "render_color*.ppm", "render_depth*.pgm"]:
         for f in out.glob(pattern):
             if f.exists():
                 f.unlink()
-    for pattern in ["view_*.png", "view_*.npy", "coord_*.json"]:
+    for pattern in ["view_*.png", "view_*.npy", "view_*_normal.npy", "coord_*.json"]:
         for f in tile_dir.glob(pattern):
             if f.exists():
                 f.unlink()
