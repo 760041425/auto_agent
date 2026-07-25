@@ -1024,7 +1024,7 @@ def project_las_multi_view_octree(
         }
         vd = view["view_dir"]
         heading_deg = view.get("heading_deg", view.get("yaw_deg", 0.0))
-        fx_str = f"{pose['x']:.1f}_{pose['y']:.1f}"
+        fx_str = f"{pose['x']:.1f}_{pose['y']:.1f}_{pose['z']:.1f}"
         
         current_render += 1
         if progress_callback:
