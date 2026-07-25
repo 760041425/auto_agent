@@ -41,12 +41,13 @@ class SceneCoordinateDataset(Dataset):
             self.tiles = json.load(f)
 
         self.patch_size = patch_size
-        self.samples = []  # [(img_path, npy_path, u, v, x, y, z), ...]
+        self.samples = []  # [(img_path, npy_path, normal_path, u, v, x, y, z), ...]
 
         total_pixels = 0
         for tile in self.tiles:
             img_path = tile.get("image_path", "")
             npy_path = tile.get("npy_path", "")
+            normal_path = tile.get("normal_path", "")
             if not img_path or not npy_path:
                 continue
             if not os.path.exists(img_path) or not os.path.exists(npy_path):
@@ -69,7 +70,7 @@ class SceneCoordinateDataset(Dataset):
             for idx in chosen:
                 v, u = valid_indices[0][idx], valid_indices[1][idx]
                 x, y, z = xyz[v, u]
-                self.samples.append((img_path, npy_path, u, v, float(x), float(y), float(z)))
+                self.samples.append((img_path, npy_path, normal_path, u, v, float(x), float(y), float(z)))
 
             if len(self.samples) >= max_samples:
                 break
@@ -80,13 +81,11 @@ class SceneCoordinateDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        img_path, npy_path, u, v, x, y, z = self.samples[idx]
+        img_path, npy_path, normal_path, u, v, x, y, z = self.samples[idx]
 
-        # 读取图像 patch
+        # RGB patch
         img = cv2.imread(img_path)
         h, w = img.shape[:2]
-
-        # 提取以 (u,v) 为中心的 patch，边界处 clamp
         ps = self.patch_size // 2
         u_start = max(0, u - ps)
         u_end = min(w, u + ps)
@@ -95,27 +94,38 @@ class SceneCoordinateDataset(Dataset):
 
         patch = img[v_start:v_end, u_start:u_end]
         if patch.shape[0] < self.patch_size or patch.shape[1] < self.patch_size:
-            # padding
             pad_h = self.patch_size - patch.shape[0]
             pad_w = self.patch_size - patch.shape[1]
             patch = np.pad(patch, ((0, pad_h), (0, pad_w), (0, 0)), mode='edge')
 
-        # 归一化到 [0,1]
-        patch = patch.astype(np.float32) / 255.0
-        # (H, W, C) → (C, H, W)
-        patch = torch.from_numpy(patch).permute(2, 0, 1)
+        # Normal patch
+        normal_patch = np.zeros((self.patch_size, self.patch_size, 3), dtype=np.float32)
+        if normal_path and os.path.exists(normal_path):
+            normal_map = np.load(normal_path)
+            if normal_map.size > 0:
+                n_patch = normal_map[v_start:v_end, u_start:u_end]
+                if n_patch.shape[0] < self.patch_size or n_patch.shape[1] < self.patch_size:
+                    pad_h_n = self.patch_size - n_patch.shape[0]
+                    pad_w_n = self.patch_size - n_patch.shape[1]
+                    n_patch = np.pad(n_patch, ((0, pad_h_n), (0, pad_w_n), (0, 0)), mode='edge')
+                normal_patch = n_patch
 
-        # 3D 坐标
+        # 堆叠 RGB + Normal → 6 通道
+        patch_norm = patch.astype(np.float32) / 255.0
+        # Normal 值域 [-1,1] 映射到 [0,1]
+        normal_norm = (normal_patch + 1.0) * 0.5
+        six_ch = np.concatenate([patch_norm, normal_norm], axis=2)  # (H, W, 6)
+        six_ch = torch.from_numpy(six_ch).permute(2, 0, 1)  # (6, H, W)
+
         coord = torch.tensor([x, y, z], dtype=torch.float32)
-
-        return patch, coord
+        return six_ch, coord
 
 
 # ── ACE 网络 ──
 class CoordRegression(nn.Module):
     """轻量级场景坐标回归网络"""
 
-    def __init__(self, in_channels: int = 3):
+    def __init__(self, in_channels: int = 6):
         super().__init__()
         # CNN 特征提取器
         self.cnn = nn.Sequential(
@@ -165,7 +175,7 @@ def train_ace_model(
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=2)
 
-    model = CoordRegression().to(DEVICE)
+    model = CoordRegression(in_channels=6).to(DEVICE)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
     criterion = nn.SmoothL1Loss()  # Huber loss 对异常值更鲁棒
@@ -209,6 +219,7 @@ def train_ace_model(
 def ace_predict_coords(
     model: nn.Module,
     image: np.ndarray,
+    normal_map: np.ndarray = None,
     stride: int = 32,
     patch_size: int = 32,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -218,6 +229,7 @@ def ace_predict_coords(
     Args:
         model: 训练好的 CoordRegression 模型
         image: (H, W, 3) RGB/BGR uint8 图像
+        normal_map: (H, W, 3) 法线图，值域 [-1,1]；None 时用零填充
         stride: 滑动窗口步长
         patch_size: 输入 patch 大小
 
@@ -230,6 +242,12 @@ def ace_predict_coords(
     h, w = image.shape[:2]
 
     img_float = image.astype(np.float32) / 255.0
+
+    # 准备法线图
+    if normal_map is None or normal_map.size == 0:
+        normal_map = np.zeros((h, w, 3), dtype=np.float32)
+    normal_norm = (normal_map + 1.0) * 0.5  # [-1,1] → [0,1]
+
     ps = patch_size // 2
 
     coords_2d_list = []
@@ -238,11 +256,12 @@ def ace_predict_coords(
     with torch.no_grad():
         for v in range(ps, h - ps, stride):
             for u in range(ps, w - ps, stride):
-                patch = img_float[v-ps:v+ps, u-ps:u+ps]
-                if patch.shape[0] < patch_size or patch.shape[1] < patch_size:
+                rgb_patch = img_float[v-ps:v+ps, u-ps:u+ps]
+                n_patch = normal_norm[v-ps:v+ps, u-ps:u+ps]
+                if rgb_patch.shape[0] < patch_size or rgb_patch.shape[1] < patch_size:
                     continue
-
-                tensor = torch.from_numpy(patch).permute(2, 0, 1).unsqueeze(0).float().to(DEVICE)
+                six_ch = np.concatenate([rgb_patch, n_patch], axis=2)  # (32, 32, 6)
+                tensor = torch.from_numpy(six_ch).permute(2, 0, 1).unsqueeze(0).float().to(DEVICE)
                 pred_xyz = model(tensor).cpu().numpy().flatten()
 
                 # 只保留非零预测
@@ -260,6 +279,7 @@ def ace_localize(
     model: nn.Module,
     image: np.ndarray,
     K: np.ndarray,
+    normal_map: np.ndarray = None,
     stride: int = 32,
 ) -> tuple[bool, np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -267,7 +287,7 @@ def ace_localize(
 
     返回: (success, rvec, tvec, inliers_mask)
     """
-    pts_2d, pts_3d = ace_predict_coords(model, image, stride=stride)
+    pts_2d, pts_3d = ace_predict_coords(model, image, normal_map=normal_map, stride=stride)
 
     if len(pts_2d) < 6:
         print(f"[ACE] ❌ 有效预测点不足: {len(pts_2d)}")

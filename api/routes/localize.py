@@ -3,11 +3,13 @@ import threading
 import os
 import logging
 import json
+import cv2
+import numpy as np
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Form, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -374,4 +376,57 @@ def refine_pose(req: RefineRequest, db: Session = Depends(get_db)):
         "salad_sim_before": refine_result.get("salad_sim_before", 0),
         "salad_sim_after": refine_result.get("salad_sim_after", 0),
         "improved": refine_result.get("improved", False),
+    }
+
+
+@router.post("/localize/ace")
+async def ace_localize_endpoint(image_id: int = Form(...), db: Session = Depends(get_db)):
+    """ACE 单次定位（场景坐标回归 + PnP，无需多轮迭代）"""
+    from services.localizer.ace_trainer import ace_localize, CoordRegression
+    import torch
+
+    # 1. 加载模型（首次加载后缓存）
+    model_path = "projections/ace_model.pth"
+    if not os.path.exists(model_path):
+        return {"success": False, "error": "ACE 模型未训练，请先执行训练"}
+
+    if not hasattr(ace_localize_endpoint, "_model"):
+        model = CoordRegression(in_channels=6).to("cpu")
+        model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
+        model.eval()
+        ace_localize_endpoint._model = model
+
+    # 2. 加载查询图像
+    img = db.query(ImageModel).filter(ImageModel.id == image_id).first()
+    if not img or not os.path.exists(img.path):
+        return {"success": False, "error": "图像不存在"}
+
+    image = cv2.imread(img.path)
+    if image is None:
+        return {"success": False, "error": "无法读取图像"}
+
+    # 3. 相机内参（与渲染时一致）
+    h, w = image.shape[:2]
+    fov_deg = 75
+    f = max(w, h) / (2 * np.tan(np.deg2rad(fov_deg / 2)))
+    K = np.array([[f, 0, w/2], [0, f, h/2], [0, 0, 1]])
+
+    # 4. ACE 定位（无 normal map，用零填充）
+    success, rvec, tvec, _ = ace_localize(
+        ace_localize_endpoint._model, image, K, normal_map=None,
+    )
+
+    if not success:
+        return {"success": False, "error": "ACE 定位失败"}
+
+    # 5. 转 COLMAP 格式返回
+    from scipy.spatial.transform import Rotation as R
+    rot_mat, _ = cv2.Rodrigues(rvec)
+    q = R.from_matrix(rot_mat).as_quat()  # [x, y, z, w]
+
+    return {
+        "success": True,
+        "method": "ace",
+        "position": [float(tvec[0]), float(tvec[1]), float(tvec[2])],
+        "quaternion": [float(q[3]), float(q[0]), float(q[1]), float(q[2])],  # w, x, y, z
     }
