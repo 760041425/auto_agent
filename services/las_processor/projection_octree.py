@@ -610,6 +610,42 @@ def _depth_to_xyz_map(
     return coord_map, world
 
 
+def _compute_normal_map(world_array: np.ndarray) -> np.ndarray:
+    """
+    从 XYZ 世界坐标图 (H, W, 3) 计算表面法线图 (H, W, 3)。
+    
+    使用相邻像素的叉积估算法向量，对无效像素（[0,0,0]）输出 [0,0,0]。
+    法向量归一化到单位长度。
+    """
+    h, w = world_array.shape[:2]
+    normals = np.zeros_like(world_array, dtype=np.float32)
+    
+    valid = np.linalg.norm(world_array, axis=2) > 1e-6
+    
+    x = world_array[..., 0]
+    y = world_array[..., 1]
+    z = world_array[..., 2]
+    
+    dx = np.zeros((h, w, 3), dtype=np.float32)
+    dy = np.zeros((h, w, 3), dtype=np.float32)
+    
+    dx[1:-1, :, 0] = x[2:, :] - x[:-2, :]
+    dx[1:-1, :, 1] = y[2:, :] - y[:-2, :]
+    dx[1:-1, :, 2] = z[2:, :] - z[:-2, :]
+    dy[:, 1:-1, 0] = x[:, 2:] - x[:, :-2]
+    dy[:, 1:-1, 1] = y[:, 2:] - y[:, :-2]
+    dy[:, 1:-1, 2] = z[:, 2:] - z[:, :-2]
+    
+    n = np.cross(dx.reshape(-1, 3), dy.reshape(-1, 3)).reshape(h, w, 3)
+    n_norm = np.linalg.norm(n, axis=2, keepdims=True)
+    n_valid = n_norm[..., 0] > 1e-10
+    n[n_valid] = n[n_valid] / n_norm[n_valid]
+    
+    n[~valid] = 0.0
+    
+    return n.astype(np.float32)
+
+
 def prepare_octree_render_plan(
     poses: list[dict],
     output_dir: str = "projections",
@@ -967,12 +1003,14 @@ def project_las_multi_view_octree(
         fname = f"view_{vd}_{fx_str}_{pi}.png"
         img_path = str(tile_dir / fname)
         npy_path = img_path.replace(".png", ".npy")
+        normal_path = img_path.replace(".png", "_normal.npy")
 
         # 如果已存在且不强制重建，跳过
         if os.path.exists(img_path) and os.path.exists(npy_path) and not force_rebuild:
             generated.append({
                 "image_path": img_path,
                 "npy_path": npy_path,
+                "normal_path": normal_path,
                 "width": render_width,
                 "height": render_height,
                 "view": vd,
@@ -1039,6 +1077,10 @@ def project_las_multi_view_octree(
                     npy_path = img_path.replace(".png", ".npy")
                     np.save(npy_path, world_array.astype(np.float32))
 
+                    normal_path = img_path.replace(".png", "_normal.npy")
+                    normal_map = _compute_normal_map(world_array)
+                    np.save(normal_path, normal_map.astype(np.float32))
+
                     pixel_count = int(np.count_nonzero(np.linalg.norm(world_array, axis=2)))
                 else:
                     print(f"[OCTREE] 深度尺寸不符: {depth.size}/{expected}")
@@ -1062,6 +1104,7 @@ def project_las_multi_view_octree(
         generated.append({
             "image_path": img_path,
             "npy_path": npy_path,
+            "normal_path": normal_path,
             "width": render_width,
             "height": render_height,
             "view": vd,

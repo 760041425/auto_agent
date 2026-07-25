@@ -208,6 +208,53 @@ def _extract_dinov2_descriptor(model, img: np.ndarray, scale: float) -> np.ndarr
     return desc.cpu().numpy().flatten()
 
 
+def _extract_multimodal_descriptor(
+    model,
+    img: np.ndarray,
+    normal_map: np.ndarray = None,
+    xyz_map: np.ndarray = None,
+    scale: float = 1.0
+) -> np.ndarray:
+    """
+    多模态 DINOv2 特征提取：RGB + Normal + XYZ。
+    
+    各模态分别提取 DINOv2 描述子，然后拼接为联合描述子。
+    如果 normal/xyz 缺失，则退化为纯 RGB。
+    """
+    rgb_desc = _extract_dinov2_descriptor(model, img, scale)
+    if rgb_desc is None:
+        return None
+    
+    descs = [rgb_desc]
+    
+    if normal_map is not None:
+        norm_vis = ((normal_map + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
+        norm_desc = _extract_dinov2_descriptor(model, norm_vis, scale)
+        if norm_desc is not None:
+            descs.append(norm_desc)
+    
+    if xyz_map is not None:
+        valid = np.linalg.norm(xyz_map, axis=2) > 1e-6
+        if valid.any():
+            xyz_vis = xyz_map.copy()
+            for c in range(3):
+                channel = xyz_vis[..., c]
+                c_min, c_max = channel[valid].min(), channel[valid].max()
+                if c_max > c_min:
+                    channel = (channel - c_min) / (c_max - c_min) * 255.0
+                else:
+                    channel = np.zeros_like(channel)
+                xyz_vis[..., c] = channel
+            xyz_vis = np.clip(xyz_vis, 0, 255).astype(np.uint8)
+            xyz_desc = _extract_dinov2_descriptor(model, xyz_vis, scale)
+            if xyz_desc is not None:
+                descs.append(xyz_desc)
+    
+    if len(descs) > 1:
+        return np.concatenate(descs)
+    return descs[0]
+
+
 def _build_salad_index(force_rebuild: bool = False, progress_callback=None):
     """对全量 tile 提取并缓存 DINOv2 全局描述子"""
     global _SALAD_INDEX
@@ -247,7 +294,18 @@ def _build_salad_index(force_rebuild: bool = False, progress_callback=None):
         img = cv2.imread(img_path)
         if img is None:
             return None
-        desc = _extract_dinov2_descriptor(model, img, scale)
+        
+        normal_map = None
+        normal_path = tile.get("normal_path", "")
+        if normal_path and os.path.exists(normal_path):
+            normal_map = np.load(normal_path)
+        
+        xyz_map = None
+        npy_path = tile.get("npy_path", "")
+        if npy_path and os.path.exists(npy_path):
+            xyz_map = np.load(npy_path)
+        
+        desc = _extract_multimodal_descriptor(model, img, normal_map, xyz_map, scale)
         if desc is not None:
             name_key = os.path.splitext(os.path.basename(img_path))[0]
             return (name_key, desc)
@@ -310,7 +368,7 @@ def _salad_retrieve(q_img: np.ndarray, top_k: int = 5) -> list[tuple[str, float,
     if model is None:
         return []
     
-    q_desc = _extract_dinov2_descriptor(model, q_img, scale)
+    q_desc = _extract_multimodal_descriptor(model, q_img, None, None, scale)
     if q_desc is None:
         return []
     
@@ -901,8 +959,8 @@ def localize_with_salad_roma(
         if init_proj_path and salad_model is not None:
             init_proj_img = cv2.imread(init_proj_path)
             if init_proj_img is not None:
-                init_desc = _extract_dinov2_descriptor(salad_model, init_proj_img, salad_scale)
-                q_desc = _extract_dinov2_descriptor(salad_model, q_small, salad_scale)
+                init_desc = _extract_multimodal_descriptor(salad_model, init_proj_img, None, None, salad_scale)
+                q_desc = _extract_multimodal_descriptor(salad_model, q_small, None, None, salad_scale)
                 if init_desc is not None and q_desc is not None:
                     init_sim = float(np.dot(init_desc, q_desc) / (np.linalg.norm(init_desc) * np.linalg.norm(q_desc) + 1e-8))
                     log(f"  初始 SALAD 相似度: {init_sim:.4f}")
@@ -928,8 +986,8 @@ def localize_with_salad_roma(
         if check_proj_path and salad_model is not None:
             check_img = cv2.imread(check_proj_path)
             if check_img is not None:
-                check_desc = _extract_dinov2_descriptor(salad_model, check_img, salad_scale)
-                q_desc = _extract_dinov2_descriptor(salad_model, q_small, salad_scale)
+                check_desc = _extract_multimodal_descriptor(salad_model, check_img, None, None, salad_scale)
+                q_desc = _extract_multimodal_descriptor(salad_model, q_small, None, None, salad_scale)
                 if check_desc is not None and q_desc is not None:
                     current_salad_sim = float(np.dot(check_desc, q_desc) / (np.linalg.norm(check_desc) * np.linalg.norm(q_desc) + 1e-8))
                     log(f"  初始 SALAD 相似度: {current_salad_sim:.4f}")
@@ -995,8 +1053,8 @@ def localize_with_salad_roma(
                 if new_proj_path and salad_model is not None:
                     new_img = cv2.imread(new_proj_path)
                     if new_img is not None:
-                        new_desc = _extract_dinov2_descriptor(salad_model, new_img, salad_scale)
-                        q_desc = _extract_dinov2_descriptor(salad_model, q_small, salad_scale)
+                        new_desc = _extract_multimodal_descriptor(salad_model, new_img, None, None, salad_scale)
+                        q_desc = _extract_multimodal_descriptor(salad_model, q_small, None, None, salad_scale)
                         if new_desc is not None and q_desc is not None:
                             new_sim = float(np.dot(new_desc, q_desc) / (np.linalg.norm(new_desc) * np.linalg.norm(q_desc) + 1e-8))
                             log(f"    新位姿 SALAD 相似度: {new_sim:.4f}")
@@ -1156,8 +1214,8 @@ def refine_pose_with_roma(
     salad_sim = 0.0
     salad_model, salad_scale = _get_dinov2_model()
     if salad_model is not None:
-        q_desc = _extract_dinov2_descriptor(salad_model, q_small, salad_scale)
-        ref_desc = _extract_dinov2_descriptor(salad_model, ref_img, salad_scale)
+        q_desc = _extract_multimodal_descriptor(salad_model, q_small, None, None, salad_scale)
+        ref_desc = _extract_multimodal_descriptor(salad_model, ref_img, None, None, salad_scale)
         if q_desc is not None and ref_desc is not None:
             salad_sim = float(np.dot(q_desc, ref_desc) / (np.linalg.norm(q_desc) * np.linalg.norm(ref_desc) + 1e-8))
     
@@ -1194,7 +1252,7 @@ def refine_pose_with_roma(
     if new_proj_path and salad_model is not None:
         new_img = cv2.imread(new_proj_path)
         if new_img is not None:
-            new_desc = _extract_dinov2_descriptor(salad_model, new_img, salad_scale)
+            new_desc = _extract_multimodal_descriptor(salad_model, new_img, None, None, salad_scale)
             if new_desc is not None and q_desc is not None:
                 new_sim = float(np.dot(new_desc, q_desc) / (np.linalg.norm(new_desc) * np.linalg.norm(q_desc) + 1e-8))
     
