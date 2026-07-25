@@ -7,13 +7,13 @@ SALAD 全局检索阶段:
   1. 用 DINOv2 backbone 提取全局描述子（对每张参考投影图离线提取）
   2. 查询图在线提取 → 余弦相似度排序 → top-K 候选
   
-RoMa 密集匹配 + 多轮 PnP:
-  3. 查询图 vs 候选 tile → RoMa 密集匹配 → 获取 dense 对应点
-  4. 通过 tile 的像素→3D 坐标映射 → 得到 3D-2D 匹配 → PnP
-  5. 多轮迭代：PnP→重投影→RoMa匹配原图vs重投影→PnP优化
+LightGlue 稀疏匹配 + 多轮 PnP:
+   3. 查询图 vs 候选 tile → LightGlue 稀疏匹配 → 获取对应点
+   4. 通过 tile 的像素→3D 坐标映射 → 得到 3D-2D 匹配 → PnP
+   5. 多轮迭代：PnP→重投影→LightGlue匹配原图vs重投影→PnP优化
 
 多轮定位:
-  6. 每轮用 RoMa 匹配原图和重投影图，获取更精确的对应关系
+   6. 每轮用 LightGlue 匹配原图和重投影图，获取更精确的对应关系
   7. PnP → 评估内点 → 如果提升则继续迭代
 """
 
@@ -28,6 +28,7 @@ from typing import Optional
 import cv2
 import numpy as np
 import torch
+import kornia
 from PIL import Image
 
 from services.las_processor.projection import _load_poses_and_offset, _quat_to_rotmat
@@ -67,6 +68,8 @@ _TILE_INDEX: list[dict] | None = None
 _SALAD_INDEX: dict[str, np.ndarray] | None = None  # tile_key → global_descriptor
 _TILE_IMAGES: dict[str, np.ndarray] | None = None   # tile_key → image (cached)
 _ROMA_MODEL = None
+_LIGHTGLUE_MODEL = None
+_SUPERPOINT_MODEL = None
 _DINO_MODEL = None
 _DINO_SCALE = None
 _PNP_CACHE: dict[str, dict] = {}
@@ -410,7 +413,7 @@ def _salad_retrieve(q_img: np.ndarray, top_k: int = 5) -> list[tuple[str, float,
 
 
 # ============================================================
-#  RoMa: 密集匹配
+#  LightGlue: 稀疏匹配
 # ============================================================
 
 def _get_roma_model():
@@ -495,47 +498,108 @@ def _load_xfeat_local(device):
     return None
 
 
-def _roma_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000) -> tuple:
+def _get_lightglue_model(device):
+    global _LIGHTGLUE_MODEL, _SUPERPOINT_MODEL
+    if _LIGHTGLUE_MODEL is not None:
+        return _SUPERPOINT_MODEL, _LIGHTGLUE_MODEL
+
+    try:
+        from kornia.feature import LightGlue as _LG
+        lightglue = _LG(backbone='superpoint').to(device)
+        lightglue.eval()
+        _SUPERPOINT_MODEL = None
+        _LIGHTGLUE_MODEL = lightglue
+        log(f"  LightGlue + SuperPoint 模型加载完成")
+        return _SUPERPOINT_MODEL, _LIGHTGLUE_MODEL
+    except Exception as e:
+        log(f"  LightGlue 加载失败: {e}, 将使用 SIFT+FLANN fallback")
+        return None, None
+
+
+def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000) -> tuple:
     """
-    RoMa 密集匹配两张图像。
-    
+    LightGlue 稀疏匹配两张图像。
+
     返回: (kpts1_np, kpts2_np, certainty_np)
         - kpts1_np: (N, 2) 原图上的关键点坐标（像素）
         - kpts2_np: (N, 2) 目标图上的对应点坐标（像素）
         - certainty_np: (N,) 置信度
     """
-    model = _get_roma_model()
-    
-    H1, W1 = img1.shape[:2]
-    H2, W2 = img2.shape[:2]
-    
-    # RoMa 接受 PIL Image 或 tensor
-    img1_pil = Image.fromarray(cv2.cvtColor(img1, cv2.COLOR_BGR2RGB))
-    img2_pil = Image.fromarray(cv2.cvtColor(img2, cv2.COLOR_BGR2RGB))
-    
-    with torch.no_grad():
-        warp, certainty = model.match(img1_pil, img2_pil)
-        # sample 获取匹配点
-        matches, cert = model.sample(warp, certainty, num=sample_num)
-    
-    if matches is None or len(matches) == 0:
+    _, model = _get_lightglue_model(DEVICE)
+    if model is not None:
+        try:
+            H1, W1 = img1.shape[:2]
+            H2, W2 = img2.shape[:2]
+
+            img1_t = kornia.image_to_tensor(img1, keepdim=False).float() / 255.0
+            img2_t = kornia.image_to_tensor(img2, keepdim=False).float() / 255.0
+
+            if img1_t.dim() == 3:
+                img1_t = img1_t.unsqueeze(0)
+                img2_t = img2_t.unsqueeze(0)
+
+            img1_t = img1_t.to(DEVICE)
+            img2_t = img2_t.to(DEVICE)
+
+            with torch.no_grad():
+                out = model({"image0": img1_t, "image1": img2_t})
+                matches = out.get("matches0", None)
+                if matches is not None:
+                    match_mask = matches > -1
+                    kpts0 = out["keypoints0"][0][match_mask[0]].cpu().numpy()
+                    kpts1 = out["keypoints1"][0][matches[0][match_mask[0]]].cpu().numpy()
+                    confidence = out.get("match_confidence", None)
+                    if confidence is not None:
+                        cert = confidence[0][match_mask[0]].cpu().numpy().flatten()
+                    else:
+                        cert = np.ones(len(kpts0))
+                    if len(kpts0) > 0:
+                        return kpts0, kpts1, cert
+        except Exception as e:
+            log(f"  LightGlue 匹配失败: {e}, fallback 到 SIFT+FLANN")
+
+    # Fallback: SIFT + FLANN
+    img1_gray = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY) if img1.ndim == 3 else img1
+    img2_gray = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY) if img2.ndim == 3 else img2
+
+    sift = cv2.SIFT_create()
+    kp1, desc1 = sift.detectAndCompute(img1_gray, None)
+    kp2, desc2 = sift.detectAndCompute(img2_gray, None)
+
+    if kp1 is None or kp2 is None or len(kp1) < 4 or len(kp2) < 4:
         return np.array([]), np.array([]), np.array([])
-    
-    # 转为像素坐标
-    kpts1, kpts2 = model.to_pixel_coordinates(matches, H1, W1, H2, W2)
-    
-    # cert 已经是匹配置信度
-    cert_np = cert.cpu().numpy().flatten() if cert is not None else np.ones(len(kpts1))
-    
-    return kpts1.cpu().numpy(), kpts2.cpu().numpy(), cert_np
+
+    FLANN_INDEX_KDTREE = 1
+    index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+    search_params = dict(checks=50)
+    flann = cv2.FlannBasedMatcher(index_params, search_params)
+
+    matches = flann.knnMatch(desc1.astype(np.float32), desc2.astype(np.float32), k=2)
+
+    good_matches = []
+    for m_n in matches:
+        if len(m_n) == 2:
+            m, n = m_n[0], m_n[1]
+            if m.distance < 0.75 * n.distance:
+                good_matches.append(m)
+
+    if len(good_matches) < 4:
+        return np.array([]), np.array([]), np.array([])
+
+    kpts1 = np.array([kp1[m.queryIdx].pt for m in good_matches])
+    kpts2 = np.array([kp2[m.trainIdx].pt for m in good_matches])
+    cert = np.array([1.0 / (1.0 + m.distance) for m in good_matches])
+
+    return kpts1, kpts2, cert
 
 
-def _match_tile_with_roma(q_img: np.ndarray, tile_info: dict) -> tuple:
-    """
-    用 RoMa 匹配查询图和 tile 投影图。
-    
-    返回: (kpts_q, kpts_tile, certainty)
-    """
+def _roma_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000) -> tuple:
+    """向前兼容: 使用 LightGlue 替代 RoMa"""
+    return _lightglue_match(img1, img2, sample_num)
+
+
+def _match_tile_with_lightglue(q_img: np.ndarray, tile_info: dict) -> tuple:
+    """用 LightGlue 匹配查询图和 tile 投影图。"""
     tile_img_path = tile_info["image_path"]
     if not os.path.exists(tile_img_path):
         return np.array([]), np.array([]), np.array([])
@@ -544,14 +608,19 @@ def _match_tile_with_roma(q_img: np.ndarray, tile_info: dict) -> tuple:
     if tile_img is None:
         return np.array([]), np.array([]), np.array([])
     
-    log(f"  RoMa 匹配: 查询图 ({q_img.shape[1]}x{q_img.shape[0]}) vs tile ({tile_img.shape[1]}x{tile_img.shape[0]})")
+    log(f"  LightGlue 匹配: 查询图 ({q_img.shape[1]}x{q_img.shape[0]}) vs tile ({tile_img.shape[1]}x{tile_img.shape[0]})")
     t0 = time.time()
     
-    kpts_q, kpts_tile, cert = _roma_match(q_img, tile_img)
+    kpts_q, kpts_tile, cert = _lightglue_match(q_img, tile_img)
     
-    log(f"  RoMa 匹配完成: {len(kpts_q)} 点, {time.time()-t0:.1f}s, 平均置信度={cert.mean():.3f}" if len(kpts_q) > 0 else f"  RoMa 匹配: 0 点")
+    log(f"  LightGlue 匹配完成: {len(kpts_q)} 点, {time.time()-t0:.1f}s, 平均置信度={cert.mean():.3f}" if len(kpts_q) > 0 else f"  LightGlue 匹配: 0 点")
     
     return kpts_q, kpts_tile, cert
+
+
+def _match_tile_with_roma(q_img: np.ndarray, tile_info: dict) -> tuple:
+    """向前兼容: 使用 LightGlue 替代 RoMa"""
+    return _match_tile_with_lightglue(q_img, tile_info)
 
 
 # ============================================================
@@ -560,7 +629,7 @@ def _match_tile_with_roma(q_img: np.ndarray, tile_info: dict) -> tuple:
 
 def _build_3d_2d_matches(kpts_q, kpts_tile, cert, coord_map, min_cert=0.05):
     """
-    通过 tile 的坐标映射（像素→3D），将 RoMa 匹配转换为 3D-2D 匹配。
+    通过 tile 的坐标映射（像素→3D），将 LightGlue 匹配转换为 3D-2D 匹配。
     
     coord_map: NPY 格式 (h, w, 3) float32 数组，无效像素为 [0,0,0]
     """
@@ -654,7 +723,7 @@ def _get_camera_matrix(img_w, img_h, fov_deg=75):
 
 
 def _compute_reprojection_coords(points_3d, point_colors, rvec, tvec, camera_matrix, img_w, img_h):
-    """仅计算重投影的像素→3D 映射（不写文件），用于 RoMa 迭代时的 3D-2D 匹配"""
+    """仅计算重投影的像素→3D 映射（不写文件），用于 LightGlue 迭代时的 3D-2D 匹配"""
     w, h = int(img_w), int(img_h)
     projected, valid = _reproject_point_cloud(rvec, tvec, camera_matrix, points_3d, w, h)
     if len(projected) == 0:
@@ -811,7 +880,7 @@ def render_projection_image(
 
 
 # ============================================================
-#  主定位流程：SALAD + RoMa + 多轮PnP
+#  主定位流程：SALAD + LightGlue + 多轮PnP
 # ============================================================
 
 def localize_with_salad_roma(
@@ -822,20 +891,20 @@ def localize_with_salad_roma(
     debug_visualizations: bool = False,
 ) -> dict:
     """
-    SALAD 全局检索 → RoMa 密集匹配 → PnP → 多轮迭代 视觉定位。
+    SALAD 全局检索 → LightGlue 稀疏匹配 → PnP → 多轮迭代 视觉定位。
     
     流程:
-    1. SALAD (DINOv2) 全局检索: 从 150 张投影图中找到 top-K 最相似的
-    2. RoMa 密集匹配: 查询图像 vs 候选 tile，获取密集对应点
-    3. 3D-2D 匹配: 通过 tile 的像素→3D 映射构建
-    4. PnP 位姿估计
-    5. 多轮迭代: 每轮用 PnP 结果重投影点云 → RoMa 匹配原图vs重投影图 → PnP 优化
+     1. SALAD (DINOv2) 全局检索: 从 150 张投影图中找到 top-K 最相似的
+     2. LightGlue 稀疏匹配: 查询图像 vs 候选 tile，获取对应点
+     3. 3D-2D 匹配: 通过 tile 的像素→3D 映射构建
+     4. PnP 位姿估计
+     5. 多轮迭代: 每轮用 PnP 结果重投影点云 → LightGlue 匹配原图vs重投影图 → PnP 优化
     """
     from services.localizer import load_colmap, _POINT_INDEX, get_point_cloud_arrays
     
     tag = "salad_roma"  # 固定 tag 用于文件命名，不依赖外部 feature/match_method
     log(f"{'='*60}")
-    log(f"🚀 SALAD+RoMa 定位: {os.path.basename(query_image_path)}")
+    log(f"🚀 SALAD+LightGlue 定位: {os.path.basename(query_image_path)}")
     
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -884,7 +953,7 @@ def localize_with_salad_roma(
     for i, (name_key, sim, tile) in enumerate(retrieved):
         log(f"  #{i}: {tile.get('view','?')}/{name_key} 相似度={sim:.4f}")
     
-    # 4. 对 top-1 候选做 RoMa 密集匹配 + PnP
+    # 4. 对 top-1 候选做 LightGlue 匹配 + PnP
     best_rvec, best_tvec = None, None
     best_inliers = 0
     best_reproj_error = float("inf")
@@ -893,7 +962,7 @@ def localize_with_salad_roma(
     
     for rank, (name_key, sim, tile) in enumerate(retrieved):
         log(f"\n{'─'*40}")
-        log(f"  RoMa 匹配候选 #{rank}: {tile['view']}/{name_key} (sim={sim:.3f})")
+        log(f"  LightGlue 匹配候选 #{rank}: {tile['view']}/{name_key} (sim={sim:.3f})")
         
         # 加载 coord_map（NPY 格式）
         npy_path = tile.get("npy_path", "")
@@ -909,8 +978,8 @@ def localize_with_salad_roma(
         
         coord_map = np.load(npy_path)
         
-        # RoMa 密集匹配
-        kpts_q, kpts_tile, cert = _match_tile_with_roma(q_small, tile)
+        # LightGlue 匹配
+        kpts_q, kpts_tile, cert = _match_tile_with_lightglue(q_small, tile)
         if len(kpts_q) < 10:
             log(f"    匹配点太少, 跳过")
             continue
@@ -938,7 +1007,7 @@ def localize_with_salad_roma(
                 )
                 best_pose = tile
     
-    # 5. 多轮迭代：SALAD 相似度评估 → RoMa 匹配 → PnP → 重投影 → SALAD 再评估
+    # 5. 多轮迭代：SALAD 相似度评估 → LightGlue 匹配 → PnP → 重投影 → SALAD 再评估
     #    每轮用 SALAD 对比重投影图和原图的相似度，选相似度最高的位姿
     if best_rvec is not None:
         log(f"\n{'─'*40}")
@@ -1016,13 +1085,13 @@ def localize_with_salad_roma(
                 log(f"    重投影失败, 停止迭代")
                 break
 
-            # RoMa 匹配原图 vs 重投影图
+            # LightGlue 匹配原图 vs 重投影图
             iter_img = cv2.imread(iter_proj_path)
             if iter_img is None:
                 log(f"    无法读取重投影图, 停止迭代")
                 break
 
-            kpts_q2, kpts_proj, cert2 = _roma_match(q_small, iter_img, sample_num=2000)
+            kpts_q2, kpts_proj, cert2 = _lightglue_match(q_small, iter_img, sample_num=2000)
             if len(kpts_q2) < 10:
                 log(f"    迭代匹配点太少, 停止")
                 break
@@ -1164,11 +1233,11 @@ def localize_with_salad_roma(
         result['all_candidates'] = all_candidates_out
         return result
     
-    return {"success": False, "error": "SALAD+RoMa PnP 失败", "tag": tag}
+    return {"success": False, "error": "SALAD+LightGlue PnP 失败", "tag": tag}
 
 
 # ============================================================
-#  RoMa+PNP 单步优化：基于已有位姿再做密集匹配优化
+#  LightGlue+PNP 单步优化：基于已有位姿再做稀疏匹配优化
 # ============================================================
 
 def refine_pose_with_roma(
@@ -1180,7 +1249,7 @@ def refine_pose_with_roma(
     tag: str = "roma_refine",
 ) -> dict:
     """
-    基于已有 PnP 位姿，用 RoMa 匹配原图 vs 重投影图，
+    基于已有 PnP 位姿，用 LightGlue 匹配原图 vs 重投影图，
     再做 PnP → 评估 SALAD 相似度。
     
     返回: {success, rvec, tvec, inliers, salad_sim, comparison_image, ...}
@@ -1221,11 +1290,11 @@ def refine_pose_with_roma(
     
     log(f"  [REFINE] 初始 SALAD 相似度: {salad_sim:.4f}")
     
-    # RoMa 匹配原图 vs 重投影图
-    kpts_q, kpts_proj, cert = _roma_match(q_small, ref_img, sample_num=3000)
+    # LightGlue 匹配原图 vs 重投影图
+    kpts_q, kpts_proj, cert = _lightglue_match(q_small, ref_img, sample_num=3000)
     if len(kpts_q) < 10:
         if os.path.exists(ref_proj): os.remove(ref_proj)
-        return {"success": False, "error": f"RoMa matches too few: {len(kpts_q)}"}
+        return {"success": False, "error": f"LightGlue matches too few: {len(kpts_q)}"}
     
     # 构建 3D-2D 匹配
     obj_pts, img_pts = _build_3d_2d_matches(kpts_q, kpts_proj, cert, ref_coord, min_cert=0.03)
@@ -1345,7 +1414,7 @@ def _render_comparison(
 ) -> dict:
     """
     生成重投影图和双图对比。
-    匹配连线：原图和重投影图之间的 RoMa/SIFT 匹配点。
+    匹配连线：原图和重投影图之间的 LightGlue/SIFT 匹配点。
     """
     if all_pts is None or all_col is None:
         from services.localizer import get_point_cloud_arrays
