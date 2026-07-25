@@ -9,6 +9,7 @@ LAS 点云多视角投影生成器
 坐标统一使用局部坐标（UTM - offset_xyz）
 """
 import json
+import math
 from pathlib import Path
 from collections import defaultdict
 
@@ -45,6 +46,7 @@ def _load_poses_and_offset(las_dir="las"):
                 if len(parts) >= 9:
                     # panoramicPoses: ts, name, x, y, z, qx, qy, qz, qw
                     # 转为局部坐标（UTM - offset）
+                    ts = float(parts[0])
                     px = float(parts[2]) - offset_x
                     py = float(parts[3]) - offset_y
                     pz = float(parts[4]) - offset_z
@@ -53,6 +55,7 @@ def _load_poses_and_offset(las_dir="las"):
                         'x': px, 'y': py, 'z': pz,
                         'qx': qx, 'qy': qy, 'qz': qz, 'qw': qw,
                         'name': parts[1],
+                        'ts': ts,
                     })
     
     return poses, offset_x, offset_y, offset_z
@@ -212,7 +215,17 @@ def _apply_camera_like_shading(image, depth=None):
     img_float = cv2.GaussianBlur(img_float, (3, 3), 0)
 
     # 提升对比度和亮度（关键！）
-    img_float = cv2.convertScaleAbs(img_float, alpha=1.15, beta=15)
+    # 由于 octree_render 使用 intensity 着色（均值约 30/255），
+    # 需要较大 beta 把暗图拉到可视范围；alpha 避免过曝。
+    # 同时做直方图拉伸到全动态范围，确保对比度充足。
+    img_float = cv2.convertScaleAbs(img_float, alpha=1.1, beta=60)
+    # 自适应直方图均衡化（CLAHE），增强局部对比度
+    lab = cv2.cvtColor(img_float, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+    lab = cv2.merge([l, a, b])
+    img_float = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
     # 饱和度增强（让点云颜色更鲜明）
     if img_float.shape[2] >= 3:

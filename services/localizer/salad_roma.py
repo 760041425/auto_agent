@@ -29,7 +29,6 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from services.las_processor.projection import _load_poses_and_offset, _quat_to_rotmat
 
@@ -254,28 +253,29 @@ def _build_salad_index(force_rebuild: bool = False, progress_callback=None):
             return (name_key, desc)
         return None
     
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {executor.submit(process_tile, tile): tile for tile in valid_tiles}
-        completed = 0
-        total = len(valid_tiles)
+    completed = 0
+    total = len(valid_tiles)
+    
+    for tile in valid_tiles:
+        result = process_tile(tile)
+        if result is not None:
+            keys.append(result[0])
+            descs.append(result[1])
         
-        for future in as_completed(futures):
-            result = future.result()
-            if result is not None:
-                keys.append(result[0])
-                descs.append(result[1])
+        completed += 1
+        if completed % 50 == 0:
+            elapsed = time.time() - t0
+            eta = elapsed / completed * (total - completed)
+            log(f"    {completed}/{total} tiles, {elapsed:.1f}s, ETA: {eta:.1f}s")
             
-            completed += 1
-            if completed % 50 == 0:
-                elapsed = time.time() - t0
-                eta = elapsed / completed * (total - completed)
-                log(f"    {completed}/{total} tiles, {elapsed:.1f}s, ETA: {eta:.1f}s")
-                
-                if progress_callback is not None:
-                    try:
-                        progress_callback(completed, total, elapsed)
-                    except Exception:
-                        pass
+            if progress_callback is not None:
+                try:
+                    progress_callback(completed, total, elapsed)
+                except Exception:
+                    pass
+        
+        if torch.backends.mps.is_available():
+            torch.mps.empty_cache()
     
     if keys:
         _SALAD_INDEX = dict(zip(keys, descs))

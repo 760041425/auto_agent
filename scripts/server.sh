@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="/opt/miniconda3/bin/python3.13"
+PYTHON_BIN="${ROOT_DIR}/.venv/bin/python"
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-8000}"
 PID_FILE="$ROOT_DIR/.uvicorn.pid"
@@ -51,21 +51,21 @@ stop_server() {
     fi
   fi
 
-  pid="$(lsof -ti :"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1)"
+  pid="$(lsof -ti :"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
   if [[ -n "$pid" ]]; then
     kill "$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null
     echo "Server stopped by port $PORT (PID $pid)"
     return 0
   fi
 
-  pid="$(pgrep -f "uvicorn.*$APP_MODULE" 2>/dev/null | head -n 1)"
+  pid="$(pgrep -f "uvicorn.*$APP_MODULE" 2>/dev/null | head -n 1 || true)"
   if [[ -n "$pid" ]]; then
     kill "$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null
     echo "Server stopped by process name (PID $pid)"
     return 0
   fi
 
-  pid="$(pgrep -f "python.*uvicorn" 2>/dev/null | head -n 1)"
+  pid="$(pgrep -f "python.*uvicorn" 2>/dev/null | head -n 1 || true)"
   if [[ -n "$pid" ]]; then
     kill "$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null
     echo "Server stopped by python process (PID $pid)"
