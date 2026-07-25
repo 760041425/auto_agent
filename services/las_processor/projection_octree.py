@@ -828,14 +828,22 @@ def project_las_multi_view_octree(
     except FileNotFoundError as exc:
         raise RuntimeError(str(exc)) from exc
     
-    # 1. 先对 LAS 做 0.02m 下采样，再构建八叉树
-    if progress_callback:
-        progress_callback("下采样 LAS 数据...", 8)
-    sampled_las_path = _prepare_downsampled_las(las_path, output_dir, force=force_rebuild)
+    # 1. 检查八叉树是否已存在；若已存在且非强制重建，跳过下采样 + build
+    octree_dir = Path(output_dir) / "octree_data"
+    manifest_path = octree_dir / "manifest.json"
+    octree_ready = manifest_path.exists()
+    
+    if not octree_ready or force_rebuild:
+        if progress_callback:
+            progress_callback("下采样 LAS 数据...", 8)
+        sampled_las_path = _prepare_downsampled_las(las_path, output_dir, force=force_rebuild)
 
-    if progress_callback:
-        progress_callback("构建 Octree 八叉树...", 10)
-    octree_dataset = build_octree(sampled_las_path, output_dir, offset_xyz, force=force_rebuild)
+        if progress_callback:
+            progress_callback("构建 Octree 八叉树...", 10)
+        octree_dataset = build_octree(sampled_las_path, output_dir, offset_xyz, force=force_rebuild)
+    else:
+        octree_dataset = str(octree_dir)
+        print(f"[OCTREE] 使用已有八叉树: {octree_dataset}")
     
     if progress_callback:
         progress_callback("加载位姿数据...", 20)
