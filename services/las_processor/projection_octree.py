@@ -1026,6 +1026,24 @@ def project_las_multi_view_octree(
         heading_deg = view.get("heading_deg", view.get("yaw_deg", 0.0))
         fx_str = f"{pose['x']:.1f}_{pose['y']:.1f}_{pose['z']:.1f}"
         
+        # 过滤 Z 超出范围（平移后 >10m 高度视为无效轨迹坐标）
+        pose_z = pose['z'] + z_bias
+        if abs(pose_z) > 10.0:
+            print(f"[OCTREE] 跳过 {vd} pose#{pi}: z={pose_z:.1f}m 超出范围")
+            pixel_count = 0
+            generated.append({
+                "image_path": "",
+                "npy_path": "",
+                "normal_path": "",
+                "width": render_width,
+                "height": render_height,
+                "view": vd,
+                "tile": fx_str,
+                "pixel_count": 0,
+                "accepted": False,
+            })
+            continue
+        
         current_render += 1
         if progress_callback:
             render_progress = 20 + int(50 * current_render / total_renders)
