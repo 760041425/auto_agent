@@ -82,7 +82,15 @@ def _run_preprocess(mode: str = "full"):
             n_tiles = len(tiles)
             total_pixels = sum(t.get("pixel_count", 0) for t in tiles)
             _preprocess_status["step"] = (f"Octree 投影完成: {n_tiles} 张图, {total_pixels} 总像素")
+            _preprocess_status["progress"] = 95
 
+            if mode == "render":
+                _preprocess_status["progress"] = 100
+                _preprocess_status["step"] = f"投影完成: {n_tiles} 张图"
+                _preprocess_status["finished_at"] = datetime.datetime.now(CST).isoformat()
+                return
+
+        if mode in {"feature", "full"}:
             _preprocess_status["step"] = "提取各图 SALAD 特征 (DINOv2)..."
             _preprocess_status["progress"] = 75
             from services.localizer.salad_roma import _build_salad_index
@@ -134,8 +142,14 @@ def start_preprocess_build():
 
 @router.post("/preprocess/render")
 def start_preprocess_render():
-    """启动渲染 + 特征库流程"""
+    """仅渲染投影图（不提取特征）"""
     return _start_preprocess("render")
+
+
+@router.post("/preprocess/feature")
+def start_preprocess_feature():
+    """仅重建特征库（需 tiles 已存在）"""
+    return _start_preprocess("feature")
 
 
 @router.get("/preprocess/status")

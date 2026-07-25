@@ -39,7 +39,13 @@
             下采样 + octree_build
           </button>
           <button id="render-btn" class="btn-primary" onclick="startPreprocessRender()" style="white-space:nowrap">
-            渲染 + 特征库
+            仅渲染投影图
+          </button>
+          <button id="feature-btn" class="btn-primary" onclick="startPreprocessFeature()" style="white-space:nowrap">
+            仅重建特征库
+          </button>
+          <button id="full-btn" class="btn-primary" onclick="startPreprocess()" style="white-space:nowrap">
+            完整预处理
           </button>
         </div>
         <div id="preprocess-status" class="hidden" style="margin-top:0.5rem"></div>

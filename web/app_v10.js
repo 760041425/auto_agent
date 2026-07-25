@@ -475,11 +475,15 @@ async function startPreprocessBuild() {
 }
 
 async function startPreprocessRender() {
-  await startPreprocessFlow('render', 'render-btn', '渲染 + 特征库');
+  await startPreprocessFlow('render', 'render-btn', '仅渲染投影图');
+}
+
+async function startPreprocessFeature() {
+  await startPreprocessFlow('feature', 'feature-btn', '仅重建特征库');
 }
 
 async function startPreprocess() {
-  await startPreprocessFlow('full', 'build-btn', '完整预处理');
+  await startPreprocessFlow('full', 'full-btn', '完整预处理');
 }
 
 async function startPreprocessFlow(mode, buttonId, buttonLabel) {
@@ -497,7 +501,10 @@ async function startPreprocessFlow(mode, buttonId, buttonLabel) {
   progressBar.style.width = '0%';
 
   try {
-    var endpoint = mode === 'build' ? '/las/preprocess/build' : mode === 'render' ? '/las/preprocess/render' : '/las/preprocess';
+    var endpoint = mode === 'build' ? '/las/preprocess/build' 
+                 : mode === 'render' ? '/las/preprocess/render'
+                 : mode === 'feature' ? '/las/preprocess/feature'
+                 : '/las/preprocess';
     var resp = await fetch(API + endpoint, { method: 'POST' });
     var text = await resp.text();
     var data = {};
