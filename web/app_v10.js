@@ -479,7 +479,11 @@ async function startPreprocessRender() {
 }
 
 async function startPreprocessFeature() {
-  await startPreprocessFlow('feature', 'feature-btn', '仅重建特征库');
+  await startPreprocessFlow('feature', 'feature-btn', '仅重建 SALAD 特征');
+}
+
+async function startPreprocessAce() {
+  await startPreprocessFlow('ace', 'ace-btn', '训练 ACE 模型');
 }
 
 async function startPreprocess() {
@@ -504,6 +508,7 @@ async function startPreprocessFlow(mode, buttonId, buttonLabel) {
     var endpoint = mode === 'build' ? '/las/preprocess/build' 
                  : mode === 'render' ? '/las/preprocess/render'
                  : mode === 'feature' ? '/las/preprocess/feature'
+                 : mode === 'ace' ? '/las/preprocess/ace'
                  : '/las/preprocess';
     var resp = await fetch(API + endpoint, { method: 'POST' });
     var text = await resp.text();

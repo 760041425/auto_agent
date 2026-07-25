@@ -114,15 +114,26 @@ def _run_preprocess(mode: str = "full"):
 
             _build_salad_index(force_rebuild=True, progress_callback=_salad_progress_callback)
 
-            _preprocess_status["progress"] = 92
+            _preprocess_status["progress"] = 95
+            _preprocess_status["step"] = f"SALAD 特征提取完成: {n_tiles} 张图"
+
+        if mode == "ace":
             _preprocess_status["step"] = "训练 ACE 场景坐标回归模型..."
+            _preprocess_status["progress"] = 50
             try:
                 from services.localizer.ace_trainer import train_ace_model
-                train_ace_model(epochs=10)  # 快速训练 10 个 epoch
+                # 检查 tiles 是否存在
+                if not os.path.exists("projections/tile_index.json"):
+                    _preprocess_status["error"] = "tile_index.json 不存在，请先渲染投影图"
+                    _preprocess_status["running"] = False
+                    return
+                train_ace_model(epochs=10)
+                _preprocess_status["step"] = "ACE 模型训练完成"
             except Exception as ace_err:
-                print(f"[ACE] 训练失败（非致命）: {ace_err}")
-
-            _preprocess_status["progress"] = 95
+                _preprocess_status["error"] = f"ACE 训练失败: {ace_err}"
+                _preprocess_status["running"] = False
+                return
+            _preprocess_status["progress"] = 100
             _preprocess_status["step"] = f"SALAD 特征提取完成: {n_tiles} 张图"
 
         _preprocess_status["progress"] = 100
@@ -169,8 +180,14 @@ def start_preprocess_render():
 
 @router.post("/preprocess/feature")
 def start_preprocess_feature():
-    """仅重建特征库（需 tiles 已存在）"""
+    """仅重建 SALAD 特征库（需 tiles 已存在）"""
     return _start_preprocess("feature")
+
+
+@router.post("/preprocess/ace")
+def start_preprocess_ace():
+    """仅训练 ACE 模型（需 tiles 已存在）"""
+    return _start_preprocess("ace")
 
 
 @router.get("/preprocess/status")
