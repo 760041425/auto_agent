@@ -62,6 +62,14 @@
 - 任务队列：Celery / ARQ 实现异步比较任务
 - 特征算法：SIFT（经典）或 SuperPoint+SuperGlue（深度学习方案，精度更高）
 
+## 已知限制
+
+### LAS Point Format 兼容性
+
+`octree_build` **仅支持 LAS point format 0-3**。在 `_downsample_las_with_laspy()` 下采样时，`laspy.write()` 默认输出 LAS 1.4 format 7，需显式指定输出为 LAS 1.2 format 3 以兼容 octree_build。
+
+前排提示：如有新的 point format 需求，需同步修改 `_downsample_las_with_laspy()` 中的 `LasHeader(point_format=3, version="1.2")` 以及 `octree_build` 的 C++ 源码。
+
 ## 目录结构
 
 ```

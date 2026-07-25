@@ -49,9 +49,18 @@ async def upload_image(file: UploadFile = File(...), db: Session = Depends(get_d
     return record
 
 
-@router.get("", response_model=list[ImageListResponse])
+@router.get("")
 def list_images(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
-    return db.query(ImageModel).order_by(ImageModel.created_at.desc()).offset(skip).limit(limit).all()
+    results = db.query(ImageModel).order_by(ImageModel.created_at.desc()).offset(skip).limit(limit).all()
+    return [{
+        "id": img.id,
+        "filename": img.filename,
+        "original_name": img.original_name,
+        "status": img.status,
+        "width": img.width,
+        "height": img.height,
+        "created_at": img.created_at.isoformat() if img.created_at else None,
+    } for img in results]
 
 
 @router.get("/{image_id}", response_model=ImageListResponse)

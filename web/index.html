@@ -14,6 +14,7 @@
       <button class="tab active" data-tab="upload">上传图像</button>
       <button class="tab" data-tab="list">图像列表</button>
       <button class="tab" data-tab="tasks">任务记录</button>
+      <button class="tab" data-tab="localize">视觉定位</button>
     </nav>
   </header>
 
@@ -27,6 +28,20 @@
         <div class="progress-bar"></div>
       </div>
       <div id="upload-result" class="result hidden"></div>
+
+      <div style="margin-top:2rem;border-top:1px solid #eee;padding-top:1rem">
+        <h3 style="font-size:0.95rem;margin-bottom:0.5rem">LAS 数据预处理</h3>
+        <p style="font-size:0.82rem;color:#888;margin-bottom:0.5rem">
+          生成 LAS 投影图、像素-3D 坐标映射和 SIFT 特征，用于图像匹配
+        </p>
+        <button id="preprocess-btn" class="btn-primary" onclick="startPreprocess()">
+          开始预处理
+        </button>
+        <div id="preprocess-status" class="hidden" style="margin-top:0.5rem"></div>
+        <div id="preprocess-progress-wrap" class="progress hidden" style="margin-top:0.5rem">
+          <div id="preprocess-progress-bar" class="progress-bar" style="width:0%"></div>
+        </div>
+      </div>
     </section>
 
     <section id="tab-list" class="tab-content">
@@ -39,6 +54,41 @@
 
     <section id="tab-tasks" class="tab-content">
       <div id="task-list" class="task-list"></div>
+    </section>
+
+    <section id="tab-localize" class="tab-content">
+      <h3 style="margin-bottom:0.5rem">端到端视觉定位</h3>
+      <div style="display:flex;gap:0.5rem;margin-bottom:0.5rem;flex-wrap:wrap;align-items:center">
+        <div class="upload-zone" id="localize-upload-zone" style="flex:1;padding:0.8rem;border:1px dashed #ccc;border-radius:6px;text-align:center;cursor:pointer;font-size:0.85rem;color:#888">
+          拖拽/点击上传查询图像
+        </div>
+        <input type="file" id="localize-file-input" accept="image/*" hidden>
+        <button class="btn-primary" onclick="refreshLocalizeImages()" style="white-space:nowrap">刷新列表</button>
+      </div>
+      <div id="localize-image-grid" class="image-grid" style="margin-bottom:1rem"></div>
+      <div id="localize-selected" style="display:none;margin-bottom:0.5rem">
+        <div style="display:flex;align-items:center;gap:0.5rem;padding:0.5rem;background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+          <img id="localize-selected-thumb" style="width:60px;height:60px;object-fit:cover;border-radius:4px">
+          <span id="localize-selected-name" style="font-size:0.9rem"></span>
+          <div style="margin-left:auto">
+            <button id="localize-btn" class="btn-primary" onclick="startLocalize()">开始定位</button>
+          </div>
+        </div>
+      </div>
+      <fieldset id="localize-algorithms" style="margin:0 0 0.8rem;padding:0.65rem;border:1px solid #ddd;border-radius:6px">
+        <legend style="font-size:0.85rem;color:#555">定位算法（可单选或多选）</legend>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma" checked> SALAD+RoMa (v3，默认)</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="flann"> SIFT + FLANN</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="bf"> SIFT + BF</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="flann_lowes"> FLANN 严格</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="bf_cross"> BF 交叉验证</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="knn_rank"> KNN Rank</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="lightglue"> LightGlue</label>
+        <label><input type="checkbox" value="loftr"> LoFTR</label>
+        <label style="display:block;margin-top:0.5rem;font-size:0.82rem;color:#666"><input id="localize-debug" type="checkbox"> 生成候选轮次调试图（较慢）</label>
+      </fieldset>
+      <div id="localize-status" class="status hidden"></div>
+      <div id="localize-results"></div>
     </section>
 
     <section id="tab-detail" class="tab-content">
@@ -63,7 +113,8 @@
       </div>
     </section>
   </main>
+  <footer style="text-align:center;padding:1rem;color:#aaa;font-size:0.8rem">v6</footer>
 </div>
-<script src="/app.js"></script>
+<script src="/app_v10.js?v=14"></script>
 </body>
 </html>

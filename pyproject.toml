@@ -11,8 +11,13 @@ dependencies = [
     "laspy>=2.5.0",
     "opencv-python-headless>=4.9.0",
     "numpy>=1.26.0",
+    "pillow>=10.0.0",
     "pytest>=8.0.0",
     "httpx>=0.27.0",
+    "scipy>=1.11.0",
+    "torch>=2.2.0",
+    "kornia>=0.7.0",
+    "romatch>=0.0.1",
 ]
 
 [project.optional-dependencies]

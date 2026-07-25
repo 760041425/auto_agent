@@ -1,23 +1,22 @@
 import datetime
 import threading
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from api.database import get_db
+from api.database import get_db, SessionLocal
 from api.models import ImageModel, TaskModel, ReportModel
 from api.schemas import TaskCreate, TaskResponse, ReportResponse
+
+CST = ZoneInfo("Asia/Shanghai")
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
-def run_comparison_task(task_id: int, image_id: int, db_url: str):
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    engine = create_engine(db_url, connect_args={"check_same_thread": False})
-    Session = sessionmaker(bind=engine)
-
-    db = Session()
+def run_comparison_task(task_id: int, image_id: int):
+    # 和 API 请求使用同一数据库，避免任务写到 projections/app.db 而前端读 query_images/app.db。
+    db = SessionLocal()
     try:
         task = db.query(TaskModel).filter(TaskModel.id == task_id).first()
         if not task:
@@ -32,12 +31,13 @@ def run_comparison_task(task_id: int, image_id: int, db_url: str):
             db.commit()
             return
 
-        from services.matcher import compute_image_area_3d
-        result = compute_image_area_3d(img.path)
+        from services.matcher import compute_image_area_3d, log_match_step
+        log_match_step(f"⏳ 开始处理任务: image={img.path}, image_id={image_id}, task_id={task_id}", task_id)
+        result = compute_image_area_3d(img.path, task_id=task_id)
 
         task.result_json = result
         task.status = "completed"
-        task.finished_at = datetime.datetime.utcnow()
+        task.finished_at = datetime.datetime.now(CST)
 
         report = ReportModel(
             task_id=task.id,
@@ -48,6 +48,7 @@ def run_comparison_task(task_id: int, image_id: int, db_url: str):
             center_3d_z=result["center_3d"][2] if result.get("center_3d") else None,
             regions_json=result.get("regions"),
             confidence=min(result.get("total_matches", 0) / 100, 1.0),
+            verification_json=result.get("verification"),
         )
         db.add(report)
         db.commit()
@@ -55,6 +56,9 @@ def run_comparison_task(task_id: int, image_id: int, db_url: str):
         task.status = "failed"
         task.error_message = str(e)
         db.commit()
+        log_match_step(f"❌ 任务异常: {e}", task_id)
+        import traceback
+        log_match_step(f"   traceback: {traceback.format_exc()}", task_id)
     finally:
         db.close()
 
@@ -65,14 +69,14 @@ def create_comparison_task(req: TaskCreate, db: Session = Depends(get_db)):
     if not img:
         raise HTTPException(404, "Image not found")
 
-    task = TaskModel(image_id=req.image_id, status="pending")
+    task = TaskModel(image_id=req.image_id, status="pending", task_type="compare")
     db.add(task)
     db.commit()
     db.refresh(task)
 
     threading.Thread(
         target=run_comparison_task,
-        args=(task.id, req.image_id, "sqlite:///./projections/app.db"),
+        args=(task.id, req.image_id),
         daemon=True,
     ).start()
 
@@ -92,11 +96,18 @@ def list_tasks(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
     return db.query(TaskModel).order_by(TaskModel.created_at.desc()).offset(skip).limit(limit).all()
 
 
-@router.get("/{task_id}/report", response_model=ReportResponse)
+@router.get("/{task_id}/report")
 def get_report(task_id: int, db: Session = Depends(get_db)):
     report = db.query(ReportModel).filter(ReportModel.task_id == task_id).first()
     if not report:
         raise HTTPException(404, "Report not found")
+    task = report.task
+    matched_points = None
+    all_matched_points = None
+    if task and task.result_json:
+        result = task.result_json
+        matched_points = result.get("matched_points")
+        all_matched_points = result.get("all_matched_points")
     return {
         "id": report.id,
         "task_id": report.task_id,
@@ -109,5 +120,8 @@ def get_report(task_id: int, db: Session = Depends(get_db)):
         } if report.center_3d_x is not None else None,
         "regions": report.regions_json,
         "confidence": report.confidence,
+        "verification": report.verification_json,
+        "matched_points": matched_points,
+        "all_matched_points": all_matched_points,
         "created_at": report.created_at,
     }
