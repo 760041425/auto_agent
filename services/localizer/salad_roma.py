@@ -506,15 +506,12 @@ def _load_xfeat_local(device):
 def _get_lightglue_model(device):
     global _LIGHTGLUE_MODEL, _SUPERPOINT_MODEL
     if _LIGHTGLUE_MODEL is not None:
-        # 已加载成功
         return _SUPERPOINT_MODEL, _LIGHTGLUE_MODEL
     if _LIGHTGLUE_MODEL is False:
-        # 之前已确认加载失败，跳过重试
         return None, None
 
     try:
         import ssl
-        # kornia LightGlue 构造时会尝试下载权重（可能 SSL 失败）
         try:
             _create_unverified_https_context = ssl._create_unverified_context
         except AttributeError:
@@ -522,16 +519,21 @@ def _get_lightglue_model(device):
         else:
             ssl._create_default_https_context = _create_unverified_https_context
 
+        # kornia 0.8.3 不支持 SuperPoint 独立提取，使用 DISK
+        from kornia.feature import DISK
+        disk = DISK().to(device)
+        disk.eval()
+        _SUPERPOINT_MODEL = disk
+
         from kornia.feature import LightGlue as _LG
-        lightglue = _LG(backbone='superpoint').to(device)
+        lightglue = _LG(features='disk').to(device)
         lightglue.eval()
-        _SUPERPOINT_MODEL = None
         _LIGHTGLUE_MODEL = lightglue
-        log(f"  LightGlue + SuperPoint 模型加载完成")
+        log(f"  DISK + LightGlue(disk) 模型加载完成")
         return _SUPERPOINT_MODEL, _LIGHTGLUE_MODEL
     except Exception as e:
-        log(f"  LightGlue 加载失败: {e}, 将使用 SIFT+FLANN fallback")
-        _LIGHTGLUE_MODEL = False  # 标记失败，不再重试
+        log(f"  DISK+LightGlue 加载失败: {e}, 将使用 SIFT+FLANN fallback")
+        _LIGHTGLUE_MODEL = False
         return None, None
 
 
@@ -550,10 +552,8 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
             H1, W1 = img1.shape[:2]
             H2, W2 = img2.shape[:2]
 
-            # SuperPoint 特征提取
-            from kornia.feature import SuperPoint
-            sp = SuperPoint(max_num_features=2048).to(DEVICE)
-            sp.eval()
+            # 用 DISK 提特征
+            fe = _SUPERPOINT_MODEL  # DISK 实例
 
             img1_t = kornia.image_to_tensor(img1, keepdim=False).float() / 255.0
             img2_t = kornia.image_to_tensor(img2, keepdim=False).float() / 255.0
@@ -566,19 +566,19 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
             img2_t = img2_t.to(DEVICE)
 
             with torch.no_grad():
-                feat1 = sp(img1_t)
-                feat2 = sp(img2_t)
+                feat1 = fe(img1_t, features=True)  # DISK 返回 dict: keypoints, descriptors, scores
+                feat2 = fe(img2_t, features=True)
 
                 data = {
                     "image0": {
-                        "keypoints": feat1["keypoints"],  # [B, M, 2]
-                        "descriptors": feat1["descriptors"],  # [B, M, 256]
-                        "image": img1_t,
+                        "keypoints": feat1["keypoints"],
+                        "descriptors": feat1["descriptors"],
+                        "image_size": torch.tensor([[H1, W1]], device=DEVICE),
                     },
                     "image1": {
                         "keypoints": feat2["keypoints"],
                         "descriptors": feat2["descriptors"],
-                        "image": img2_t,
+                        "image_size": torch.tensor([[H2, W2]], device=DEVICE),
                     },
                 }
 
@@ -596,7 +596,9 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
                     if len(kpts0) > 0:
                         return kpts0, kpts1, cert
         except Exception as e:
-            log(f"  LightGlue 匹配失败: {e}, fallback 到 SIFT+FLANN")
+            log(f"  DISK+LightGlue 匹配失败: {e}, fallback 到 SIFT+FLANN")
+            import traceback
+            traceback.print_exc()
 
     # Fallback: SIFT + FLANN（先做 CLAHE 增强暗图对比度）
     def _prepare_gray(img):
