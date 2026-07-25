@@ -221,22 +221,26 @@ def _extract_multimodal_descriptor(
     """
     多模态 DINOv2 特征提取：RGB + Normal + XYZ。
     
-    各模态分别提取 DINOv2 描述子，然后拼接为联合描述子。
-    如果 normal/xyz 缺失，则退化为纯 RGB。
+    各模态分别提取 DINOv2 描述子，然后拼接为联合描述子（3 倍维度）。
+    如果某个模态缺失，用零向量填充以保持维度一致。
     """
     rgb_desc = _extract_dinov2_descriptor(model, img, scale)
     if rgb_desc is None:
         return None
     
+    base_dim = len(rgb_desc)
     descs = [rgb_desc]
     
-    if normal_map is not None:
+    # Normal 模态
+    if normal_map is not None and normal_map.size > 0:
         norm_vis = ((normal_map + 1.0) * 127.5).clip(0, 255).astype(np.uint8)
         norm_desc = _extract_dinov2_descriptor(model, norm_vis, scale)
-        if norm_desc is not None:
-            descs.append(norm_desc)
+    else:
+        norm_desc = None
+    descs.append(norm_desc if norm_desc is not None else np.zeros(base_dim, dtype=np.float32))
     
-    if xyz_map is not None:
+    # XYZ 模态
+    if xyz_map is not None and xyz_map.size > 0:
         valid = np.linalg.norm(xyz_map, axis=2) > 1e-6
         if valid.any():
             xyz_vis = xyz_map.copy()
@@ -250,12 +254,13 @@ def _extract_multimodal_descriptor(
                 xyz_vis[..., c] = channel
             xyz_vis = np.clip(xyz_vis, 0, 255).astype(np.uint8)
             xyz_desc = _extract_dinov2_descriptor(model, xyz_vis, scale)
-            if xyz_desc is not None:
-                descs.append(xyz_desc)
+        else:
+            xyz_desc = None
+    else:
+        xyz_desc = None
+    descs.append(xyz_desc if xyz_desc is not None else np.zeros(base_dim, dtype=np.float32))
     
-    if len(descs) > 1:
-        return np.concatenate(descs)
-    return descs[0]
+    return np.concatenate(descs)
 
 
 def _build_salad_index(force_rebuild: bool = False, progress_callback=None):
