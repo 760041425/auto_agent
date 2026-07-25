@@ -170,8 +170,14 @@ def _prepare_downsampled_las(
     output_dir: str,
     force: bool = False,
     voxel_size_m: float = 0.02,
+    offset_xyz: tuple[float, float, float] = (0, 0, 0),
 ) -> str:
-    """在 octree_build 前对 LAS 做体素下采样。优先尝试 PDAL，失败时回退到 laspy。"""
+    """在 octree_build 前对 LAS 做体素下采样 + 坐标平移。
+    
+    平移目的：UTM 坐标 ~505000 对 float32 精度不友好，
+    且 octree_render 不支持 --position-offset。
+    将坐标平移后再建八叉树，manifest 和 colmap 线都使用平移后的小坐标。
+    """
     source_path = Path(las_path)
     if not source_path.exists():
         raise FileNotFoundError(f"LAS 文件不存在: {las_path}")
@@ -193,17 +199,77 @@ def _prepare_downsampled_las(
             str(out_path),
             "filters.voxeldownsize",
             f"--filters.voxeldownsize.cell={voxel_size_m}",
-            "--writers.las.dataformat_id=3",   # 强制写 format 3 以兼容 octree_build（不支持 format 4+）
+            "--writers.las.dataformat_id=3",
         ]
         print(f"[OCTREE] 使用 PDAL 下采样 LAS: {source_path} -> {out_path}")
         print(f"[OCTREE]   PDAL 路径: {pdal_bin}")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if result.returncode == 0:
+            _translate_las_coords(out_path, offset_xyz)
             return str(out_path)
         print(f"[OCTREE] PDAL 降采样失败，回退到 laspy: {result.stderr[:500]}")
 
     _downsample_las_with_laspy(source_path, out_path, voxel_size_m=voxel_size_m)
+    _translate_las_coords(out_path, offset_xyz)
     return str(out_path)
+
+
+def _translate_las_coords(las_path: str | Path, offset_xyz: tuple[float, float, float]) -> None:
+    """平移 LAS 文件中所有 X, Y, Z 坐标（减去 offset），使用 PDAL filters.transformation。
+    
+    使得 UTM 大坐标变成小坐标，八叉树构建和渲染都在同一坐标系。
+    不用 laspy 写回（会损坏 LAS 1.4 header），用 PDAL pipeline。
+    """
+    if abs(offset_xyz[0]) < 1 and abs(offset_xyz[1]) < 1 and abs(offset_xyz[2]) < 1:
+        return
+    las_path = Path(las_path)
+    if not las_path.exists():
+        return
+    
+    pdal_bin = _resolve_pdal_binary()
+    if not pdal_bin:
+        print(f"[OCTREE] ⚠️ PDAL 不可用，跳过坐标平移")
+        return
+    
+    tmp = las_path.with_suffix(las_path.suffix + ".translated")
+    
+    # PDAL pipeline: 读取 → 平移 → 写回
+    pipeline = {
+        "pipeline": [
+            str(las_path),
+            {
+                "type": "filters.transformation",
+                "matrix": [
+                    [1, 0, 0, -offset_xyz[0]],
+                    [0, 1, 0, -offset_xyz[1]],
+                    [0, 0, 1, -offset_xyz[2]],
+                    [0, 0, 0, 1],
+                ],
+            },
+            {
+                "type": "writers.las",
+                "filename": str(tmp),
+                "dataformat_id": 3,
+            },
+        ]
+    }
+    
+    import json as _json
+    pipeline_path = las_path.with_suffix(las_path.suffix + ".pipeline.json")
+    with open(pipeline_path, "w") as f:
+        _json.dump(pipeline, f)
+    
+    result = subprocess.run([pdal_bin, "pipeline", str(pipeline_path)],
+                            capture_output=True, text=True, timeout=300)
+    pipeline_path.unlink()
+    
+    if result.returncode == 0 and tmp.exists():
+        tmp.replace(las_path)
+        print(f"[OCTREE] LAS 坐标平移完成: {las_path.name}  offset=({offset_xyz[0]:.0f},{offset_xyz[1]:.0f},{offset_xyz[2]:.0f})")
+    else:
+        print(f"[OCTREE] ⚠️ 坐标平移失败: {result.stderr[:200]}")
+        if tmp.exists():
+            tmp.unlink()
 
 
 def build_octree(
@@ -214,6 +280,8 @@ def build_octree(
 ) -> str:
     """
     用 octree_build 将 LAS 点云构建为八叉树数据集。
+    
+    LAS 坐标已由 _prepare_downsampled_las 平移，此处 --position-offset 传 [0,0,0]。
     
     返回: octree 数据集目录路径
     """
@@ -228,20 +296,17 @@ def build_octree(
     
     octree_dir.mkdir(parents=True, exist_ok=True)
     
-    offset_str = f"[{int(offset_xyz[0])},{int(offset_xyz[1])},{int(offset_xyz[2])}]"
-    
     cmd = [
         OCTREE_BUILD_BIN,
         "--config", OCTREE_CONFIG,
         "--input", las_path,
         "--output", str(octree_dir),
-        "--position-offset", offset_str,
+        "--position-offset", "[0,0,0]",
         "--log-level", "info",
     ]
     
     print(f"[OCTREE] 构建八叉树: {las_path}")
     print(f"[OCTREE]   输出: {octree_dir}")
-    print(f"[OCTREE]   偏移: {offset_str}")
     t0 = time.time()
     
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -836,7 +901,7 @@ def project_las_multi_view_octree(
     if not manifest_path.exists():
         if progress_callback:
             progress_callback("下采样 LAS 数据...", 8)
-        sampled_las_path = _prepare_downsampled_las(las_path, output_dir, force=False)
+        sampled_las_path = _prepare_downsampled_las(las_path, output_dir, force=False, offset_xyz=offset_xyz)
 
         if progress_callback:
             progress_callback("构建 Octree 八叉树...", 10)
