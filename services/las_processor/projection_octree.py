@@ -614,18 +614,29 @@ def _compute_normal_map(world_array: np.ndarray) -> np.ndarray:
     """
     从 XYZ 世界坐标图 (H, W, 3) 计算表面法线图 (H, W, 3)。
     
-    使用相邻像素的叉积估算法向量，对无效像素（[0,0,0]）输出 [0,0,0]。
-    法向量归一化到单位长度。
+    先用双边滤波平滑 XYZ 坐标（降噪保边），
+    再用中心差分 + 叉积估算法向量。
+    无效像素（[0,0,0]）输出 [0,0,0]。
+    
+    后续可升级为 Open3D `estimate_normals()` 替代。
     """
     h, w = world_array.shape[:2]
-    normals = np.zeros_like(world_array, dtype=np.float32)
-    
     valid = np.linalg.norm(world_array, axis=2) > 1e-6
     
-    x = world_array[..., 0]
-    y = world_array[..., 1]
-    z = world_array[..., 2]
+    if not valid.any():
+        return np.zeros((h, w, 3), dtype=np.float32)
     
+    # 双边滤波平滑 XYZ（降噪保边）
+    smooth = np.zeros_like(world_array)
+    for c in range(3):
+        ch = world_array[..., c].copy()
+        # 只对有效区域滤波
+        ch_filtered = cv2.bilateralFilter(ch, d=5, sigmaColor=50, sigmaSpace=5)
+        smooth[..., c] = np.where(valid, ch_filtered, ch)
+    
+    x, y, z = smooth[..., 0], smooth[..., 1], smooth[..., 2]
+    
+    # 中心差分
     dx = np.zeros((h, w, 3), dtype=np.float32)
     dy = np.zeros((h, w, 3), dtype=np.float32)
     
@@ -640,7 +651,6 @@ def _compute_normal_map(world_array: np.ndarray) -> np.ndarray:
     n_norm = np.linalg.norm(n, axis=2, keepdims=True)
     n_valid = n_norm[..., 0] > 1e-10
     n[n_valid] = n[n_valid] / n_norm[n_valid]
-    
     n[~valid] = 0.0
     
     return n.astype(np.float32)

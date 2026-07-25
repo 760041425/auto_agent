@@ -34,9 +34,14 @@
         <p style="font-size:0.82rem;color:#888;margin-bottom:0.5rem">
           生成 LAS 投影图、像素-3D 坐标映射和 SIFT 特征，用于图像匹配
         </p>
-        <button id="preprocess-btn" class="btn-primary" onclick="startPreprocess()">
-          开始预处理
-        </button>
+        <div style="display:flex;gap:0.75rem;flex-wrap:wrap">
+          <button id="build-btn" class="btn-primary" onclick="startPreprocessBuild()" style="white-space:nowrap">
+            下采样 + octree_build
+          </button>
+          <button id="render-btn" class="btn-primary" onclick="startPreprocessRender()" style="white-space:nowrap">
+            渲染 + 特征库
+          </button>
+        </div>
         <div id="preprocess-status" class="hidden" style="margin-top:0.5rem"></div>
         <div id="preprocess-progress-wrap" class="progress hidden" style="margin-top:0.5rem">
           <div id="preprocess-progress-bar" class="progress-bar" style="width:0%"></div>
@@ -115,6 +120,6 @@
   </main>
   <footer style="text-align:center;padding:1rem;color:#aaa;font-size:0.8rem">v6</footer>
 </div>
-<script src="/app_v10.js?v=14"></script>
+<script src="/app_v10.js?v=15"></script>
 </body>
 </html>

@@ -1,12 +1,14 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from services.las_processor import projection_octree as projection_octree_module
 from services.las_processor.colmap_reader import read_images_txt, read_points3d_txt
 from services.las_processor.projection import project_las_multi_view, _render_camera_like_points
-from services.las_processor.projection_octree import build_projection_view_poses
+from services.las_processor.projection_octree import build_projection_view_poses, _filter_trajectory_poses, prepare_octree_render_plan
 
 
 def test_read_images_txt():
@@ -44,7 +46,7 @@ def test_camera_like_projection_renders_nontrivial_image():
     assert img.std() > 0
 
 
-def test_build_projection_view_poses_writes_eight_views(tmp_path):
+def test_build_projection_view_poses_uses_euler_views(tmp_path):
     poses = [
         {"x": 0.0, "y": 0.0, "z": 1.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0, "name": "p0"},
         {"x": 12.0, "y": 0.0, "z": 1.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0, "name": "p1"},
@@ -57,8 +59,92 @@ def test_build_projection_view_poses_writes_eight_views(tmp_path):
         payload = json.load(f)
 
     assert payload["sample_interval_m"] == 10.0
-    assert len(payload["views"]) == 16  # 2 poses × 8 directions
-    assert all(view["view_dir"] in {"n", "ne", "e", "se", "s", "sw", "w", "nw"} for view in payload["views"])
+    assert len(payload["views"]) == 8  # 2 poses × 4 Euler directions
+    assert all(view["yaw_deg"] in {0.0, 90.0, 180.0, 270.0} for view in payload["views"])
+    assert all(view["pitch_deg"] == -15.0 for view in payload["views"])
+    assert all(view["roll_deg"] == 0.0 for view in payload["views"])
+
+
+def test_prepare_octree_render_plan_writes_trajectory_views(tmp_path):
+    poses = [
+        {"x": 0.0, "y": 0.0, "z": 1.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0, "name": "p0"},
+        {"x": 12.0, "y": 0.0, "z": 1.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0, "name": "p1"},
+    ]
+
+    pose_file, views = prepare_octree_render_plan(
+        poses,
+        output_dir=str(tmp_path),
+        sample_interval_m=10.0,
+        use_grid_sampling=False,
+    )
+
+    assert pose_file.exists()
+    assert len(views) == 8
+    assert {view["x"] for view in views if view["view_dir"] == "yaw0"} == {0.0, 12.0}
+
+
+def test_prepare_downsampled_las_uses_pdal(monkeypatch, tmp_path):
+    source_las = tmp_path / "input.las"
+    source_las.write_bytes(b"dummy")
+    output_dir = tmp_path / "out"
+    fake_pdal = tmp_path / "pdal"
+    fake_pdal.write_text("#!/bin/sh\nexit 0\n")
+    fake_pdal.chmod(0o755)
+
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout):
+        calls.append(cmd)
+        Path(cmd[3]).write_bytes(b"ok")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(projection_octree_module.shutil, "which", lambda name: str(fake_pdal))
+    monkeypatch.setattr(projection_octree_module.subprocess, "run", fake_run)
+
+    sampled_path = projection_octree_module._prepare_downsampled_las(str(source_las), str(output_dir))
+
+    assert Path(sampled_path).exists()
+    assert calls[0][0] == str(fake_pdal)
+    assert calls[0][4] == "filters.voxeldownsize"
+    assert calls[0][5] == "--filters.voxeldownsize.cell=0.02"
+
+
+def test_prepare_downsampled_las_uses_env_pdal_bin(monkeypatch, tmp_path):
+    source_las = tmp_path / "input.las"
+    source_las.write_bytes(b"dummy")
+    output_dir = tmp_path / "out"
+    fake_pdal = tmp_path / "pdal"
+    fake_pdal.write_text("#!/bin/sh\nexit 0\n")
+    fake_pdal.chmod(0o755)
+
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout):
+        calls.append(cmd)
+        Path(cmd[3]).write_bytes(b"ok")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setenv("PDAL_BIN", str(fake_pdal))
+    monkeypatch.setattr(projection_octree_module.shutil, "which", lambda name: None)
+    monkeypatch.setattr(projection_octree_module.subprocess, "run", fake_run)
+
+    sampled_path = projection_octree_module._prepare_downsampled_las(str(source_las), str(output_dir))
+
+    assert Path(sampled_path).exists()
+    assert calls[0][0] == str(fake_pdal)
+
+
+def test_filter_trajectory_poses_respects_time_and_distance():
+    poses = [
+        {"ts": 0.0, "x": 0.0, "y": 0.0, "z": 0.0},
+        {"ts": 0.5, "x": 0.5, "y": 0.0, "z": 0.0},
+        {"ts": 1.0, "x": 3.0, "y": 0.0, "z": 0.0},
+        {"ts": 1.2, "x": 3.1, "y": 0.0, "z": 0.0},
+    ]
+
+    filtered = _filter_trajectory_poses(poses, min_time_sec=1.0, min_dist_m=4.0)
+
+    assert [pose["ts"] for pose in filtered] == [0.0, 1.0]
 
 
 def test_las_projection():

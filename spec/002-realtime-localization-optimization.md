@@ -109,3 +109,14 @@ LAS 点云
 - **ACE**: 《Accelerated Coordinate Encoding: Learning to Relocalize in Minutes》(CVPR 2023)
 - **LightGlue**: 《LightGlue: Local Feature Matching at Light Speed》(ICCV 2023)
 - **MAST3R**: 《Grounding Image Matching in 3D with MASt3R》(ECCV 2024)
+
+## 法线图计算方案
+
+| 方案 | 依赖 | 质量 | 速度 | 说明 |
+|------|------|------|------|------|
+| numpy 中心差分（当前） | 无 | ⚠️ 中等 | ~1ms | 深度跳变处有噪点 |
+| + OpenCV 双边滤波（当前） | cv2 ✅ | ✅ 较好 | ~5ms | 平滑降噪保边缘 |
+| **Open3D** `estimate_normals()` | open3d ❌ | ✅✅ 最佳 | ~10ms | KD-tree 搜索，法线定向一致 |
+| **PDAL** `filters.normal` | pdal ❌ | ✅ 好 | ~5ms | 可集成到 PDAL pipeline |
+
+建议：网络可用后装 Open3D，法线质量提升显著。

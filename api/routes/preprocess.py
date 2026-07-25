@@ -17,23 +17,23 @@ _preprocess_status = {
     "step": "",
     "error": None,
     "finished_at": None,
+    "mode": None,
 }
 
 
-def _run_preprocess():
+def _run_preprocess(mode: str = "full"):
     global _preprocess_status
     _preprocess_status["running"] = True
     _preprocess_status["progress"] = 0
     _preprocess_status["error"] = None
     _preprocess_status["finished_at"] = None
+    _preprocess_status["mode"] = mode
 
     try:
-        # Step 1: 扫描 LAS 文件
         _preprocess_status["step"] = "扫描 LAS 文件..."
         _preprocess_status["progress"] = 5
         las_dir = Path("las")
         las_files = sorted(las_dir.glob("*.las"))
-        # 排除旧的 subsample 文件
         las_files = [f for f in las_files if "subsample" not in f.name]
         if not las_files:
             _preprocess_status["error"] = "未找到 LAS 文件"
@@ -43,52 +43,59 @@ def _run_preprocess():
         las_path = str(las_files[0])
         _preprocess_status["step"] = f"处理 {las_files[0].name}..."
 
-        # Step 2: Octree 多视角投影
-        _preprocess_status["step"] = "构建 Octree 八叉树..."
-        _preprocess_status["progress"] = 10
-        from services.las_processor.projection_octree import project_las_multi_view_octree
         out_dir = Path("projections")
-        if out_dir.exists():
-            for child in out_dir.iterdir():
-                if child.is_file() and child.name not in {"tile_features_index.json", "tile_index.json", "projection_view_poses.json"}:
-                    child.unlink()
-                elif child.is_dir() and child.name != "octree_data":
-                    import shutil
-                    shutil.rmtree(child, ignore_errors=True)
         out_dir.mkdir(parents=True, exist_ok=True)
 
         def _progress_callback(step, progress):
             _preprocess_status["step"] = step
             _preprocess_status["progress"] = progress
 
-        tiles = project_las_multi_view_octree(
-            las_path,
-            output_dir=str(out_dir),
-            max_poses=None,
-            force_rebuild=True,
-            progress_callback=_progress_callback,
-        )
-        n_tiles = len(tiles)
-        total_pixels = sum(t.get("pixel_count", 0) for t in tiles)
-        _preprocess_status["step"] = (f"Octree 投影完成: {n_tiles} 张图, "
-                                      f"{total_pixels} 总像素")
+        if mode in {"build", "full"}:
+            from services.las_processor.projection_octree import _prepare_downsampled_las, build_octree
 
-        # Step 3: 提取各 tile 的 SALAD 特征（DINOv2 全局描述子）
-        _preprocess_status["step"] = "提取各图 SALAD 特征 (DINOv2)..."
-        _preprocess_status["progress"] = 75
-        
-        from services.localizer.salad_roma import _build_salad_index
-        
-        def _salad_progress_callback(processed, total, elapsed):
-            _preprocess_status["step"] = f"提取 SALAD 特征 {processed}/{total}, 已耗时 {elapsed:.1f}s"
-            _preprocess_status["progress"] = 75 + int(20 * processed / total)
-        
-        _build_salad_index(force_rebuild=True, progress_callback=_salad_progress_callback)
-        
-        _preprocess_status["progress"] = 95
-        _preprocess_status["step"] = f"SALAD 特征提取完成: {n_tiles} 张图"
+            _preprocess_status["step"] = "下采样 LAS..."
+            _preprocess_status["progress"] = 10
+            sampled_las_path = _prepare_downsampled_las(las_path, str(out_dir), force=True)
 
-        # Step 4: 完成
+            _preprocess_status["step"] = "构建 Octree 八叉树..."
+            _preprocess_status["progress"] = 20
+            build_octree(sampled_las_path, str(out_dir), force=True)
+
+            if mode == "build":
+                _preprocess_status["progress"] = 100
+                _preprocess_status["step"] = "下采样 + octree_build 完成"
+                _preprocess_status["finished_at"] = datetime.datetime.now(CST).isoformat()
+                return
+
+        if mode in {"render", "full"}:
+            from services.las_processor.projection_octree import project_las_multi_view_octree
+
+            _preprocess_status["step"] = "渲染投影图与坐标映射..."
+            _preprocess_status["progress"] = 30
+            tiles = project_las_multi_view_octree(
+                las_path,
+                output_dir=str(out_dir),
+                max_poses=None,
+                force_rebuild=False,
+                progress_callback=_progress_callback,
+            )
+            n_tiles = len(tiles)
+            total_pixels = sum(t.get("pixel_count", 0) for t in tiles)
+            _preprocess_status["step"] = (f"Octree 投影完成: {n_tiles} 张图, {total_pixels} 总像素")
+
+            _preprocess_status["step"] = "提取各图 SALAD 特征 (DINOv2)..."
+            _preprocess_status["progress"] = 75
+            from services.localizer.salad_roma import _build_salad_index
+
+            def _salad_progress_callback(processed, total, elapsed):
+                _preprocess_status["step"] = f"提取 SALAD 特征 {processed}/{total}, 已耗时 {elapsed:.1f}s"
+                _preprocess_status["progress"] = 75 + int(20 * processed / total)
+
+            _build_salad_index(force_rebuild=True, progress_callback=_salad_progress_callback)
+
+            _preprocess_status["progress"] = 95
+            _preprocess_status["step"] = f"SALAD 特征提取完成: {n_tiles} 张图"
+
         _preprocess_status["progress"] = 100
         _preprocess_status["step"] = "预处理完成"
         _preprocess_status["finished_at"] = datetime.datetime.now(CST).isoformat()
@@ -102,17 +109,33 @@ def _run_preprocess():
         _preprocess_status["running"] = False
 
 
-@router.post("/preprocess")
-def start_preprocess():
-    """启动 LAS 预处理（投影 + 特征提取）"""
+def _start_preprocess(mode: str):
     if _preprocess_status["running"]:
         return {"status": "running", "message": "预处理正在进行中"}
     try:
-        thread = threading.Thread(target=_run_preprocess, daemon=True)
+        thread = threading.Thread(target=_run_preprocess, args=(mode,), daemon=True)
         thread.start()
         return {"status": "started", "message": "预处理已启动"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+@router.post("/preprocess")
+def start_preprocess():
+    """启动完整 LAS 预处理（下采样 + octree_build + 渲染 + 特征提取）"""
+    return _start_preprocess("full")
+
+
+@router.post("/preprocess/build")
+def start_preprocess_build():
+    """启动下采样 + octree_build 流程"""
+    return _start_preprocess("build")
+
+
+@router.post("/preprocess/render")
+def start_preprocess_render():
+    """启动渲染 + 特征库流程"""
+    return _start_preprocess("render")
 
 
 @router.get("/preprocess/status")
@@ -124,4 +147,5 @@ def get_preprocess_status():
         "step": _preprocess_status["step"],
         "error": _preprocess_status["error"],
         "finished_at": _preprocess_status["finished_at"],
+        "mode": _preprocess_status["mode"],
     }

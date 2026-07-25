@@ -470,8 +470,20 @@ function drawTaskPoints(taskId) {
 
 // ====== LAS 预处理 ======
 
+async function startPreprocessBuild() {
+  await startPreprocessFlow('build', 'build-btn', '下采样 + octree_build');
+}
+
+async function startPreprocessRender() {
+  await startPreprocessFlow('render', 'render-btn', '渲染 + 特征库');
+}
+
 async function startPreprocess() {
-  var btn = document.getElementById('preprocess-btn');
+  await startPreprocessFlow('full', 'build-btn', '完整预处理');
+}
+
+async function startPreprocessFlow(mode, buttonId, buttonLabel) {
+  var btn = document.getElementById(buttonId);
   var statusEl = document.getElementById('preprocess-status');
   var progressWrap = document.getElementById('preprocess-progress-wrap');
   var progressBar = document.getElementById('preprocess-progress-bar');
@@ -480,12 +492,13 @@ async function startPreprocess() {
   btn.textContent = '处理中...';
   statusEl.classList.remove('hidden');
   statusEl.className = 'status loading';
-  statusEl.textContent = '启动预处理...';
+  statusEl.textContent = '启动' + buttonLabel + '...';
   progressWrap.classList.remove('hidden');
   progressBar.style.width = '0%';
 
   try {
-    var resp = await fetch(API + '/las/preprocess', { method: 'POST' });
+    var endpoint = mode === 'build' ? '/las/preprocess/build' : mode === 'render' ? '/las/preprocess/render' : '/las/preprocess';
+    var resp = await fetch(API + endpoint, { method: 'POST' });
     var text = await resp.text();
     var data = {};
     try {
@@ -500,17 +513,16 @@ async function startPreprocess() {
       throw new Error(data.error || '预处理启动失败');
     }
 
-    // 轮询进度
-    pollPreprocessStatus(btn, statusEl, progressWrap, progressBar);
+    pollPreprocessStatus(btn, statusEl, progressWrap, progressBar, buttonLabel);
   } catch(e) {
     btn.disabled = false;
-    btn.textContent = '开始预处理';
+    btn.textContent = buttonLabel;
     statusEl.textContent = '启动失败: ' + e.message;
     statusEl.className = 'status error';
   }
 }
 
-async function pollPreprocessStatus(btn, statusEl, progressWrap, progressBar) {
+async function pollPreprocessStatus(btn, statusEl, progressWrap, progressBar, buttonLabel) {
   try {
     var resp = await fetch(API + '/las/preprocess/status');
     var text = await resp.text();
@@ -527,18 +539,17 @@ async function pollPreprocessStatus(btn, statusEl, progressWrap, progressBar) {
 
     if (s.error) {
       btn.disabled = false;
-      btn.textContent = '开始预处理';
+      btn.textContent = buttonLabel;
       statusEl.textContent = '❌ ' + s.error;
       statusEl.className = 'status error';
       return;
     }
 
     if (s.running) {
-      setTimeout(function() { pollPreprocessStatus(btn, statusEl, progressWrap, progressBar); }, 1000);
+      setTimeout(function() { pollPreprocessStatus(btn, statusEl, progressWrap, progressBar, buttonLabel); }, 1000);
     } else {
-      // 完成
       btn.disabled = false;
-      btn.textContent = '重新预处理';
+      btn.textContent = buttonLabel;
       if (s.progress >= 100) {
         statusEl.textContent = '✅ ' + (s.step || '预处理完成');
         statusEl.className = 'status success';
@@ -546,7 +557,7 @@ async function pollPreprocessStatus(btn, statusEl, progressWrap, progressBar) {
     }
   } catch(e) {
     btn.disabled = false;
-    btn.textContent = '开始预处理';
+    btn.textContent = buttonLabel;
     statusEl.textContent = '查询状态失败: ' + e.message;
     statusEl.className = 'status error';
   }
