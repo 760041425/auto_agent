@@ -47,7 +47,7 @@ TILE_PX = 512
 VIEW_RANGE = 50.0
 SAMPLE_INTERVAL_M = 5.0
 GRID_INTERVAL_M = 10.0  # 网格位姿间隔（每张tile覆盖~77m，10m间距保证充分重叠）
-BLACK_PIXEL_THRESHOLD = 0.90
+BLACK_PIXEL_THRESHOLD = 0.50  # 超过 50% 黑色像素的图像被过滤，不生成文件
 PITCH_DEG = -15.0
 EULER_VIEW_DIRECTIONS = [
     ('yaw0', 0.0, PITCH_DEG, 0.0),
@@ -1054,7 +1054,7 @@ def project_las_multi_view_octree(
             print(f"[OCTREE] {vd} pose#{pi} 输出: color={color_size} bytes, depth={depth_size} bytes")
             print(f"[OCTREE]   colmap_line: {render_line}")
 
-            # 颜色图 → PNG，并做轻微的相机式明暗增强
+            # 颜色图 → 增强后检查是否为低质量图像（全黑/近乎全黑）
             with Image.open(color_ppm) as img:
                 color_img = np.array(img.convert("RGB"))
                 if os.path.exists(depth_raw):
@@ -1064,7 +1064,28 @@ def project_las_multi_view_octree(
                         color_img = _apply_camera_like_shading(color_img, depth=depth)
                 else:
                     color_img = _apply_camera_like_shading(color_img)
-                Image.fromarray(color_img).save(img_path, quality=95)
+
+            # 检查图像是否过暗（超过 BLACK_PIXEL_THRESHOLD 的像素为黑）
+            gray = np.mean(color_img, axis=2)
+            black_ratio = np.mean(gray < 16)
+            if black_ratio >= BLACK_PIXEL_THRESHOLD:
+                print(f"[OCTREE] 过滤低质量图像（{black_ratio:.0%} 黑色）: {fname}")
+                pixel_count = 0
+                generated.append({
+                    "image_path": "",
+                    "npy_path": "",
+                    "normal_path": "",
+                    "width": render_width,
+                    "height": render_height,
+                    "view": vd,
+                    "tile": fx_str,
+                    "pixel_count": 0,
+                    "accepted": False,
+                })
+                continue
+
+            # 通过质量检查，保存 PNG
+            Image.fromarray(color_img).save(img_path, quality=95)
 
             # 深度 → NPY（与 slam-map 格式一致：(h, w, 3) float32，无效像素为 [0,0,0]）
             if os.path.exists(depth_raw):
@@ -1101,16 +1122,6 @@ def project_las_multi_view_octree(
         elapsed = time.time() - t0
         print(f"[OCTREE] {vd} pose#{pi}: {elapsed:.1f}s, {pixel_count}像素")
 
-        if _is_black_or_nearly_black(img_path):
-            pixel_count = 0
-            if os.path.exists(coord_path):
-                os.remove(coord_path)
-            if os.path.exists(img_path):
-                os.remove(img_path)
-            img_path = ""
-            coord_path = ""
-            print(f"[OCTREE] 过滤低质量图像 {fname}")
-
         generated.append({
             "image_path": img_path,
             "npy_path": npy_path,
@@ -1120,7 +1131,7 @@ def project_las_multi_view_octree(
             "view": vd,
             "tile": fx_str,
             "pixel_count": pixel_count,
-            "accepted": pixel_count > 0 and not _is_black_or_nearly_black(img_path),
+            "accepted": pixel_count > 0,
         })
     
     # 4. 保存 tile_index.json
