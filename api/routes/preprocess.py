@@ -114,6 +114,14 @@ def _run_preprocess(mode: str = "full"):
 
             _build_salad_index(force_rebuild=True, progress_callback=_salad_progress_callback)
 
+            _preprocess_status["progress"] = 92
+            _preprocess_status["step"] = "训练 ACE 场景坐标回归模型..."
+            try:
+                from services.localizer.ace_trainer import train_ace_model
+                train_ace_model(epochs=10)  # 快速训练 10 个 epoch
+            except Exception as ace_err:
+                print(f"[ACE] 训练失败（非致命）: {ace_err}")
+
             _preprocess_status["progress"] = 95
             _preprocess_status["step"] = f"SALAD 特征提取完成: {n_tiles} 张图"
 
