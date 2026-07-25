@@ -93,6 +93,17 @@ def _run_preprocess(mode: str = "full"):
                 return
 
         if mode in {"feature", "full"}:
+            # feature 模式下 tiles 已存在，从 tile_index 读取数量
+            if mode == "feature":
+                try:
+                    with open("projections/tile_index.json") as _f:
+                        n_tiles = len(json.load(_f))
+                except Exception:
+                    n_tiles = 0
+                    _preprocess_status["error"] = "tile_index.json 不存在，请先渲染投影图"
+                    _preprocess_status["running"] = False
+                    return
+
             _preprocess_status["step"] = "提取各图 SALAD 特征 (DINOv2)..."
             _preprocess_status["progress"] = 75
             from services.localizer.salad_roma import _build_salad_index
