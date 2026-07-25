@@ -231,37 +231,17 @@ def _translate_las_coords(las_path: str | Path, offset_xyz: tuple[float, float, 
         print(f"[OCTREE] ⚠️ PDAL 不可用，跳过坐标平移")
         return
     
-    tmp = las_path.with_suffix(las_path.suffix + ".translated")
+    tmp = las_path.with_stem(las_path.stem + "_translated")
     
-    # PDAL pipeline: 读取 → 平移 → 写回
-    pipeline = {
-        "pipeline": [
-            str(las_path),
-            {
-                "type": "filters.transformation",
-                "matrix": [
-                    [1, 0, 0, -offset_xyz[0]],
-                    [0, 1, 0, -offset_xyz[1]],
-                    [0, 0, 1, -offset_xyz[2]],
-                    [0, 0, 0, 1],
-                ],
-            },
-            {
-                "type": "writers.las",
-                "filename": str(tmp),
-                "dataformat_id": 3,
-            },
-        ]
-    }
-    
-    import json as _json
-    pipeline_path = las_path.with_suffix(las_path.suffix + ".pipeline.json")
-    with open(pipeline_path, "w") as f:
-        _json.dump(pipeline, f)
-    
-    result = subprocess.run([pdal_bin, "pipeline", str(pipeline_path)],
-                            capture_output=True, text=True, timeout=300)
-    pipeline_path.unlink()
+    # PDAL translate + filters.transformation 做坐标平移
+    cmd = [
+        pdal_bin, "translate",
+        str(las_path), str(tmp),
+        "filters.transformation",
+        f"--filters.transformation.matrix=1 0 0 {-offset_xyz[0]} 0 1 0 {-offset_xyz[1]} 0 0 1 {-offset_xyz[2]} 0 0 0 1",
+        "--writers.las.dataformat_id=3",
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     
     if result.returncode == 0 and tmp.exists():
         tmp.replace(las_path)
