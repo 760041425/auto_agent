@@ -1030,12 +1030,13 @@ def localize_with_salad_roma(
             if success_ace:
                 from scipy.spatial.transform import Rotation as R
                 q = R.from_matrix(cv2.Rodrigues(rvec)[0]).as_quat()
+                t = tvec.flatten()
                 return {
                     "success": True,
                     "tag": tag,
                     "pose": {
                         "quaternion": [float(q[3]), float(q[0]), float(q[1]), float(q[2])],
-                        "translation": [float(tvec[0]), float(tvec[1]), float(tvec[2])],
+                        "translation": [float(t[0]), float(t[1]), float(t[2])],
                     },
                     "inliers": len(inliers) if inliers is not None else 0,
                 }
