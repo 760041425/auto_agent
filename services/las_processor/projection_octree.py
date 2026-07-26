@@ -993,7 +993,7 @@ def project_las_multi_view_octree(
                     sample_interval_m=GRID_INTERVAL_M,
                     max_poses=None,
                     grid_interval_m=GRID_INTERVAL_M,
-                    use_grid_sampling=False,
+            use_grid_sampling=True,
                 )
             else:
                 raise RuntimeError("无可用位姿")
