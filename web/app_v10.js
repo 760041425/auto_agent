@@ -578,7 +578,7 @@ async function pollPreprocessStatus(btn, statusEl, progressWrap, progressBar, bu
 // ====== 视觉定位 ======
 
 var localizeSelectedId = null;
-var localizeAlgorithmNames = { 'flann': 'SIFT + FLANN kd-tree', 'bf': 'SIFT + BruteForce', 'flann_lowes': 'SIFT + FLANN严格(0.6)', 'bf_cross': 'SIFT + BF交叉验证', 'knn_rank': 'SIFT + KNN Top-50', 'lightglue': 'SIFT + LightGlue', 'loftr': 'SIFT + LoFTR', 'salad_roma': 'SALAD+RoMa (v3)' };
+var localizeAlgorithmNames = { 'flann': 'SIFT + FLANN kd-tree', 'bf': 'SIFT + BruteForce', 'flann_lowes': 'SIFT + FLANN严格(0.6)', 'bf_cross': 'SIFT + BF交叉验证', 'knn_rank': 'SIFT + KNN Top-50', 'lightglue': 'SIFT + LightGlue', 'loftr': 'SIFT + LoFTR', 'salad_roma': 'SALAD+RoMa', 'salad_lightglue': 'SALAD+LightGlue', 'ace': 'ACE 场景坐标回归' };
 
 // 定位页面上传
 document.addEventListener('DOMContentLoaded', function() {
@@ -667,7 +667,7 @@ async function loadLocalizeImages() {
       console.log('[DEBUG] results count:', results.length);
       var resultsEl = document.getElementById('localize-results');
       var html = '<div style="margin-top:1rem"><h4>📋 上次定位结果 (task #' + latest.id + ')</h4></div>';
-      var matchNames = { 'flann': 'FLANN kd-tree', 'bf': 'BruteForce', 'flann_lowes': 'FLANN严格(0.6)', 'bf_cross': 'BF交叉验证', 'knn_rank': 'KNN Top-50', 'lightglue': 'LightGlue (深度学习)', 'loftr': 'LoFTR (深度学习)', 'salad_roma': 'SALAD+RoMa (v3)' };
+      var matchNames = { 'flann': 'FLANN kd-tree', 'bf': 'BruteForce', 'flann_lowes': 'FLANN严格(0.6)', 'bf_cross': 'BF交叉验证', 'knn_rank': 'KNN Top-50', 'lightglue': 'LightGlue (深度学习)', 'loftr': 'LoFTR (深度学习)', 'salad_roma': 'SALAD+RoMa', 'salad_lightglue': 'SALAD+LightGlue', 'ace': 'ACE 场景坐标回归' };
       results.forEach(function(r, idx) {
         var compImg = _fixImagePath(r.comparison_image);
         html += '<div class="localize-card" style="background:#fff;border-radius:8px;padding:1rem;margin-top:0.8rem;box-shadow:0 1px 3px rgba(0,0,0,0.1)">';

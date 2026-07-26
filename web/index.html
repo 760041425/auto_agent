@@ -91,14 +91,10 @@
       </div>
       <fieldset id="localize-algorithms" style="margin:0 0 0.8rem;padding:0.65rem;border:1px solid #ddd;border-radius:6px">
         <legend style="font-size:0.85rem;color:#555">定位算法（可单选或多选）</legend>
-        <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma" checked> SALAD+RoMa (v3，默认)</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma" checked> SALAD+RoMa</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="salad_lightglue"> SALAD+LightGlue</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="ace"> ACE 场景坐标回归</label>
         <label style="margin-right:0.8rem"><input type="checkbox" value="flann"> SIFT + FLANN</label>
-        <label style="margin-right:0.8rem"><input type="checkbox" value="bf"> SIFT + BF</label>
-        <label style="margin-right:0.8rem"><input type="checkbox" value="flann_lowes"> FLANN 严格</label>
-        <label style="margin-right:0.8rem"><input type="checkbox" value="bf_cross"> BF 交叉验证</label>
-        <label style="margin-right:0.8rem"><input type="checkbox" value="knn_rank"> KNN Rank</label>
-        <label style="margin-right:0.8rem"><input type="checkbox" value="lightglue"> LightGlue</label>
-        <label><input type="checkbox" value="loftr"> LoFTR</label>
         <label style="display:block;margin-top:0.5rem;font-size:0.82rem;color:#666"><input id="localize-debug" type="checkbox"> 生成候选轮次调试图（较慢）</label>
       </fieldset>
       <div id="localize-status" class="status hidden"></div>
