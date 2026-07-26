@@ -1031,6 +1031,14 @@ def localize_with_salad_roma(
                 from scipy.spatial.transform import Rotation as R
                 q = R.from_matrix(cv2.Rodrigues(rvec)[0]).as_quat()
                 t = tvec.flatten()
+                
+                # 生成对比图（在查询图上叠加位姿文本）
+                ace_out = out / f"{tag}_ace_result.jpg"
+                vis = query_img.copy()
+                pos_text = f"ACE pos: ({t[0]:.1f}, {t[1]:.1f}, {t[2]:.1f})"
+                cv2.putText(vis, pos_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                cv2.imwrite(str(ace_out), vis)
+                
                 return {
                     "success": True,
                     "tag": tag,
@@ -1039,6 +1047,7 @@ def localize_with_salad_roma(
                         "translation": [float(t[0]), float(t[1]), float(t[2])],
                     },
                     "inliers": len(inliers) if inliers is not None else 0,
+                    "comparison_image": str(ace_out),
                 }
             return {"success": False, "error": "ACE 定位失败", "tag": tag}
         except Exception as e:
