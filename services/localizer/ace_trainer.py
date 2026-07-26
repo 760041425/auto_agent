@@ -12,6 +12,7 @@ ACE (Accelerated Coordinate Encoding) 场景坐标回归
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -22,6 +23,10 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 
+# 确保 ace 模块可导入（当从 api/routes/ 调用时）
+_ace_dir = Path(__file__).parent / "ace"
+if str(_ace_dir.parent) not in sys.path:
+    sys.path.insert(0, str(_ace_dir.parent))
 from ace.ace_network import Encoder, Head
 
 
