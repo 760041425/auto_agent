@@ -147,7 +147,9 @@ def _run_preprocess(mode: str = "full"):
             _preprocess_status["progress"] = 100
 
         _preprocess_status["progress"] = 100
-        _preprocess_status["step"] = "预处理完成"
+        _mode_names = {"build": "下采样+八叉树", "render": "渲染投影图",
+                       "feature": "SALAD特征", "ace": "ACE模型", "full": "完整预处理"}
+        _preprocess_status["step"] = f"✅ {_mode_names.get(mode, mode)} 完成"
         _preprocess_status["finished_at"] = datetime.datetime.now(CST).isoformat()
 
     except Exception as e:
