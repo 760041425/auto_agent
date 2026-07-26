@@ -798,15 +798,17 @@ def localize_image(
     - cdist 向量化像素搜索
     - PnP 结果缓存（相同图像不同 matcher 共享）
     """
-    # ── SALAD + RoMa 分支 ──
-    if match_method == "salad_roma":
+    # ── SALAD 系列算法 ──
+    if match_method in ("salad_roma", "salad_lightglue", "ace"):
         from services.localizer.salad_roma import localize_with_salad_roma
+        algo = {"salad_roma": "roma", "salad_lightglue": "lightglue", "ace": "ace"}.get(match_method, "lightglue")
         return localize_with_salad_roma(
             query_image_path,
             output_dir=output_dir,
             max_iterations=max_iterations,
             top_k_retrieval=3,
             debug_visualizations=debug_visualizations,
+            algo=algo,
         )
 
     tag = f"{feature_method}_{match_method}"

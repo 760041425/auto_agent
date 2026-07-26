@@ -21,14 +21,10 @@ CST = ZoneInfo("Asia/Shanghai")
 router = APIRouter(prefix="/api/localize", tags=["localize"])
 
 ALGORITHMS = {
-    "salad_roma": {"feature": "dino", "matcher": "salad_roma", "label": "SALAD+RoMa (v3)"},
+    "salad_roma": {"feature": "dino", "matcher": "salad_roma", "label": "SALAD+RoMa"},
+    "salad_lightglue": {"feature": "dino", "matcher": "salad_lightglue", "label": "SALAD+LightGlue"},
+    "ace": {"feature": "ace", "matcher": "ace", "label": "ACE 场景坐标回归"},
     "flann": {"feature": "sift", "matcher": "flann", "label": "SIFT + FLANN"},
-    "bf": {"feature": "sift", "matcher": "bf", "label": "SIFT + BruteForce"},
-    "flann_lowes": {"feature": "sift", "matcher": "flann_lowes", "label": "SIFT + FLANN (严格)"},
-    "bf_cross": {"feature": "sift", "matcher": "bf_cross", "label": "SIFT + BF 交叉验证"},
-    "knn_rank": {"feature": "sift", "matcher": "knn_rank", "label": "SIFT + KNN Rank"},
-    "lightglue": {"feature": "sift", "matcher": "lightglue", "label": "SIFT + LightGlue"},
-    "loftr": {"feature": "sift", "matcher": "loftr", "label": "SIFT + LoFTR"},
 }
 _queued_task_ids: set[int] = set()
 _queue_lock = threading.Lock()

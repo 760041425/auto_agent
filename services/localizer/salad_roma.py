@@ -694,8 +694,18 @@ def _match_tile_with_lightglue(q_img: np.ndarray, tile_info: dict) -> tuple:
 
 
 def _match_tile_with_roma(q_img: np.ndarray, tile_info: dict) -> tuple:
-    """向前兼容: 使用 LightGlue 替代 RoMa"""
-    return _match_tile_with_lightglue(q_img, tile_info)
+    """用 RoMa 密集匹配查询图和 tile 投影图。"""
+    tile_img_path = tile_info["image_path"]
+    if not os.path.exists(tile_img_path):
+        return np.array([]), np.array([]), np.array([])
+    tile_img = cv2.imread(tile_img_path)
+    if tile_img is None:
+        return np.array([]), np.array([]), np.array([])
+    log(f"  RoMa 匹配: 查询图 ({q_img.shape[1]}x{q_img.shape[0]}) vs tile ({tile_img.shape[1]}x{tile_img.shape[0]})")
+    t0 = time.time()
+    kpts_q, kpts_tile, cert = _roma_match(q_img, tile_img)
+    log(f"  RoMa 匹配完成: {len(kpts_q)} 点, {time.time()-t0:.1f}s, 平均置信度={cert.mean():.3f}" if len(kpts_q) > 0 else f"  RoMa 匹配: 0 点")
+    return kpts_q, kpts_tile, cert
 
 
 # ============================================================
@@ -964,22 +974,22 @@ def localize_with_salad_roma(
     max_iterations: int = 3,
     top_k_retrieval: int = 3,
     debug_visualizations: bool = False,
+    algo: str = "lightglue",
 ) -> dict:
     """
-    SALAD 全局检索 → LightGlue 稀疏匹配 → PnP → 多轮迭代 视觉定位。
+    SALAD 全局检索 → 匹配 → PnP 视觉定位。
     
-    流程:
-     1. SALAD (DINOv2) 全局检索: 从 150 张投影图中找到 top-K 最相似的
-     2. LightGlue 稀疏匹配: 查询图像 vs 候选 tile，获取对应点
-     3. 3D-2D 匹配: 通过 tile 的像素→3D 映射构建
-     4. PnP 位姿估计
-     5. 多轮迭代: 每轮用 PnP 结果重投影点云 → LightGlue 匹配原图vs重投影图 → PnP 优化
+    支持算法:
+      - "roma": SALAD + RoMa 密集匹配
+      - "lightglue": SALAD + LightGlue 稀疏匹配
+      - "ace": ACE 场景坐标回归 + PnP
     """
     from services.localizer import load_colmap, _POINT_INDEX, get_point_cloud_arrays
     
-    tag = "salad_roma"  # 固定 tag 用于文件命名，不依赖外部 feature/match_method
+    match_name = {"roma": "RoMa", "lightglue": "LightGlue", "ace": "ACE"}.get(algo, "LightGlue")
+    tag = f"salad_{algo}"
     log(f"{'='*60}")
-    log(f"🚀 SALAD+LightGlue 定位: {os.path.basename(query_image_path)}")
+    log(f"🚀 SALAD+{match_name} 定位: {os.path.basename(query_image_path)}")
     
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -995,6 +1005,43 @@ def localize_with_salad_roma(
     query_img = cv2.imread(query_image_path)
     if query_img is None:
         return {"success": False, "error": "Cannot read query image", "tag": tag}
+    
+    # ACE 模式：直接预测 3D 坐标 → PnP，无需匹配
+    if algo == "ace":
+        log(f"  🧠 ACE 场景坐标回归模式")
+        from services.localizer.ace_trainer import ACERegressor, ace_localize as ace_loc
+        
+        model_path = Path("projections/ace_model.pth")
+        if not model_path.exists():
+            return {"success": False, "error": "ACE 模型未训练", "tag": tag}
+        
+        try:
+            sd = torch.load(model_path, map_location=DEVICE, weights_only=True)
+            model = ACERegressor(mean=torch.zeros(3), num_head_blocks=1, use_homogeneous=False)
+            model.load_state_dict(sd, strict=False)
+            model.eval().to(DEVICE)
+            
+            h_orig, w_orig = query_img.shape[:2]
+            fov_deg = 75
+            f = max(w_orig, h_orig) / (2 * np.tan(np.deg2rad(fov_deg / 2)))
+            K = np.array([[f, 0, w_orig/2], [0, f, h_orig/2], [0, 0, 1]])
+            
+            success_ace, rvec, tvec, inliers = ace_loc(model, query_img, K, None)
+            if success_ace:
+                from scipy.spatial.transform import Rotation as R
+                q = R.from_matrix(cv2.Rodrigues(rvec)[0]).as_quat()
+                return {
+                    "success": True,
+                    "tag": tag,
+                    "pose": {
+                        "quaternion": [float(q[3]), float(q[0]), float(q[1]), float(q[2])],
+                        "translation": [float(tvec[0]), float(tvec[1]), float(tvec[2])],
+                    },
+                    "inliers": len(inliers) if inliers is not None else 0,
+                }
+            return {"success": False, "error": "ACE 定位失败", "tag": tag}
+        except Exception as e:
+            return {"success": False, "error": f"ACE 错误: {e}", "tag": tag}
     
     q_h_orig, q_w_orig = query_img.shape[:2]
     # 统一缩放到 512x512 正方形
@@ -1057,8 +1104,9 @@ def localize_with_salad_roma(
         
         coord_map = np.load(npy_path)
         
-        # LightGlue 匹配
-        kpts_q, kpts_tile, cert = _match_tile_with_lightglue(q_small, tile)
+        # 根据算法选择匹配器
+        _matcher = {"roma": _match_tile_with_roma, "lightglue": _match_tile_with_lightglue}.get(algo, _match_tile_with_lightglue)
+        kpts_q, kpts_tile, cert = _matcher(q_small, tile)
         if len(kpts_q) < 10:
             log(f"    匹配点太少, 跳过")
             continue
