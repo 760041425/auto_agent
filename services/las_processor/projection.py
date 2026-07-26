@@ -214,29 +214,6 @@ def _apply_camera_like_shading(image, depth=None):
     # 轻微高斯模糊去除点云噪点
     img_float = cv2.GaussianBlur(img_float, (3, 3), 0)
 
-    # 提升对比度和亮度（关键！）
-    # octree_render 用 intensity 着色（均值 ~30），需要大幅提亮
-    # 背景色已经是纯黑 [0,0,0]，提亮后暗区（背景）接近 80，纹理区更亮
-    img_float = cv2.convertScaleAbs(img_float, alpha=1.3, beta=80)
-    # 自适应直方图均衡化（CLAHE），增强局部对比度
-    lab = cv2.cvtColor(img_float, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    l = clahe.apply(l)
-    lab = cv2.merge([l, a, b])
-    img_float = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-    
-    # 将提亮后仍偏暗的像素（<40，即背景区域）拉回纯黑，确保无点区域全黑
-    gray = cv2.cvtColor(img_float, cv2.COLOR_BGR2GRAY)
-    dark_mask = gray < 40
-    img_float[dark_mask] = 0
-
-    # 饱和度增强（让点云颜色更鲜明）
-    if img_float.shape[2] >= 3:
-        hsv = cv2.cvtColor(img_float, cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[..., 1] = np.clip(hsv[..., 1] * 1.2, 0, 255)
-        img_float = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-
     return img_float
 
 

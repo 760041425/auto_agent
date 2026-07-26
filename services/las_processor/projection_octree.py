@@ -681,6 +681,55 @@ def _compute_normal_map(world_array: np.ndarray) -> np.ndarray:
     return n.astype(np.float32)
 
 
+# ── 点云密度分析（基于下采样 LAS） ──
+_DENSITY_GRID = None
+
+def _build_density_grid(las_path: str, grid_size: float = 5.0) -> tuple:
+    """
+    基于下采样 LAS 建立 2D 密度网格，用于跳过低密度区域。
+    
+    返回: (x_edges, y_edges, density_map) 或 None
+    """
+    global _DENSITY_GRID
+    if _DENSITY_GRID is not None:
+        return _DENSITY_GRID
+    
+    try:
+        in_las = laspy.read(las_path)
+        xs = in_las.x
+        ys = in_las.y
+    except Exception as e:
+        print(f"[OCTREE] 密度分析失败: {e}")
+        return None
+    
+    if len(xs) < 100:
+        return None
+    
+    x_min, x_max = float(xs.min()), float(xs.max())
+    y_min, y_max = float(ys.min()), float(ys.max())
+    
+    x_bins = max(1, int((x_max - x_min) / grid_size))
+    y_bins = max(1, int((y_max - y_min) / grid_size))
+    density, x_edges, y_edges = np.histogram2d(xs, ys, bins=(x_bins, y_bins))
+    
+    dense_pct = (density > 500).mean() * 100
+    print(f"[OCTREE] 密度网格: {x_bins}x{y_bins}, {grid_size}m, 稠密区={dense_pct:.0f}%")
+    _DENSITY_GRID = (x_edges, y_edges, density)
+    return _DENSITY_GRID
+
+
+def _is_dense_enough(x: float, y: float, density_grid: tuple, min_points: int = 500) -> bool:
+    """检查 (x,y) 所在网格是否有足够点云密度"""
+    if density_grid is None:
+        return True
+    x_edges, y_edges, density = density_grid
+    ix = np.searchsorted(x_edges, x) - 1
+    iy = np.searchsorted(y_edges, y) - 1
+    if 0 <= ix < density.shape[0] and 0 <= iy < density.shape[1]:
+        return density[ix, iy] >= min_points
+    return True
+
+
 def prepare_octree_render_plan(
     poses: list[dict],
     output_dir: str = "projections",
@@ -890,6 +939,16 @@ def project_las_multi_view_octree(
         octree_dataset = str(octree_dir)
         print(f"[OCTREE] 使用已有八叉树: {octree_dataset}")
     
+    # 建立点云密度网格（用于跳过无点区域）
+    try:
+        down_las = str(Path(output_dir) / "downsampled_las" / f"{Path(las_path).stem}_downsampled.las")
+        if os.path.exists(down_las):
+            density_grid = _build_density_grid(down_las, grid_size=5.0)
+        else:
+            density_grid = None
+    except Exception:
+        density_grid = None
+    
     if progress_callback:
         progress_callback("加载位姿数据...", 20)
     
@@ -1041,6 +1100,18 @@ def project_las_multi_view_octree(
                 "tile": fx_str,
                 "pixel_count": 0,
                 "accepted": False,
+            })
+            continue
+        
+        # 密度过滤：跳过低密度区域
+        if density_grid is not None and not _is_dense_enough(pose['x'], pose['y'], density_grid):
+            print(f"[OCTREE] 跳过 {vd} pose#{pi}: 点云密度不足")
+            pixel_count = 0
+            generated.append({
+                "image_path": "", "npy_path": "", "normal_path": "",
+                "width": render_width, "height": render_height,
+                "view": vd, "tile": fx_str,
+                "pixel_count": 0, "accepted": False,
             })
             continue
         
