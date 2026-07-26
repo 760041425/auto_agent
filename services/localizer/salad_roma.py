@@ -581,17 +581,22 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
                 if len(kpts1_3d) < 2 or len(kpts2_3d) < 2:
                     raise ValueError("DISK 特征点太少")
 
-                # 整理成 LightGlue 需要的格式
+                # 整理成 LightGlue 需要的格式（keypoints 需归一化到 [-1, 1]）
+                kpts0_norm = kpts1_3d[None, :, :2].clone()
+                kpts1_norm = kpts2_3d[None, :, :2].clone()
+                kpts0_norm[..., 0] = kpts0_norm[..., 0] / (W1 / 2) - 1
+                kpts0_norm[..., 1] = kpts0_norm[..., 1] / (H1 / 2) - 1
+                kpts1_norm[..., 0] = kpts1_norm[..., 0] / (W2 / 2) - 1
+                kpts1_norm[..., 1] = kpts1_norm[..., 1] / (H2 / 2) - 1
+                
                 data = {
                     "image0": {
-                        "keypoints": kpts1_3d[None, :, :2],  # [1, N, 2]
+                        "keypoints": kpts0_norm,  # [1, N, 2] in [-1, 1]
                         "descriptors": desc1[None],  # [1, N, 128]
-                        "image_size": torch.tensor([[H1, W1]], device=DEVICE),
                     },
                     "image1": {
-                        "keypoints": kpts2_3d[None, :, :2],
+                        "keypoints": kpts1_norm,
                         "descriptors": desc2[None],
-                        "image_size": torch.tensor([[H2, W2]], device=DEVICE),
                     },
                 }
 
@@ -599,6 +604,7 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
                 matches = out.get("matches0", None)
                 if matches is not None:
                     match_mask = matches > -1
+                    # 还原到像素坐标
                     kpts0_np = kpts1_3d[..., :2][match_mask[0]].cpu().numpy()
                     kpts1_np = kpts2_3d[..., :2][matches[0][match_mask[0]]].cpu().numpy()
                     confidence = out.get("matching_scores0", None)
