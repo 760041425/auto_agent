@@ -1010,7 +1010,7 @@ def project_las_multi_view_octree(
             sample_interval_m=SAMPLE_INTERVAL_M,
             max_poses=max_poses,
             grid_interval_m=GRID_INTERVAL_M,
-            use_grid_sampling=False,
+            use_grid_sampling=True,
         )
     
     # 读取位姿文件获取完整位姿列表（包含网格位姿）
