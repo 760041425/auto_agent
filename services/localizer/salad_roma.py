@@ -690,7 +690,7 @@ def _match_tile_with_roma(q_img: np.ndarray, tile_info: dict) -> tuple:
 #  3D-2D 匹配构建 & PnP
 # ============================================================
 
-def _build_3d_2d_matches(kpts_q, kpts_tile, cert, coord_map, min_cert=0.05):
+def _build_3d_2d_matches(kpts_q, kpts_tile, cert, coord_map, min_cert=0.001):
     """
     通过 tile 的坐标映射（像素→3D），将 LightGlue 匹配转换为 3D-2D 匹配。
     
@@ -1047,8 +1047,8 @@ def localize_with_salad_roma(
             log(f"    匹配点太少, 跳过")
             continue
         
-        # 构建 3D-2D 匹配
-        obj_pts, img_pts = _build_3d_2d_matches(kpts_q, kpts_tile, cert, coord_map, min_cert=0.03)
+        # 构建 3D-2D 匹配（LightGlue 置信度偏低，用较低阈值）
+        obj_pts, img_pts = _build_3d_2d_matches(kpts_q, kpts_tile, cert, coord_map, min_cert=0.001)
         log(f"    3D-2D 匹配: {len(obj_pts)} 对")
         
         if len(obj_pts) < 4:
@@ -1164,7 +1164,7 @@ def localize_with_salad_roma(
                 all_pts, all_col, rvec, tvec, camera_matrix, q_w, q_h
             )
 
-            obj_pts2, img_pts2 = _build_3d_2d_matches(kpts_q2, kpts_proj, cert2, iter_coord, min_cert=0.03)
+            obj_pts2, img_pts2 = _build_3d_2d_matches(kpts_q2, kpts_proj, cert2, iter_coord)
             log(f"    3D-2D: {len(obj_pts2)} 对")
 
             if len(obj_pts2) < 4:
@@ -1360,7 +1360,7 @@ def refine_pose_with_roma(
         return {"success": False, "error": f"LightGlue matches too few: {len(kpts_q)}"}
     
     # 构建 3D-2D 匹配
-    obj_pts, img_pts = _build_3d_2d_matches(kpts_q, kpts_proj, cert, ref_coord, min_cert=0.03)
+    obj_pts, img_pts = _build_3d_2d_matches(kpts_q, kpts_proj, cert, ref_coord)
     log(f"  [REFINE] 3D-2D: {len(obj_pts)} 对")
     
     if len(obj_pts) < 4:
