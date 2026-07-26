@@ -214,6 +214,9 @@ def _apply_camera_like_shading(image, depth=None):
     # 轻微高斯模糊去除点云噪点
     img_float = cv2.GaussianBlur(img_float, (3, 3), 0)
 
+    # 转回 uint8（contrast/brightness 保持原样）
+    img_float = np.clip(img_float, 0, 255).astype(np.uint8)
+
     return img_float
 
 
