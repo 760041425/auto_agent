@@ -215,10 +215,9 @@ def _apply_camera_like_shading(image, depth=None):
     img_float = cv2.GaussianBlur(img_float, (3, 3), 0)
 
     # 提升对比度和亮度（关键！）
-    # 由于 octree_render 使用 intensity 着色（均值约 30/255），
-    # 需要较大 beta 把暗图拉到可视范围；alpha 避免过曝。
-    # 同时做直方图拉伸到全动态范围，确保对比度充足。
-    img_float = cv2.convertScaleAbs(img_float, alpha=1.1, beta=60)
+    # octree_render 用 intensity 着色（均值 ~30），需要大幅提亮
+    # beta 越大越亮，但会损失对比度；CLAHE 补偿局部对比度
+    img_float = cv2.convertScaleAbs(img_float, alpha=1.3, beta=80)
     # 自适应直方图均衡化（CLAHE），增强局部对比度
     lab = cv2.cvtColor(img_float, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
