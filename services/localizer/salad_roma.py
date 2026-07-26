@@ -767,7 +767,7 @@ def _solve_pnp(object_pts, image_pts, camera_matrix):
     success, rvec, tvec, inliers = cv2.solvePnPRansac(
         object_pts, image_pts, camera_matrix, dist_coeffs,
         iterationsCount=2000, reprojectionError=8.0, confidence=0.85,
-        flags=cv2.SOLVEPNP_EPNP,
+        flags=cv2.SOLVEPNP_ITERATIVE,
     )
     
     if not success:
