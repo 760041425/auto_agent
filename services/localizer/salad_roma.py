@@ -596,10 +596,12 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
                     "image0": {
                         "keypoints": kpts0_norm,  # [1, N, 2] in [-1, 1]
                         "descriptors": desc1[None],  # [1, N, 128]
+                        "image_size": torch.tensor([[W1, H1]], device=DEVICE),
                     },
                     "image1": {
                         "keypoints": kpts1_norm,
                         "descriptors": desc2[None],
+                        "image_size": torch.tensor([[W2, H2]], device=DEVICE),
                     },
                 }
 
