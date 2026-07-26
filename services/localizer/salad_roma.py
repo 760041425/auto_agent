@@ -662,7 +662,7 @@ def _roma_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000) -> t
 
 
 def _match_tile_with_lightglue(q_img: np.ndarray, tile_info: dict) -> tuple:
-    """用 LightGlue 匹配查询图和 tile 投影图。"""
+    """用 LightGlue 匹配查询图和 tile 投影图（匹配前先对两张图做 CLAHE 增强）。"""
     tile_img_path = tile_info["image_path"]
     if not os.path.exists(tile_img_path):
         return np.array([]), np.array([]), np.array([])
@@ -671,10 +671,22 @@ def _match_tile_with_lightglue(q_img: np.ndarray, tile_info: dict) -> tuple:
     if tile_img is None:
         return np.array([]), np.array([]), np.array([])
     
+    # CLAHE 增强两张图（提升暗区纹理，不改变整体亮度）
+    def _clahe(img):
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        lab = cv2.merge([l, a, b])
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    
+    q_clahe = _clahe(q_img)
+    tile_clahe = _clahe(tile_img)
+    
     log(f"  LightGlue 匹配: 查询图 ({q_img.shape[1]}x{q_img.shape[0]}) vs tile ({tile_img.shape[1]}x{tile_img.shape[0]})")
     t0 = time.time()
     
-    kpts_q, kpts_tile, cert = _lightglue_match(q_img, tile_img)
+    kpts_q, kpts_tile, cert = _lightglue_match(q_clahe, tile_clahe)
     
     log(f"  LightGlue 匹配完成: {len(kpts_q)} 点, {time.time()-t0:.1f}s, 平均置信度={cert.mean():.3f}" if len(kpts_q) > 0 else f"  LightGlue 匹配: 0 点")
     
