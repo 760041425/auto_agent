@@ -1046,13 +1046,12 @@ def localize_with_salad_roma(
         
         # 加载 coord_map（NPY 格式）
         npy_path = tile.get("npy_path", "")
-        if not npy_path or not os.path.exists(npy_path):
+        if not npy_path or not os.path.exists(npy_path) or os.path.isdir(npy_path):
             npy_path = f"projections/tiles/view_{tile['view']}_{tile['tile']}_{name_key.split('_')[-1]}.npy"
-        if not os.path.exists(npy_path):
+        if not os.path.exists(npy_path) or os.path.isdir(npy_path):
             alt = Path("projections/tiles") / Path(npy_path).name
-            if alt.exists():
-                npy_path = str(alt)
-        if not os.path.exists(npy_path):
+            npy_path = str(alt)
+        if not os.path.exists(npy_path) or os.path.isdir(npy_path):
             log(f"    坐标映射不存在: {npy_path}")
             continue
         
