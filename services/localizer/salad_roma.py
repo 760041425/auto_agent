@@ -1029,25 +1029,59 @@ def localize_with_salad_roma(
             success_ace, rvec, tvec, inliers = ace_loc(model, query_img, K, None)
             if success_ace:
                 from scipy.spatial.transform import Rotation as R
-                q = R.from_matrix(cv2.Rodrigues(rvec)[0]).as_quat()
+                q_ace = R.from_matrix(cv2.Rodrigues(rvec)[0]).as_quat()
                 t = tvec.flatten()
                 
-                # 生成对比图（在查询图上叠加位姿文本）
-                ace_out = out / f"{tag}_ace_result.jpg"
-                vis = query_img.copy()
-                pos_text = f"ACE pos: ({t[0]:.1f}, {t[1]:.1f}, {t[2]:.1f})"
-                cv2.putText(vis, pos_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                cv2.imwrite(str(ace_out), vis)
+                # 用 ACE 位姿渲染投影图做对比
+                ace_proj = out / f"{tag}_ace_proj.png"
+                ace_comp = out / f"{tag}_ace_comparison.jpg"
+                try:
+                    from services.las_processor.projection_octree import (
+                        OCTREE_RENDER_BIN, OCTREE_CONFIG, OCTREE_SOURCE_DIR,
+                        _build_colmap_line
+                    )
+                    import subprocess as _sp
+                    # 构建 colmap 线（ACE 预测的位姿转成 COLMAP 格式）
+                    ace_pose = {
+                        'x': float(t[0]), 'y': float(t[1]), 'z': float(t[2]),
+                        'qw': float(q_ace[3]), 'qx': float(q_ace[0]),
+                        'qy': float(q_ace[1]), 'qz': float(q_ace[2]),
+                    }
+                    colmap_line = _build_colmap_line(ace_pose, (0,0,0), 0)
+                    # octree_render
+                    octree_dataset = "projections/octree_data"
+                    if Path(octree_dataset).exists():
+                        _sp.run([
+                            OCTREE_RENDER_BIN, '--dataset', octree_dataset,
+                            '--colmap', colmap_line,
+                            '--image-width', '512', '--image-height', '512',
+                            '--focal-normalized', '0.75',
+                            '--color-output', str(ace_proj),
+                            '--config', OCTREE_CONFIG,
+                        ], capture_output=True, text=True, timeout=120)
+                except Exception as render_err:
+                    log(f"  ACE 重投影失败: {render_err}")
+                
+                # 对比图：左=查询图，右=重投影
+                if ace_proj.exists():
+                    tile = cv2.imread(str(ace_proj))
+                    if tile is not None:
+                        q_s = cv2.resize(query_img, (512, 512))
+                        comp = np.hstack([q_s, tile])
+                        # 加标签
+                        cv2.putText(comp, "query", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+                        cv2.putText(comp, f"ACE reproj ({t[0]:.1f},{t[1]:.1f},{t[2]:.1f})", (522, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+                        cv2.imwrite(str(ace_comp), comp)
                 
                 return {
                     "success": True,
                     "tag": tag,
                     "pose": {
-                        "quaternion": [float(q[3]), float(q[0]), float(q[1]), float(q[2])],
+                        "quaternion": [float(q_ace[3]), float(q_ace[0]), float(q_ace[1]), float(q_ace[2])],
                         "translation": [float(t[0]), float(t[1]), float(t[2])],
                     },
                     "inliers": len(inliers) if inliers is not None else 0,
-                    "comparison_image": str(ace_out),
+                    "comparison_image": str(ace_comp) if ace_comp.exists() else "",
                 }
             return {"success": False, "error": "ACE 定位失败", "tag": tag}
         except Exception as e:
