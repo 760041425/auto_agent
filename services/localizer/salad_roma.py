@@ -588,6 +588,9 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
                 kpts0_norm[..., 1] = kpts0_norm[..., 1] / (H1 / 2) - 1
                 kpts1_norm[..., 0] = kpts1_norm[..., 0] / (W2 / 2) - 1
                 kpts1_norm[..., 1] = kpts1_norm[..., 1] / (H2 / 2) - 1
+                # 确保在 [-1, 1] 范围内（浮点误差可能导致越界）
+                kpts0_norm = kpts0_norm.clamp(-1.0, 1.0)
+                kpts1_norm = kpts1_norm.clamp(-1.0, 1.0)
                 
                 data = {
                     "image0": {
