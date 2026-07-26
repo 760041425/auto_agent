@@ -1039,6 +1039,11 @@ def localize_with_salad_roma(
         log(f"\n{'─'*40}")
         log(f"  LightGlue 匹配候选 #{rank}: {tile['view']}/{name_key} (sim={sim:.3f})")
         
+        # 跳过被过滤的 tile（image_path 为空）
+        if not tile.get("image_path") or not os.path.exists(tile.get("image_path", "")):
+            log(f"    跳过: tile 文件不存在")
+            continue
+        
         # 加载 coord_map（NPY 格式）
         npy_path = tile.get("npy_path", "")
         if not npy_path or not os.path.exists(npy_path):
