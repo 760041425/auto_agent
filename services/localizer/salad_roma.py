@@ -1125,7 +1125,7 @@ def localize_with_salad_roma(
                     cm_512[1, 2] = 256
                     
                     ref_path, ref_coord = render_projection_image(
-                        all_pts, all_col, rvec, tvec, cm_512, q_w, q_h,
+                        all_pts, all_col, best_rvec, best_tvec, cm_512, q_w, q_h,
                         str(ace_proj_path), include_coord_map=True
                     )
                 except Exception as e:
