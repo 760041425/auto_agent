@@ -581,24 +581,15 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
                 if len(kpts1_3d) < 2 or len(kpts2_3d) < 2:
                     raise ValueError("DISK 特征点太少")
 
-                # 整理成 LightGlue 需要的格式（keypoints 需归一化到 [-1, 1]）
-                kpts0_norm = kpts1_3d[None, :, :2].clone().float()
-                kpts1_norm = kpts2_3d[None, :, :2].clone().float()
-                kpts0_norm[..., 0] = kpts0_norm[..., 0] / (W1 * 0.5) - 1.0
-                kpts0_norm[..., 1] = kpts0_norm[..., 1] / (H1 * 0.5) - 1.0
-                kpts1_norm[..., 0] = kpts1_norm[..., 0] / (W2 * 0.5) - 1.0
-                kpts1_norm[..., 1] = kpts1_norm[..., 1] / (H2 * 0.5) - 1.0
-                kpts0_norm = torch.clamp(kpts0_norm, -0.999, 0.999)
-                kpts1_norm = torch.clamp(kpts1_norm, -0.999, 0.999)
-                
+                # LightGlue 需要像素坐标 + image_size（内部会做归一化）
                 data = {
                     "image0": {
-                        "keypoints": kpts0_norm,  # [1, N, 2] in [-1, 1]
-                        "descriptors": desc1[None],  # [1, N, 128]
+                        "keypoints": kpts1_3d[None, :, :2].float(),  # [1, N, 2] 像素坐标
+                        "descriptors": desc1[None],
                         "image_size": torch.tensor([[W1, H1]], device=DEVICE),
                     },
                     "image1": {
-                        "keypoints": kpts1_norm,
+                        "keypoints": kpts2_3d[None, :, :2].float(),
                         "descriptors": desc2[None],
                         "image_size": torch.tensor([[W2, H2]], device=DEVICE),
                     },
@@ -1044,13 +1035,70 @@ def localize_with_salad_roma(
             model.eval().to(DEVICE)
             log(f"  ACE 模型加载完成, device={next(model.parameters()).device}")
             
+            # ── SALAD 检索获取候选位姿（用于约束 ACE） ──
+            salad_anchors = []
+            try:
+                q_small_salad = cv2.resize(query_img, (512, 512))
+                retrieved = _salad_retrieve(q_small_salad, top_k=3)
+                for rank, (name_key, sim, tile) in enumerate(retrieved):
+                    if tile.get("image_path") and os.path.exists(tile["image_path"]):
+                        # 从 tile 的位姿文件获取位置
+                        tile_parts = name_key.split('_')
+                        # 文件名: view_yaw270_-6.1_6.8_0.5_19
+                        # 坐标在 tile['tile'] 字段
+                        coord_str = tile.get("tile", "")
+                        parts = coord_str.split('_')
+                        if len(parts) >= 3:
+                            try:
+                                tx, ty, tz = float(parts[0]), float(parts[1]), float(parts[2])
+                                salad_anchors.append((tx, ty, tz))
+                                log(f"  [SALAD+ACE] 候选 #{rank}: ({tx:.1f},{ty:.1f},{tz:.1f}) sim={sim:.3f}")
+                            except ValueError:
+                                pass
+            except Exception:
+                pass
+            
+            # ── ACE 预测 + SALAD 锚点过滤 ──
             h_orig, w_orig = query_img.shape[:2]
             fov_deg = 75
             f = max(w_orig, h_orig) / (2 * np.tan(np.deg2rad(fov_deg / 2)))
             K = np.array([[f, 0, w_orig/2], [0, f, h_orig/2], [0, 0, 1]])
             
-            success_ace, rvec, tvec, inliers = ace_loc(model, query_img, K, None)
-            if success_ace:
+            # ACE 预测全图 3D 坐标
+            pts_2d, pts_3d, _ = ace_predict_dense(model, query_img)
+            
+            # SALAD 锚点过滤：丢弃离所有候选 tile 超过 30m 的点
+            if salad_anchors and len(pts_2d) > 100:
+                anchor_arr = np.array(salad_anchors)
+                # 每个 ACE 点到最近锚点的距离
+                min_dists = np.min(np.linalg.norm(pts_3d[:, None] - anchor_arr[None], axis=2), axis=1)
+                mask = min_dists < 30.0
+                kept = mask.sum()
+                if kept > 50:
+                    log(f"  [SALAD+ACE] 锚点过滤: {len(pts_2d)}→{kept} 点")
+                    pts_2d, pts_3d = pts_2d[mask], pts_3d[mask]
+                else:
+                    log(f"  [SALAD+ACE] 锚点过滤保留太少 ({kept})，使用全部点")
+            
+            # PnP
+            ace_success = False
+            best_rvec, best_tvec = None, None
+            best_inliers_cnt = 0
+            if len(pts_2d) >= 10:
+                dist = np.zeros((4, 1))
+                for conf_thr in [0.95, 0.85, 0.75]:
+                    s, r, t, i = cv2.solvePnPRansac(
+                        pts_3d, pts_2d, K, dist,
+                        iterationsCount=500, reprojectionError=20.0, confidence=conf_thr)
+                    if s:
+                        ic = len(i) if i is not None else len(pts_2d)
+                        if ic > best_inliers_cnt:
+                            best_inliers_cnt = ic
+                            best_rvec, best_tvec = r, t
+                            ace_success = True
+                        break
+            
+            if ace_success:
                 from scipy.spatial.transform import Rotation as R
                 
                 # ── ACE 初始位姿 ──
@@ -1060,7 +1108,7 @@ def localize_with_salad_roma(
                 ace_proj_path = out / f"{tag}_ace_proj.png"
                 ref_coord = None
                 try:
-                    from services.localizer import render_projection_image, _POINT_INDEX, load_colmap
+                    from services.localizer import _POINT_INDEX, load_colmap
                     # 确保点云已加载
                     if _POINT_INDEX is None:
                         load_colmap()
