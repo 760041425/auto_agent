@@ -134,7 +134,7 @@ class ACTLoss(nn.Module):
 def train_ace_model(
     tile_index_path: str = "projections/tile_index.json",
     model_save_path: str = "projections/ace_model.pth",
-    epochs: int = 30,
+    epochs: int = 100,
     batch_size: int = 2,
     lr: float = 1e-3,
 ):
@@ -236,10 +236,14 @@ def ace_predict_dense(model, image, normal_map=None):
                               ys.astype(float) * 8 * scale_y + 4])
     pts_3d = pred[:, ys, xs].T
     
-    # 降采样到 2000 点以内（PnP 不需要太多，40x 提速）
+    # 网格降采样到 2000 点（均匀覆盖，避免随机性）
     if len(pts_2d) > 2000:
-        idx = np.random.choice(len(pts_2d), 2000, replace=False)
-        pts_2d, pts_3d = pts_2d[idx], pts_3d[idx]
+        # 按网格采样：把图像分成网格，每个网格取中心点
+        grid_size = int(np.sqrt(len(pts_2d) / 2000)) + 1
+        grid_coords = (pts_2d / grid_size).astype(int)
+        _, unique_idx = np.unique(grid_coords, axis=0, return_index=True)
+        unique_idx = np.sort(unique_idx)[:2000]
+        pts_2d, pts_3d = pts_2d[unique_idx], pts_3d[unique_idx]
     
     conf = np.ones(len(pts_2d))
     return pts_2d, pts_3d, conf

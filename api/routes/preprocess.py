@@ -138,7 +138,7 @@ def _run_preprocess(mode: str = "full"):
                     _preprocess_status["error"] = "tile_index.json 不存在，请先渲染投影图"
                     _preprocess_status["running"] = False
                     return
-                train_ace_model(epochs=10)
+                train_ace_model(epochs=30)
                 _preprocess_status["step"] = "ACE 模型训练完成"
             except Exception as ace_err:
                 _preprocess_status["error"] = f"ACE 训练失败: {ace_err}"
