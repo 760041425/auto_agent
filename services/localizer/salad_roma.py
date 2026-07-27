@@ -582,15 +582,14 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
                     raise ValueError("DISK 特征点太少")
 
                 # 整理成 LightGlue 需要的格式（keypoints 需归一化到 [-1, 1]）
-                kpts0_norm = kpts1_3d[None, :, :2].clone()
-                kpts1_norm = kpts2_3d[None, :, :2].clone()
-                kpts0_norm[..., 0] = kpts0_norm[..., 0] / (W1 / 2) - 1
-                kpts0_norm[..., 1] = kpts0_norm[..., 1] / (H1 / 2) - 1
-                kpts1_norm[..., 0] = kpts1_norm[..., 0] / (W2 / 2) - 1
-                kpts1_norm[..., 1] = kpts1_norm[..., 1] / (H2 / 2) - 1
-                # 确保在 [-1, 1] 范围内（浮点误差可能导致越界）
-                kpts0_norm = kpts0_norm.clamp(-1.0, 1.0)
-                kpts1_norm = kpts1_norm.clamp(-1.0, 1.0)
+                kpts0_norm = kpts1_3d[None, :, :2].clone().float()
+                kpts1_norm = kpts2_3d[None, :, :2].clone().float()
+                kpts0_norm[..., 0] = kpts0_norm[..., 0] / (W1 * 0.5) - 1.0
+                kpts0_norm[..., 1] = kpts0_norm[..., 1] / (H1 * 0.5) - 1.0
+                kpts1_norm[..., 0] = kpts1_norm[..., 0] / (W2 * 0.5) - 1.0
+                kpts1_norm[..., 1] = kpts1_norm[..., 1] / (H2 * 0.5) - 1.0
+                kpts0_norm = torch.clamp(kpts0_norm, -0.999, 0.999)
+                kpts1_norm = torch.clamp(kpts1_norm, -0.999, 0.999)
                 
                 data = {
                     "image0": {
@@ -1027,10 +1026,23 @@ def localize_with_salad_roma(
             return {"success": False, "error": "ACE 模型未训练", "tag": tag}
         
         try:
+            # 检测模型架构
             sd = torch.load(model_path, map_location=DEVICE, weights_only=True)
-            model = ACERegressor(mean=torch.zeros(3), num_head_blocks=1, use_homogeneous=False)
+            has_decoder = any('dec' in k for k in sd)
+            has_encoder = any('encoder' in k for k in sd)
+            
+            if has_encoder:
+                from services.localizer.ace_trainer import ACERegressor
+                model = ACERegressor(mean=torch.zeros(3), num_head_blocks=1, use_homogeneous=False)
+                log(f"  ACE 使用 ACERegressor 架构")
+            else:
+                from services.localizer.ace_trainer import CoordRegressionFCN
+                model = CoordRegressionFCN(in_channels=6)
+                log(f"  ACE 使用 CoordRegressionFCN 架构")
+            
             model.load_state_dict(sd, strict=False)
             model.eval().to(DEVICE)
+            log(f"  ACE 模型加载完成, device={next(model.parameters()).device}")
             
             h_orig, w_orig = query_img.shape[:2]
             fov_deg = 75
