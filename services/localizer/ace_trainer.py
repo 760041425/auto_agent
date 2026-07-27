@@ -191,17 +191,27 @@ def train_ace_model(
 
 
 # ── 推理 ──
-def ace_predict_dense(model, image, normal_map=None):
+def ace_predict_dense(model, image, normal_map=None, max_size: int = 320):
     """
     全图一次前向预测 XYZ。
+    缩放到 max_size 后推理（320px 足够 PnP，30x 提速）。
     返回: (pts_2d, pts_3d, confidence)
     """
     model.eval()
     orig_h, orig_w = image.shape[:2]
     
-    # 缩放到 8 的倍数
-    target_h = (orig_h // 32) * 32
-    target_w = (orig_w // 32) * 32
+    # 缩放到最大边长 max_size（宽高比不变）
+    scale = max_size / max(orig_h, orig_w)
+    if scale < 1.0:
+        new_h, new_w = int(orig_h * scale), int(orig_w * scale)
+    else:
+        new_h, new_w = orig_h, orig_w
+    # 对齐到 32 的倍数（网络下采样 8x 要求）
+    target_h = (new_h // 32) * 32
+    target_w = (new_w // 32) * 32
+    if target_h < 32: target_h = 32
+    if target_w < 32: target_w = 32
+    
     img = cv2.resize(image, (target_w, target_h))
     rgb = img.astype(np.float32) / 255.0
     
@@ -214,27 +224,34 @@ def ace_predict_dense(model, image, normal_map=None):
     six_ch = np.concatenate([rgb, normal], axis=2)
     tensor = torch.from_numpy(six_ch).permute(2, 0, 1).unsqueeze(0).float().to(DEVICE)
     
+    # 推理时用 torch.cuda.amp 加速（MPS 不支持 amp，仅 CUDA）
     with torch.no_grad():
-        pred = model(tensor)  # (1, 3, H/8, W/8)
+        if DEVICE.type == "cuda":
+            with torch.amp.autocast("cuda"):
+                pred = model(tensor)
+        else:
+            pred = model(tensor)  # (1, 3, H/8, W/8)
     
-    pred = pred[0].cpu().numpy()  # (3, H/8, W/8)
+    pred = pred[0].cpu().numpy()
     valid = np.linalg.norm(pred, axis=0) > 1e-6
     
-    # 上采样到原始尺寸
-    scale_h = orig_h / (target_h // 8)
-    scale_w = orig_w / (target_w // 8)
+    # 还原到原始像素坐标
+    scale_x = orig_w / target_w
+    scale_y = orig_h / target_h
     
     ys, xs = np.where(valid)
     if len(ys) == 0:
         return np.array([]), np.array([]), np.array([])
     
-    pts_2d = np.column_stack([xs.astype(float) * 8 * scale_w / 8 + 4,
-                              ys.astype(float) * 8 * scale_h / 8 + 4])
+    # 降采样到 5000 点以内（PnP 不需要太多）
+    pts_2d = np.column_stack([(xs + 0.5) * 8 * scale_x, (ys + 0.5) * 8 * scale_y])
     pts_3d = pred[:, ys, xs].T
     
-    # 置信度（基于局部方差）
-    conf = np.ones(len(pts_2d))
+    if len(pts_2d) > 5000:
+        idx = np.random.choice(len(pts_2d), 5000, replace=False)
+        pts_2d, pts_3d = pts_2d[idx], pts_3d[idx]
     
+    conf = np.ones(len(pts_2d))
     return pts_2d, pts_3d, conf
 
 
