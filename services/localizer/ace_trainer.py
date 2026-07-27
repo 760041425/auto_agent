@@ -191,7 +191,7 @@ def train_ace_model(
 
 
 # ── 推理 ──
-def ace_predict_dense(model, image, normal_map=None, max_size: int = 480):
+def ace_predict_dense(model, image, normal_map=None, max_size: int = 640):
     """
     全图一次前向预测 XYZ。
     缩放到 max_size 后推理（320px 足够 PnP，30x 提速）。
