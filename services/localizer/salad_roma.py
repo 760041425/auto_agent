@@ -1052,58 +1052,78 @@ def localize_with_salad_roma(
             success_ace, rvec, tvec, inliers = ace_loc(model, query_img, K, None)
             if success_ace:
                 from scipy.spatial.transform import Rotation as R
-                q_ace = R.from_matrix(cv2.Rodrigues(rvec)[0]).as_quat()
-                t = tvec.flatten()
                 
-                # 用 ACE 位姿渲染投影图做对比
-                ace_proj = out / f"{tag}_ace_proj.png"
+                # ── ACE 初始位姿 ──
+                log(f"  [ACE] 初始位姿: 内点={len(inliers) if inliers is not None else 0}")
+                
+                # ── 用 ACE 位姿渲染重投影图 ──
+                ace_proj_path = out / f"{tag}_ace_proj.png"
+                ref_coord = None
+                try:
+                    from services.localizer import render_projection_image, _POINT_INDEX
+                    all_pts = _POINT_INDEX["pts"]
+                    all_col = _POINT_INDEX["cols"]
+                    q_w, q_h = 512, 512
+                    q_small = cv2.resize(query_img, (q_w, q_h))
+                    q_w_orig, q_h_orig = query_img.shape[1], query_img.shape[0]
+                    cm = _get_camera_matrix(q_w_orig, q_h_orig, fov_deg=75)
+                    cm_512 = cm.copy()
+                    cm_512[0] *= 512 / q_w_orig
+                    cm_512[1] *= 512 / q_h_orig
+                    cm_512[0, 2] = 256
+                    cm_512[1, 2] = 256
+                    
+                    ref_path, ref_coord = render_projection_image(
+                        all_pts, all_col, rvec, tvec, cm_512, q_w, q_h,
+                        str(ace_proj_path), include_coord_map=True
+                    )
+                except Exception as e:
+                    log(f"  [ACE] 重投影失败: {e}")
+                    ref_path = None
+                
+                # ── LightGlue 精匹配（原图 vs 重投影） ──
+                best_rvec_lg, best_tvec_lg = rvec, tvec
+                best_inliers_lg = len(inliers) if inliers is not None else 0
+                
+                if ref_path and ref_coord is not None:
+                    ref_img = cv2.imread(ref_path)
+                    if ref_img is not None:
+                        kpts_q, kpts_proj, cert = _lightglue_match(q_small, ref_img)
+                        if len(kpts_q) >= 8:
+                            obj_pts, img_pts = _build_3d_2d_matches(kpts_q, kpts_proj, cert, ref_coord)
+                            if len(obj_pts) >= 6:
+                                rvec_lg, tvec_lg, inliers_lg = _solve_pnp(obj_pts, img_pts, cm_512)
+                                if rvec_lg is not None:
+                                    best_rvec_lg, best_tvec_lg = rvec_lg, tvec_lg
+                                    best_inliers_lg = len(inliers_lg) if inliers_lg is not None else len(obj_pts)
+                                    log(f"  [ACE+LG] 精炼后: {best_inliers_lg} 内点")
+                
+                # ── 最终结果 ──
+                q_final = R.from_matrix(cv2.Rodrigues(best_rvec_lg)[0]).as_quat()
+                t_final = best_tvec_lg.flatten()
+                
+                # 对比图
                 ace_comp = out / f"{tag}_ace_comparison.jpg"
                 try:
-                    from services.las_processor.projection_octree import (
-                        OCTREE_RENDER_BIN, OCTREE_CONFIG, OCTREE_SOURCE_DIR,
-                        _build_colmap_line
-                    )
-                    import subprocess as _sp
-                    # 构建 colmap 线（ACE 预测的位姿转成 COLMAP 格式）
-                    ace_pose = {
-                        'x': float(t[0]), 'y': float(t[1]), 'z': float(t[2]),
-                        'qw': float(q_ace[3]), 'qx': float(q_ace[0]),
-                        'qy': float(q_ace[1]), 'qz': float(q_ace[2]),
-                    }
-                    colmap_line = _build_colmap_line(ace_pose, (0,0,0), 0)
-                    # octree_render
-                    octree_dataset = "projections/octree_data"
-                    if Path(octree_dataset).exists():
-                        _sp.run([
-                            OCTREE_RENDER_BIN, '--dataset', octree_dataset,
-                            '--colmap', colmap_line,
-                            '--image-width', '512', '--image-height', '512',
-                            '--focal-normalized', '0.75',
-                            '--color-output', str(ace_proj),
-                            '--config', OCTREE_CONFIG,
-                        ], capture_output=True, text=True, timeout=120)
-                except Exception as render_err:
-                    log(f"  ACE 重投影失败: {render_err}")
-                
-                # 对比图：左=查询图，右=重投影
-                if ace_proj.exists():
-                    tile = cv2.imread(str(ace_proj))
-                    if tile is not None:
-                        q_s = cv2.resize(query_img, (512, 512))
-                        comp = np.hstack([q_s, tile])
-                        # 加标签
-                        cv2.putText(comp, "query", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-                        cv2.putText(comp, f"ACE reproj ({t[0]:.1f},{t[1]:.1f},{t[2]:.1f})", (522, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-                        cv2.imwrite(str(ace_comp), comp)
+                    if ref_path and os.path.exists(ref_path):
+                        tile = cv2.imread(ref_path)
+                        if tile is not None:
+                            q_s = cv2.resize(query_img, (512, 512))
+                            comp = np.hstack([q_s, tile])
+                            cv2.putText(comp, f"ACE+LG ({t_final[0]:.1f},{t_final[1]:.1f})", (520, 30),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+                            cv2.imwrite(str(ace_comp), comp)
+                except Exception:
+                    pass
                 
                 return {
                     "success": True,
                     "tag": tag,
                     "pose": {
-                        "quaternion": [float(q_ace[3]), float(q_ace[0]), float(q_ace[1]), float(q_ace[2])],
-                        "translation": [float(t[0]), float(t[1]), float(t[2])],
+                        "quaternion": [float(q_final[3]), float(q_final[0]), float(q_final[1]), float(q_final[2])],
+                        "translation": [float(t_final[0]), float(t_final[1]), float(t_final[2])],
                     },
-                    "inliers": len(inliers) if inliers is not None else 0,
+                    "inliers": best_inliers_lg,
                     "comparison_image": str(ace_comp) if ace_comp.exists() else "",
                 }
             return {"success": False, "error": "ACE 定位失败", "tag": tag}
