@@ -191,24 +191,18 @@ def train_ace_model(
 
 
 # ── 推理 ──
-def ace_predict_dense(model, image, normal_map=None, max_size: int = 640):
+def ace_predict_dense(model, image, normal_map=None):
     """
     全图一次前向预测 XYZ。
-    缩放到 max_size 后推理（320px 足够 PnP，30x 提速）。
+    保持原分辨率确保精度，降采样 PnP 点数量保速度。
     返回: (pts_2d, pts_3d, confidence)
     """
     model.eval()
     orig_h, orig_w = image.shape[:2]
     
-    # 缩放到最大边长 max_size（宽高比不变）
-    scale = max_size / max(orig_h, orig_w)
-    if scale < 1.0:
-        new_h, new_w = int(orig_h * scale), int(orig_w * scale)
-    else:
-        new_h, new_w = orig_h, orig_w
     # 对齐到 32 的倍数（网络下采样 8x 要求）
-    target_h = (new_h // 32) * 32
-    target_w = (new_w // 32) * 32
+    target_h = (orig_h // 32) * 32
+    target_w = (orig_w // 32) * 32
     if target_h < 32: target_h = 32
     if target_w < 32: target_w = 32
     
@@ -224,13 +218,8 @@ def ace_predict_dense(model, image, normal_map=None, max_size: int = 640):
     six_ch = np.concatenate([rgb, normal], axis=2)
     tensor = torch.from_numpy(six_ch).permute(2, 0, 1).unsqueeze(0).float().to(DEVICE)
     
-    # 推理时用 torch.cuda.amp 加速（MPS 不支持 amp，仅 CUDA）
     with torch.no_grad():
-        if DEVICE.type == "cuda":
-            with torch.amp.autocast("cuda"):
-                pred = model(tensor)
-        else:
-            pred = model(tensor)  # (1, 3, H/8, W/8)
+        pred = model(tensor)  # (1, 3, H/8, W/8)
     
     pred = pred[0].cpu().numpy()
     valid = np.linalg.norm(pred, axis=0) > 1e-6
@@ -243,12 +232,13 @@ def ace_predict_dense(model, image, normal_map=None, max_size: int = 640):
     if len(ys) == 0:
         return np.array([]), np.array([]), np.array([])
     
-    # 降采样到 5000 点以内（PnP 不需要太多）
-    pts_2d = np.column_stack([(xs + 0.5) * 8 * scale_x, (ys + 0.5) * 8 * scale_y])
+    pts_2d = np.column_stack([xs.astype(float) * 8 * scale_x + 4,
+                              ys.astype(float) * 8 * scale_y + 4])
     pts_3d = pred[:, ys, xs].T
     
-    if len(pts_2d) > 5000:
-        idx = np.random.choice(len(pts_2d), 5000, replace=False)
+    # 降采样到 2000 点以内（PnP 不需要太多，40x 提速）
+    if len(pts_2d) > 2000:
+        idx = np.random.choice(len(pts_2d), 2000, replace=False)
         pts_2d, pts_3d = pts_2d[idx], pts_3d[idx]
     
     conf = np.ones(len(pts_2d))
