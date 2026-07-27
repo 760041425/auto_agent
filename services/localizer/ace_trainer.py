@@ -254,11 +254,12 @@ def ace_localize(model, image, K, normal_map=None):
     dist = np.zeros((4, 1))
     success, rvec, tvec, inliers = cv2.solvePnPRansac(
         pts_3d, pts_2d, K, dist,
-        iterationsCount=300, reprojectionError=12.0, confidence=0.999)
+        iterationsCount=500, reprojectionError=20.0, confidence=0.95)
     
-    if not success or inliers is None or len(inliers) < 10:
+    if not success or len(pts_2d[inliers.flatten()] if inliers is not None else pts_2d) < 6:
         return False, None, None, None
-    print(f"[ACE] ✅ {len(inliers)}/{len(pts_2d)} 内点")
+    inlier_count = len(inliers) if inliers is not None else len(pts_2d)
+    print(f"[ACE] ✅ {inlier_count}/{len(pts_2d)} 内点")
     return True, rvec, tvec, inliers
 
 
