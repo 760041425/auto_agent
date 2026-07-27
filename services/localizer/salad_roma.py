@@ -1060,9 +1060,12 @@ def localize_with_salad_roma(
                 ace_proj_path = out / f"{tag}_ace_proj.png"
                 ref_coord = None
                 try:
-                    from services.localizer import render_projection_image, _POINT_INDEX
+                    from services.localizer import render_projection_image, _POINT_INDEX, load_colmap
+                    # 确保点云已加载
+                    if _POINT_INDEX is None:
+                        load_colmap()
                     all_pts = _POINT_INDEX["pts"]
-                    all_col = _POINT_INDEX["cols"]
+                    all_col = _POINT_INDEX["colors"]
                     q_w, q_h = 512, 512
                     q_small = cv2.resize(query_img, (q_w, q_h))
                     q_w_orig, q_h_orig = query_img.shape[1], query_img.shape[0]
