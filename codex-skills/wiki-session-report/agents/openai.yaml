@@ -1,0 +1,4 @@
+interface:
+  display_name: "Wiki Session Report"
+  short_description: "生成背景、进展、待办三段式简体中文非技术任务进展汇报"
+  default_prompt: "Use $wiki-session-report to summarize this task as a concise background, progress, and next-steps report."

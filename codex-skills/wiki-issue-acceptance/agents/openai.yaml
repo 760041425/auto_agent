@@ -1,0 +1,4 @@
+interface:
+  display_name: "Wiki Issue Acceptance"
+  short_description: "严格按规格执行单元、集成与用户路径验收并保存完整原始证据"
+  default_prompt: "Use $wiki-issue-acceptance to validate this issue against its specification and produce an evidence-backed acceptance report."

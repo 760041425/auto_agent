@@ -1,9 +1,8 @@
-# 需求规格说明
+# 旧规格兼容入口
 
-本目录存放项目需求规格文档。每个需求文件描述一个独立的开发任务。
+权威规格已经迁移到 [`specs/`](../specs/README.md)。本目录只保留旧文件名与新规格包之间的链接，避免历史引用失效；不要继续在此新增或扩展需求正文。
 
-## 规范
-
-- 文件名格式：`<序号>-<简短描述>.md`
-- 每个文件描述一个独立可交付的任务
-- 包含：背景、需求描述、验收标准、技术要点
+| 旧入口 | 权威规格 |
+| --- | --- |
+| `001-las-image-3d-query.md` | [`specs/001-las-image-3d-query/spec.md`](../specs/001-las-image-3d-query/spec.md) |
+| `002-realtime-localization-optimization.md` | [`specs/002-realtime-localization-optimization/spec.md`](../specs/002-realtime-localization-optimization/spec.md) |

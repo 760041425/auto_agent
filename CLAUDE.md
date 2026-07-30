@@ -1,17 +1,17 @@
-# opencode-demo
+# LAS 影像 3D 查询与视觉定位
 
-Demo project for opencode workflow automation.
+项目协作规则以 [AGENTS.md](AGENTS.md) 为准。
 
-## Workflow
+开始实现前先阅读：
 
-1. Place requirement specs in `spec/` directory
-2. The orchestrator agent scans specs and assigns tasks
-3. Coding → Testing → PR pipeline
+1. `docs/engineering-playbook.md`
+2. `docs/context-map.md`
+3. 当前变更对应的 `specs/<feature-id>/`
 
-## Agents
+最小交付门禁：
 
-- **orchestrator** — 全局任务调度，默认 agent
-
-## Skills
-
-- **git_auto** — 自动化 Git 操作
+```bash
+./scripts/validate-specs.sh
+./scripts/run-all-tests.sh fast
+./scripts/drift-check.sh
+```

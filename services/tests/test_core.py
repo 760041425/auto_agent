@@ -11,7 +11,9 @@ from services.las_processor.projection import project_las_multi_view, _render_ca
 from services.las_processor.projection_octree import build_projection_view_poses, _filter_trajectory_poses, prepare_octree_render_plan
 
 
+@pytest.mark.integration
 def test_read_images_txt():
+    """TL-001-08: 读取确定性的 COLMAP 影像元数据。"""
     imgs = read_images_txt("las/images.txt")
     assert len(imgs) > 0
     assert imgs[0].image_id > 0
@@ -19,7 +21,9 @@ def test_read_images_txt():
     assert imgs[0].name
 
 
+@pytest.mark.integration
 def test_read_points3d_txt():
+    """TL-001-08: 读取确定性的 COLMAP 三维点元数据。"""
     pts = read_points3d_txt("las/points3D.txt")
     assert len(pts) > 0
     first = list(pts.values())[0]
@@ -147,6 +151,7 @@ def test_filter_trajectory_poses_respects_time_and_distance():
     assert [pose["ts"] for pose in filtered] == [0.0, 1.0]
 
 
+@pytest.mark.system
 def test_las_projection():
     las_files = [f for f in sorted(Path("las").glob("*.las")) if "subsample" not in f.name]
     las_path = str(las_files[0]) if las_files else "las/default_2026-05-28-112428.las"
@@ -170,6 +175,7 @@ def test_las_projection():
     shutil.rmtree("projections/test_proj", ignore_errors=True)
 
 
+@pytest.mark.system
 def test_api_health():
     import socket
     import requests

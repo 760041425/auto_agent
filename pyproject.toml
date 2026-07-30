@@ -31,3 +31,8 @@ line-length = 120
 
 [tool.pytest.ini_options]
 testpaths = ["api/tests", "services/tests"]
+markers = [
+    "integration: requires filesystem fixtures or boundary adapters",
+    "slow: takes materially longer than the fast feedback loop",
+    "system: starts processes, opens ports, or requires real runtime assets",
+]
