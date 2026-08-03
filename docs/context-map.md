@@ -42,6 +42,14 @@ query_image
     └── 路径 E: Multi-Strategy → 多策略融合选最优
 ```
 
+### PnP 焦距搜索与质量门控（2026-08-04）
+
+所有走 PnP 的路径（A/B/D/E + 原版 SALAD+RoMa）统一使用：
+- **多阶段归一化焦距搜索**：`pose_utils.solve_pnp_with_focal_search`，粗 3 轮 + 精 2 轮，
+  在初始估计 ±30% 范围内搜索最优内参；
+- **质量门控**：`pose_utils.annotate_pnp_quality`，三维门控（`score ≥ 4.0`、
+  `inliers ≥ 6`、`reproj_error ≤ 8px`），输出 `quality_passed` 与 `quality_reasons`。
+
 ### 验证方式
 
 | 方案 | 验证方法 | 指标语义 |
@@ -49,6 +57,7 @@ query_image
 | A/B/D | homography 匹配拟合 | 仅输出像素内点/残差；同源 NPY 不作米制验证 |
 | C | LAS 点云近邻验证 | 地图邻近性，不代表独立真值误差 |
 | E | 继承所选策略的验证 | 必须保留原指标类型和来源 |
+| 全部 | PnP 综合评分 + 质量门控 | `score = inlier_count / (reproj_error + 1e-6)`；`quality_passed` 表示是否通过三维门控 |
 | 前端人工选点 | 空间定位任务自产 H + 最终位姿 XYZ NPY | 本地展示 H→SLAM XYZ、NPY XYZ 及其米制差值；无需外部服务，只表示内部坐标一致性 |
 | 全部 | 独立 holdout 位姿（可选） | 平移误差（米）和旋转误差（度） |
 

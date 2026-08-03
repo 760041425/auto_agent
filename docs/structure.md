@@ -24,7 +24,7 @@
 | `__init__.py` | 旧版 SIFT/COLMAP 定位器（legacy）|
 | `salad_roma.py` | SALAD+RoMa 原版引擎（保留对照）|
 | `salad_roma_v2.py` | v2 引擎（5 种匹配器：DISK+LG, LoFTR, Hybrid, ACE, Multi-Strategy）|
-| `pose_utils.py` | 共享几何工具（稳定四元数、PnP+refine、E-matrix、LAS 验证）|
+| `pose_utils.py` | 共享几何工具（稳定四元数、PnP+refine、E-matrix、LAS 验证、多阶段归一化焦距搜索、质量门控）|
 | `coord_regression.py` | ACE 网络定义 + 自动加载器 |
 | `registry.py` | 稳定算法 ID 到 runner 的应用层注册表 |
 | `contracts.py` | 统一定位结果及旧字段兼容适配 |

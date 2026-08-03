@@ -32,7 +32,7 @@
 | 文件 | 行数 | 职责 |
 |------|------|------|
 | `services/localizer/logger_config.py` | ~80 | 日志配置（HTTP API / 业务分离）|
-| `services/localizer/pose_utils.py` | ~260 | 稳定四元数、PnP+refine、E-matrix、LAS 验证 |
+| `services/localizer/pose_utils.py` | ~490 | 稳定四元数、PnP+refine、E-matrix、LAS 验证、多阶段归一化焦距搜索、质量门控 |
 | `services/localizer/coord_regression.py` | ~120 | ACE 网络 + 自动加载器（支持 3ch/6ch）|
 | `services/localizer/verify_projection.py` | ~180 | 投影内部一致性（非绝对精度）|
 | `services/localizer/registry.py` | - | API 与 benchmark 共用的算法注册表 |
@@ -85,3 +85,43 @@ python scripts/benchmark_localizers.py --queries "query_images/*.jpg" --algos al
 - 修复：即时结果与两条旧报告路径只保留 homography 像素拟合诊断；前端单独显示独立真值 Benchmark 状态，无 holdout ground truth 时明确标记未执行。
 - Phase B 状态不变：真实数据集、独立真值、设备和样本门槛仍为 TODO，不伪造精度或算法推荐。
 - 环境验证：task #220 的同源米制字段全部为 `null`；浏览器只显示像素拟合诊断，并明确标记独立真值 Benchmark 未执行。
+
+---
+
+# Changelog — PnP 焦距搜索与质量门控（2026-08-04）
+
+## 变更范围
+
+| 代码变更 | 文档更新 |
+|---------|---------|
+| `services/localizer/pose_utils.py`（+230 行）| `docs/structure.md` 模块清单 |
+| `services/localizer/salad_roma_v2.py`（PnP 调用替换）| `docs/engineering-playbook.md` 新增章节 |
+| `services/localizer/salad_roma.py`（`_solve_pnp` 升级）| `docs/context-map.md` 新增 PnP 焦距搜索与质量门控章节 |
+| `services/localizer/contracts.py`（quality 字段透传）| `docs/ubiquitous-language.md` 新增术语 |
+| `web/app_v10.js`（质量门控 + 耗时显示）| `docs/CHANGELOG-003.md`（本文档） |
+
+## 新增函数
+
+| 函数 | 行数 | 职责 |
+|------|------|------|
+| `solve_pnp_with_focal_search` | ~120 | 多阶段归一化焦距搜索（粗 3 轮 + 精 2 轮），返回最优 rvec/tvec/inliers + focal_search_summary |
+| `annotate_pnp_quality` | ~35 | 三维质量门控（score/inliers/reproj_error），输出 quality_passed / quality_reasons |
+| `fov_to_normalized_focal` | ~3 | 视场角 → 归一化焦距 |
+| `normalized_focal_to_K` | ~6 | 归一化焦距 → 相机内参矩阵 |
+| `extract_normalized_focal` | ~3 | 从 K 矩阵提取归一化焦距 |
+| `compute_pnp_score` | ~3 | 综合评分 = inlier_count / (reproj_error + eps) |
+
+## 受影响的算法路径
+
+- `salad_roma_v2`（DISK+LG）✅
+- `salad_roma_v2_loftr`（LoFTR）✅
+- `hybrid`（DISK+LG + LoFTR 联合）✅
+- `multi_strategy`（多策略融合）✅
+- `salad_roma`（原版 SALAD+RoMa，含多轮迭代精化）✅
+- `salad_lightglue`（旧版，走 salad_roma.py 路径）✅
+
+## 前端展示
+
+每个算法结果卡片新增：
+- 耗时：`辅助诊断：内点 X | 3D点数 Y · ⏱ 0.85s`
+- 质量门控：`✓ 质量通过 (score=12.5)` 或 `✗ 质量不通过: score<4.0, inliers<6`

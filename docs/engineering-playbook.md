@@ -49,11 +49,61 @@
 当前可审计的指标分为：
 
 - PnP 重投影误差（像素）：描述几何拟合；
+- PnP 综合评分 `score = inlier_count / (reproj_error_px + 1e-6)`：多阶段焦距搜索后取最优，用于排序候选位姿；
 - 2D 几何拟合诊断（像素）：描述匹配与 homography 的拟合程度；同源 NPY 不得输出米制验证；
 - 本地坐标交叉验证（米）：V2 定位任务用最终 2D–3D 内点拟合 H，并按最终位姿生成查询图空间 XYZ NPY；人工选点比较 H→SLAM XYZ 与 NPY XYZ，无外部服务依赖，不是绝对位姿精度；
 - 坐标差最终判定：从最终 NPY 最多确定性采样 256 个有效像素，仅当三维差中位数严格 `< coordinate_threshold_m` 才令 V2 或 SALAD+RoMa 原版 `reliable=true`；默认 0.3 米，等于门槛也不准，内点数和相似度不参与最终可信判定；
+- 质量门控（2026-08-04 新增）：PnP 结果的多维度门控（`quality_score` / `quality_passed` / `quality_reasons`），门槛为 `score ≥ 4.0`、`inliers ≥ 6`、`reproj_error ≤ 8px`，任一不满足即标记 `quality_passed=false`；
 - LAS 邻近性（米/通过率）：描述结果与地图点的邻近程度；
 - 独立真值误差（米/度）：仅在 holdout 相机位姿或控制点存在时可用。
+
+### PnP 多阶段焦距搜索与质量门控（2026-08-04）
+
+#### 问题背景
+
+视觉定位管线之前直接使用请求传入的固定 `fov_deg` 构造相机内参做单次 PnP，当真实
+相机内参与默认值（75°）不一致时，重投影误差增大、内点减少，导致定位失败或精度
+下降。参考 slam-map 的 `solve_pnp_with_normalized_focal_search`，在归一化焦距空间
+做粗→细多阶段搜索，自动找到最优内参估计。
+
+#### 算法流程
+
+1. **归一化焦距**：`f_norm = focal_length / img_width`，在初始估计 ±30% 范围内搜索；
+2. **粗搜阶段**（默认 3 轮）：每轮按 `splits=5` 等分采样归一化焦距，逐个调用 RANSAC
+   PnP + LM 细化，按综合评分排序；下一轮在最优值附近收缩区间；
+3. **精搜阶段**（默认 2 轮）：步长收紧到 ±0.01，局部精细搜索；
+4. **质量门控**：对最优结果做三维门控（score / inliers / reproj_error），输出
+   `quality_passed` 与 `quality_reasons`；
+5. 返回最优 `rvec/tvec/inliers` + `focal_search_summary`（尝试次数/成功次数/最优焦距）。
+
+#### 适用范围
+
+所有走 PnP 的算法路径均已升级：
+- `salad_roma_v2`（DISK+LG）
+- `salad_roma_v2_loftr`（LoFTR）
+- `hybrid`（DISK+LG + LoFTR 联合）
+- `multi_strategy`（多策略融合）
+- `salad_roma`（原版 SALAD+RoMa，含多轮迭代精化）
+
+ACE 端到端回归路径不走 PnP，不受影响。
+
+#### 关键参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `search_range` | 0.3 | 归一化焦距相对搜索范围 ±30% |
+| `coarse_rounds` | 3 | 粗搜轮数 |
+| `fine_rounds` | 2 | 精搜轮数 |
+| `splits` | 5 | 每轮分段采样数 |
+| `reproj_error` | 4.0 px | RANSAC 内点阈值 |
+| `min_inliers` | 6 | 最少内点 |
+| 质量门控 `min_score` | 4.0 | 综合评分门槛 |
+| 质量门控 `max_reproj_error` | 8.0 px | 重投影误差上限 |
+
+#### 性能影响
+
+每算法 ~25 次 RANSAC PnP（粗 15 + 精 3 + 其他），512×512 图上单次 PnP <10ms，
+总增加 <250ms/算法。可通过 `focal_search=False` 参数回退到单次 PnP。
 
 ### 当前结论
 
@@ -71,6 +121,7 @@
 | RGB-only ACE | `ace_trainer.py` | `ACERegressor3Ch`, `ace_predict_rgb`, `train_ace_rgb` |
 | 生产四向斜地面渲染 | `scripts/render_ground_tiles.py` | 完整轨迹点+网格点，再展开 yaw 0/90/180/270、pitch -15、roll 0；MapTile 保存实际 pose |
 | 多 pitch/水平实验渲染 | `scripts/render_multi_pitch_tiles.py`、`scripts/render_horizontal_tiles.py` | 仅写 `projections/experiments/*`，不得覆盖生产索引 |
+| 焦距搜索 + 质量门控 | `pose_utils.py` | `solve_pnp_with_focal_search`（多阶段归一化焦距搜索）、`annotate_pnp_quality`（score/inliers/reproj 三维门控）|
 | 验证模块 | `verify_projection.py` | 2D 单应拟合诊断 + 本地 H/最终位姿 NPY 坐标交叉验证（均非绝对 Benchmark）|
 | 评估框架 | `scripts/benchmark_localizers.py` | 注册表同源 runner + manifest/run_id |
 | 生成报告 | `reports/generated/` | 按运行生成且不进入版本控制 |
@@ -122,3 +173,4 @@ curl -X POST http://localhost:8000/api/localize \
 3. **混合匹配优化**：DISK+LG 粗匹配 → LoFTR 精匹配 → 联合 PnP
 4. **降低 min_cert**：当前 0.001，可根据场景调整
 5. **精化匹配器通用化**（BUG-003-05 已修复硬编码 LightGlue）：后续可进一步把 `matcher_type` 抽象为策略对象，支持运行时按场景选择 TinyRoMa / LoFTR / LightGlue
+6. **焦距搜索参数自适应**（已实现基础版）：当前 `search_range=0.3 / splits=5` 为固定值，后续可根据匹匹配点数量和初始置信度动态调整搜索粒度
