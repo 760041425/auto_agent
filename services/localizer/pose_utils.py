@@ -380,8 +380,10 @@ def solve_pnp_with_focal_search(
     coarse_rounds: int = 3,
     fine_rounds: int = 2,
     splits: int = 5,
-    reproj_error: float = 4.0,
+    reproj_error: float = 8.0,
     min_inliers: int = 6,
+    ransac_method: int = cv2.SOLVEPNP_ITERATIVE,
+    confidence: float = 0.85,
     ransac_seed: int = 1337,
     focal_search: bool = True,
 ) -> dict:
@@ -441,9 +443,9 @@ def solve_pnp_with_focal_search(
         rvec, tvec, inliers = solve_pnp_ransac(
             object_pts, image_pts, K_i,
             reproj_error=reproj_error, refine=True,
-            method=cv2.SOLVEPNP_EPNP,
+            method=ransac_method,
             iterations=2000,
-            confidence=0.99,
+            confidence=confidence,
         )
         if rvec is None:
             return None
