@@ -51,6 +51,10 @@ def normalize_localization_result(
         "match_count": match_count,
         "inlier_count": inlier_count,
         "reprojection_error_px": reprojection_error,
+        "score": raw.get("score"),
+        "quality_passed": raw.get("quality_passed"),
+        "quality_score": raw.get("quality_score"),
+        "quality_reasons": raw.get("quality_reasons", []),
     }
 
     reliable = bool(raw.get("reliable", success and inlier_count >= min_inliers))

@@ -849,7 +849,17 @@ async function loadLocalizeImages() {
         html += localizeStatusBadge(r);
         html += '</div>';
         if (r.success) {
-          html += '<p style="font-size:0.78rem;color:#777;margin:0.3rem 0">辅助诊断：内点 ' + r.inliers + '</p>';
+          html += '<p style="font-size:0.78rem;color:#777;margin:0.3rem 0">辅助诊断：内点 ' + r.inliers;
+          if (r.timings && r.timings.total_s != null) {
+            html += ' &nbsp;·&nbsp; ⏱ ' + r.timings.total_s.toFixed(2) + 's';
+          }
+          html += '</p>';
+          if (r.quality_passed === true) {
+            html += '<span style="font-size:0.75rem;color:#2e7d32;font-weight:bold">✓ 质量通过 (score=' + (r.quality_score || r.score || 0).toFixed(1) + ')</span>';
+          } else if (r.quality_passed === false) {
+            var qReasons = (r.quality_reasons && r.quality_reasons.length) ? r.quality_reasons.join(', ') : '未达标';
+            html += '<span style="font-size:0.75rem;color:#e65100;font-weight:bold">✗ 质量不通过: ' + escapeLocalizeHtml(qReasons) + '</span>';
+          }
            if (r.match_method === 'salad_roma' && r.all_candidates && r.all_candidates.length > 1) {
            html += '<details open style="margin:0.3rem 0"><summary style="cursor:pointer;color:#1976d2;font-weight:bold">迭代 ' + r.total_rounds + ' 轮 (点击展开)</summary>';
            html += '<table style="font-size:0.78rem;width:100%;border-collapse:collapse;margin-top:0.3rem">';
@@ -1025,7 +1035,17 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
       html += '</div>';
 
       if (r.success) {
-        html += '<p style="font-size:0.78rem;color:#777;margin:0.3rem 0">辅助诊断：内点 ' + r.inliers + ' | 3D点数 ' + (r.total_3d_points || 0) + '</p>';
+        html += '<p style="font-size:0.78rem;color:#777;margin:0.3rem 0">辅助诊断：内点 ' + r.inliers + ' | 3D点数 ' + (r.total_3d_points || 0);
+        if (r.timings && r.timings.total_s != null) {
+          html += ' &nbsp;·&nbsp; ⏱ ' + r.timings.total_s.toFixed(2) + 's';
+        }
+        html += '</p>';
+        if (r.quality_passed === true) {
+          html += '<span style="font-size:0.75rem;color:#2e7d32;font-weight:bold">✓ 质量通过 (score=' + (r.quality_score || r.score || 0).toFixed(1) + ')</span>';
+        } else if (r.quality_passed === false) {
+          var qReasons = (r.quality_reasons && r.quality_reasons.length) ? r.quality_reasons.join(', ') : '未达标';
+          html += '<span style="font-size:0.75rem;color:#e65100;font-weight:bold">✗ 质量不通过: ' + escapeLocalizeHtml(qReasons) + '</span>';
+        }
         // SALAD+RoMa 显示轮数
         if (r.match_method === 'salad_roma' && r.all_candidates && r.all_candidates.length > 1) {
           html += '<details open style="margin:0.3rem 0"><summary style="cursor:pointer;color:#1976d2;font-weight:bold">迭代 ' + r.total_rounds + ' 轮 (点击展开)</summary>';

@@ -36,6 +36,8 @@ import torch
 from services.localizer.pose_utils import (
     rotation_matrix_to_quaternion,
     solve_pnp_ransac,
+    solve_pnp_with_focal_search,
+    annotate_pnp_quality,
     compute_reprojection_error,
     is_pose_better,
     verify_essential_matrix,
@@ -444,7 +446,10 @@ def localize_multi_strategy(query_image_path, camera_intrinsics=None, fov_deg=75
     """
     import cv2
     import numpy as np
-    from services.localizer.pose_utils import get_camera_matrix, solve_pnp_ransac, compute_reprojection_error
+    from services.localizer.pose_utils import (
+        get_camera_matrix, solve_pnp_with_focal_search, annotate_pnp_quality,
+        compute_reprojection_error, rotation_matrix_to_quaternion,
+    )
 
     image = cv2.imread(query_image_path)
     if image is None:
@@ -459,7 +464,7 @@ def localize_multi_strategy(query_image_path, camera_intrinsics=None, fov_deg=75
     if not retrieved:
         return {"success": False, "error": "SALAD 检索无结果", "tag": "multi"}
 
-    best = {"inliers": 0, "error": float("inf"), "rvec": None, "tvec": None}
+    best = {"inliers": 0, "error": float("inf"), "score": 0.0, "rvec": None, "tvec": None}
 
     for name_key, sim, tile in retrieved:
         tile_path = tile.get("image_path", "")
@@ -471,7 +476,6 @@ def localize_multi_strategy(query_image_path, camera_intrinsics=None, fov_deg=75
         if tile_img is None:
             continue
 
-        # 策略 1: DISK+LG
         for matcher_name, matcher_fn in [("lg", _match_tile_with_lightglue_v2), ("hybrid", _match_tile_with_hybrid)]:
             try:
                 kpts_q, kpts_t, cert = matcher_fn(q, tile_img)
@@ -484,19 +488,31 @@ def localize_multi_strategy(query_image_path, camera_intrinsics=None, fov_deg=75
                 obj_pts, img_pts = _build_3d_2d_matches_v2(kpts_q, kpts_t, cert[mask], npy, min_cert=0.001)
                 if len(obj_pts) < 4:
                     continue
-                rvec, tvec, inliers = solve_pnp_ransac(obj_pts, img_pts, K, reproj_error=8.0, refine=True)
-                if rvec is not None:
-                    ic = len(inliers) if inliers is not None else len(obj_pts)
-                    err = compute_reprojection_error(rvec, tvec, K, obj_pts, img_pts)
-                    if ic > best["inliers"] or (ic == best["inliers"] and err < best["error"]):
-                        best.update({"inliers": ic, "error": err, "rvec": rvec, "tvec": tvec, "strategy": matcher_name})
+                pnp_out = solve_pnp_with_focal_search(
+                    obj_pts, img_pts, w_q, h_q,
+                    initial_K=K, fov_deg=fov_deg,
+                    reproj_error=4.0, min_inliers=6,
+                )
+                pnp_out = annotate_pnp_quality(pnp_out, min_score=4.0, min_inliers=6)
+                if pnp_out.get("success"):
+                    ic = pnp_out.get("inlier_count", 0)
+                    score = pnp_out.get("score", 0.0)
+                    err = pnp_out.get("reproj_error_px", float("inf"))
+                    if score > best["score"] or (score == best["score"] and ic > best["inliers"]):
+                        best.update({
+                            "inliers": ic, "error": err, "score": score,
+                            "rvec": pnp_out["rvec"], "tvec": pnp_out["tvec"],
+                            "strategy": matcher_name,
+                            "quality_passed": pnp_out.get("quality_passed"),
+                            "quality_score": pnp_out.get("quality_score"),
+                            "quality_reasons": pnp_out.get("quality_reasons", []),
+                        })
             except Exception:
                 continue
 
     if best["rvec"] is None:
         return {"success": False, "error": "所有策略 PnP 失败", "tag": "multi"}
 
-    from services.localizer.pose_utils import rotation_matrix_to_quaternion
     q_quat = rotation_matrix_to_quaternion(cv2.Rodrigues(best["rvec"])[0])
     return {
         "success": True,
@@ -508,6 +524,10 @@ def localize_multi_strategy(query_image_path, camera_intrinsics=None, fov_deg=75
         },
         "inliers": best["inliers"],
         "reprojection_error": round(best["error"], 2),
+        "score": round(best["score"], 3),
+        "quality_passed": best.get("quality_passed"),
+        "quality_score": best.get("quality_score"),
+        "quality_reasons": best.get("quality_reasons", []),
         "strategy": best.get("strategy", "-"),
         "camera_matrix": K.tolist(),
     }
@@ -636,6 +656,10 @@ def localize_with_salad_roma_v2(
     best_rvec, best_tvec = None, None
     best_inliers = 0
     best_reproj_error = float("inf")
+    best_score = 0.0
+    best_quality_passed = None
+    best_quality_score = None
+    best_quality_reasons = []
     best_3d = None
     best_2d = None
     best_tile = None
@@ -691,23 +715,34 @@ def localize_with_salad_roma_v2(
         if len(obj_pts) < 4:
             continue
 
-        rvec_i, tvec_i, inliers_i = solve_pnp_ransac(
-            obj_pts, img_pts, K,
-            reproj_error=reproj_error, refine=True,
+        h_qs, w_qs = q_small.shape[:2]
+        pnp_out = solve_pnp_with_focal_search(
+            obj_pts, img_pts, w_qs, h_qs,
+            initial_K=K, fov_deg=fov_deg,
+            reproj_error=reproj_error, min_inliers=min_inliers,
         )
-        if rvec_i is not None:
-            ic = len(inliers_i) if inliers_i is not None else len(obj_pts)
-            err_i = compute_reprojection_error(rvec_i, tvec_i, K, obj_pts, img_pts)
-            log(f"    PnP: {ic}/{len(obj_pts)} 内点, 误差={err_i:.2f}px")
+        pnp_out = annotate_pnp_quality(pnp_out, min_score=4.0, min_inliers=min_inliers)
+        if pnp_out.get("success"):
+            ic = pnp_out.get("inlier_count", 0)
+            err_i = pnp_out.get("reproj_error_px", float("inf"))
+            score_i = pnp_out.get("score", 0.0)
+            log(f"    PnP: {ic}/{len(obj_pts)} 内点, 误差={err_i:.2f}px, score={score_i:.2f}"
+                + (f", quality={'✓' if pnp_out.get('quality_passed') else '✗'}"
+                   if pnp_out.get('quality_reasons') is not None else ""))
             if is_pose_better(ic, err_i, best_inliers, best_reproj_error):
                 best_inliers = ic
                 best_reproj_error = err_i
-                best_rvec, best_tvec = rvec_i, tvec_i
+                best_score = score_i
+                best_rvec, best_tvec = pnp_out["rvec"], pnp_out["tvec"]
+                inliers_i = pnp_out.get("inliers")
                 mask_in = inliers_i.ravel() if inliers_i is not None else slice(None)
                 best_3d = obj_pts[mask_in]
                 best_2d = img_pts[mask_in]
                 best_tile = tile
                 best_match_count = len(obj_pts)
+                best_quality_passed = pnp_out.get("quality_passed")
+                best_quality_score = pnp_out.get("quality_score")
+                best_quality_reasons = pnp_out.get("quality_reasons", [])
 
         # 收集用于联合 PnP
         all_obj_pts.append(obj_pts)
@@ -722,19 +757,22 @@ def localize_with_salad_roma_v2(
         merged_img = np.vstack(all_img_pts)
         log(f"\n{'─' * 40}")
         log(f"🔗 多候选联合 PnP: {len(merged_obj)} 对匹配（{len(all_obj_pts)} 候选）")
-        rvec_m, tvec_m, inliers_m = solve_pnp_ransac(
-            merged_obj, merged_img, K,
-            reproj_error=reproj_error, refine=True,
+        h_qs, w_qs = q_small.shape[:2]
+        pnp_m = solve_pnp_with_focal_search(
+            merged_obj, merged_img, w_qs, h_qs,
+            initial_K=K, fov_deg=fov_deg,
+            reproj_error=reproj_error, min_inliers=min_inliers,
         )
-        if rvec_m is not None:
-            ic_m = len(inliers_m) if inliers_m is not None else len(merged_obj)
-            err_m = compute_reprojection_error(rvec_m, tvec_m, K, merged_obj, merged_img)
+        pnp_m = annotate_pnp_quality(pnp_m, min_score=4.0, min_inliers=min_inliers)
+        if pnp_m.get("success"):
+            ic_m = pnp_m.get("inlier_count", 0)
+            err_m = pnp_m.get("reproj_error_px", float("inf"))
             log(f"  联合 PnP: {ic_m}/{len(merged_obj)} 内点, 误差={err_m:.2f}px")
             if is_pose_better(ic_m, err_m, best_inliers, best_reproj_error):
-                best_rvec, best_tvec = rvec_m, tvec_m
+                best_rvec, best_tvec = pnp_m["rvec"], pnp_m["tvec"]
                 best_inliers = ic_m
                 best_reproj_error = err_m
-                mask_m = inliers_m.ravel() if inliers_m is not None else slice(None)
+                mask_m = pnp_m["inliers"].ravel() if pnp_m.get("inliers") is not None else slice(None)
                 best_3d = merged_obj[mask_m]
                 best_2d = merged_img[mask_m]
                 log(f"  ✅ 联合 PnP 更优，采用")
@@ -787,16 +825,22 @@ def localize_with_salad_roma_v2(
             log("    3D-2D 不足, 停止")
             break
 
-        nr, nt, ni = solve_pnp_ransac(obj2, img2, K, reproj_error=reproj_error, refine=True)
-        if nr is not None:
-            nic = len(ni) if ni is not None else len(obj2)
-            nerr = compute_reprojection_error(nr, nt, K, obj2, img2)
+        h_qs, w_qs = q_small.shape[:2]
+        pnp_refine = solve_pnp_with_focal_search(
+            obj2, img2, w_qs, h_qs,
+            initial_K=K, fov_deg=fov_deg,
+            reproj_error=reproj_error, min_inliers=min_inliers,
+        )
+        pnp_refine = annotate_pnp_quality(pnp_refine, min_score=4.0, min_inliers=min_inliers)
+        if pnp_refine.get("success"):
+            nic = pnp_refine.get("inlier_count", 0)
+            nerr = pnp_refine.get("reproj_error_px", float("inf"))
             round_errors.append(nerr)
             if is_pose_better(nic, nerr, inlier_count, current_error):
-                rvec, tvec = nr, nt
+                rvec, tvec = pnp_refine["rvec"], pnp_refine["tvec"]
                 inlier_count = nic
                 current_error = nerr
-                mask_iter = ni.ravel() if ni is not None else slice(None)
+                mask_iter = pnp_refine["inliers"].ravel() if pnp_refine.get("inliers") is not None else slice(None)
                 best_3d = obj2[mask_iter]
                 best_2d = img2[mask_iter]
                 log(f"    ✅ 提升: {nic} 内点, 误差={nerr:.2f}px")
@@ -935,6 +979,10 @@ def localize_with_salad_roma_v2(
         "inliers": int(inlier_count),
         "match_count": int(best_match_count),
         "reprojection_error": float(current_error),
+        "score": round(float(best_score), 3) if best_score else None,
+        "quality_passed": best_quality_passed,
+        "quality_score": round(float(best_quality_score), 3) if best_quality_score is not None else None,
+        "quality_reasons": best_quality_reasons,
         "projection_verification": verify_result,
         "las_verification": las_result,
         "artifacts": artifacts,

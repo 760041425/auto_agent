@@ -332,3 +332,236 @@ def adaptive_early_stop(
         if best_so_far == 0 or (best_so_far - v) / max(best_so_far, 1e-6) > min_improvement:
             return False
     return True
+
+
+# --------------------------------------------------------------------------- #
+# 归一化焦距工具
+# --------------------------------------------------------------------------- #
+
+def fov_to_normalized_focal(fov_deg: float, img_w: int, img_h: int) -> float:
+    """视场角 → 归一化焦距（除以图像宽）。"""
+    f = max(img_w, img_h) / (2 * np.tan(np.deg2rad(fov_deg / 2)))
+    return f / img_w
+
+
+def normalized_focal_to_K(normalized_focal: float, img_w: int, img_h: int) -> np.ndarray:
+    """归一化焦距 → 相机内参矩阵（主点在图像中心）。"""
+    f = float(normalized_focal) * img_w
+    return np.array([
+        [f, 0, img_w / 2],
+        [0, f, img_h / 2],
+        [0, 0, 1],
+    ], dtype=np.float64)
+
+
+def extract_normalized_focal(K: np.ndarray, img_w: int) -> float:
+    """从相机内参矩阵提取归一化焦距。"""
+    return float(K[0, 0]) / float(img_w)
+
+
+def compute_pnp_score(inlier_count: int, reproj_error_px: float) -> float:
+    """综合评分：内点数 / (重投影误差 + eps)，越大越好。"""
+    return float(inlier_count) / (float(reproj_error_px) + 1e-6)
+
+
+# --------------------------------------------------------------------------- #
+# 多阶段归一化焦距 PnP 搜索
+# --------------------------------------------------------------------------- #
+
+def solve_pnp_with_focal_search(
+    object_pts: np.ndarray,
+    image_pts: np.ndarray,
+    img_w: int,
+    img_h: int,
+    *,
+    initial_K: Optional[np.ndarray] = None,
+    fov_deg: float = 75.0,
+    search_range: float = 0.3,
+    coarse_rounds: int = 3,
+    fine_rounds: int = 2,
+    splits: int = 5,
+    reproj_error: float = 4.0,
+    min_inliers: int = 6,
+    ransac_seed: int = 1337,
+    focal_search: bool = True,
+) -> dict:
+    """多阶段归一化焦距搜索 + PnP，找到最优相机内参估计。
+
+    参考 slam-map ``solve_pnp_with_normalized_focal_search``，适配当前项目：
+    通常已有 ``fov_deg`` 或 ``initial_K`` 作为初始估计，搜索范围更小更快。
+
+    参数
+    ----------
+    initial_K : 外部传入内参，优先使用
+    fov_deg : 无 initial_K 时的初始焦距估计
+    search_range : 归一化焦距相对搜索范围（±30%）
+    coarse_rounds/fine_rounds : 粗/精搜索轮数
+    splits : 每轮分段采样数
+    focal_search : False 时退化为单次 PnP（用 initial_K 或 fov_deg）
+
+    返回 dict 包含 rvec/tvec/inliers/quality_score/focal_search_summary；
+    失败返回 ``{"success": False, "error": "..."}``。
+    """
+    if object_pts is None or image_pts is None or len(object_pts) < 4:
+        return {"success": False, "error": f"点数不足 ({0 if object_pts is None else len(object_pts)})，至少需要 4 个点"}
+
+    # 无焦距搜索时退化为单次 PnP
+    if not focal_search:
+        K = get_camera_matrix(img_w, img_h, fov_deg=fov_deg, intrinsics=initial_K)
+        rvec, tvec, inliers = solve_pnp_ransac(
+            object_pts, image_pts, K,
+            reproj_error=reproj_error, refine=True,
+        )
+        if rvec is None:
+            return {"success": False, "error": "PnP 无解（单次模式）"}
+        return {
+            "success": True,
+            "rvec": rvec, "tvec": tvec, "inliers": inliers,
+            "K": K, "normalized_focal": extract_normalized_focal(K, img_w),
+            "focal_search_summary": None,
+        }
+
+    # 初始归一化焦距
+    if initial_K is not None:
+        f_norm_center = extract_normalized_focal(np.asarray(initial_K), img_w)
+    else:
+        f_norm_center = fov_to_normalized_focal(fov_deg, img_w, img_h)
+
+    f_norm_min = f_norm_center * (1 - search_range)
+    f_norm_max = f_norm_center * (1 + search_range)
+
+    best: Optional[dict] = None
+    total_attempts = 0
+    total_success = 0
+
+    def _try_focal(f_norm: float, seed_offset: int) -> Optional[dict]:
+        nonlocal total_attempts, total_success
+        total_attempts += 1
+        K_i = normalized_focal_to_K(f_norm, img_w, img_h)
+        rvec, tvec, inliers = solve_pnp_ransac(
+            object_pts, image_pts, K_i,
+            reproj_error=reproj_error, refine=True,
+            method=cv2.SOLVEPNP_EPNP,
+            iterations=2000,
+            confidence=0.99,
+        )
+        if rvec is None:
+            return None
+        ic = len(inliers) if inliers is not None else len(object_pts)
+        if ic < min_inliers:
+            return None
+        total_success += 1
+        err = compute_reprojection_error(rvec, tvec, K_i, object_pts, image_pts)
+        score = compute_pnp_score(ic, err)
+        return {
+            "rvec": rvec, "tvec": tvec, "inliers": inliers,
+            "K": K_i, "normalized_focal": f_norm,
+            "inlier_count": ic, "reproj_error_px": err, "score": score,
+        }
+
+    def _pick_best(candidates: list) -> Optional[dict]:
+        if not candidates:
+            return None
+        return max(candidates, key=lambda c: (c["score"], c["inlier_count"], -c["reproj_error_px"]))
+
+    # --- 粗搜阶段：在 [f_norm_min, f_norm_max] 区间均匀采样 ---
+    current_min, current_max = f_norm_min, f_norm_center * (1 + search_range)
+    current_min, current_max = min(current_min, current_max), max(current_min, current_max)
+    seed_base = ransac_seed
+
+    for round_idx in range(coarse_rounds):
+        step = (current_max - current_min) / max(splits - 1, 1)
+        candidates_fnorm = [current_min + step * i for i in range(splits)]
+        round_results = []
+        for i, fn in enumerate(candidates_fnorm):
+            r = _try_focal(fn, seed_base + round_idx * 1000 + i)
+            if r is not None:
+                round_results.append(r)
+        round_best = _pick_best(round_results)
+        if round_best is not None:
+            # 收缩区间到最优值附近
+            shrink = (current_max - current_min) / splits
+            current_min = max(f_norm_min, round_best["normalized_focal"] - shrink)
+            current_max = min(f_norm_max, round_best["normalized_focal"] + shrink)
+            if best is None or round_best["score"] > best["score"]:
+                best = round_best
+
+    # --- 精搜阶段：步长收紧到 ±0.01 ---
+    fine_step = 0.01
+    for round_idx in range(fine_rounds):
+        if best is None:
+            break
+        center = best["normalized_focal"]
+        candidates_fnorm = [center - fine_step, center, center + fine_step]
+        round_results = []
+        for i, fn in enumerate(candidates_fnorm):
+            r = _try_focal(fn, seed_base + 100000 + round_idx * 1000 + i)
+            if r is not None:
+                round_results.append(r)
+        round_best = _pick_best(round_results)
+        if round_best is not None and (best is None or round_best["score"] > best["score"]):
+            best = round_best
+
+    if best is None:
+        return {"success": False, "error": f"所有焦距候选 PnP 失败（尝试 {total_attempts} 次）"}
+
+    return {
+        "success": True,
+        "rvec": best["rvec"],
+        "tvec": best["tvec"],
+        "inliers": best["inliers"],
+        "K": best["K"],
+        "normalized_focal": best["normalized_focal"],
+        "inlier_count": best["inlier_count"],
+        "reproj_error_px": best["reproj_error_px"],
+        "score": best["score"],
+        "focal_search_summary": {
+            "attempts": total_attempts,
+            "success": total_success,
+            "best_normalized_focal": best["normalized_focal"],
+            "best_score": best["score"],
+        },
+    }
+
+
+# --------------------------------------------------------------------------- #
+# PnP 质量门控
+# --------------------------------------------------------------------------- #
+
+def annotate_pnp_quality(
+    pnp_result: dict,
+    min_score: float = 4.0,
+    min_inliers: int = 6,
+    max_reproj_error_px: float = 8.0,
+) -> dict:
+    """为 PnP 结果补充质量门控标注。
+
+    多维度门控：综合评分、最少内点、最大重投影误差。
+    返回结果增加 ``quality_passed`` / ``quality_reasons`` / ``quality_score``。
+    """
+    if not isinstance(pnp_result, dict) or not pnp_result.get("success"):
+        if isinstance(pnp_result, dict):
+            pnp_result["quality_passed"] = False
+            pnp_result["quality_reasons"] = ["pnp_failed"]
+            pnp_result["quality_score"] = 0.0
+        return pnp_result
+
+    score = float(pnp_result.get("score") or compute_pnp_score(
+        int(pnp_result.get("inlier_count", 0)),
+        float(pnp_result.get("reproj_error_px") or pnp_result.get("reprojection_error", 0)),
+    ))
+    inliers = int(pnp_result.get("inlier_count", 0))
+    reproj = float(pnp_result.get("reproj_error_px") or pnp_result.get("reprojection_error", 0))
+
+    reasons = []
+    if score < min_score:
+        reasons.append(f"score<{min_score}")
+    if inliers < min_inliers:
+        reasons.append(f"inliers<{min_inliers}")
+    if reproj > max_reproj_error_px:
+        reasons.append(f"reproj_error>{max_reproj_error_px}px")
+
+    pnp_result["quality_score"] = score
+    pnp_result["quality_passed"] = len(reasons) == 0
+    pnp_result["quality_reasons"] = reasons
+    return pnp_result

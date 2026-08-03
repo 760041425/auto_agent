@@ -169,11 +169,13 @@ def test_normalize_result_preserves_contract_and_marks_low_inliers_unreliable():
     assert result["algorithm_id"] == "salad_roma_v2"
     assert result["success"] is True
     assert result["reliable"] is False
-    assert result["quality"] == {
-        "match_count": 30,
-        "inlier_count": 5,
-        "reprojection_error_px": 2.5,
-    }
+    assert result["quality"]["match_count"] == 30
+    assert result["quality"]["inlier_count"] == 5
+    assert result["quality"]["reprojection_error_px"] == 2.5
+    assert result["quality"]["score"] is None
+    assert result["quality"]["quality_passed"] is None
+    assert result["quality"]["quality_score"] is None
+    assert result["quality"]["quality_reasons"] == []
     assert result["validations"]["projection_consistency"]["median_m"] == 1.2
     assert result["validations"]["las_nearest"]["verification_rate"] == 0.8
     assert result["validations"]["ground_truth"]["status"] == "not_available"
