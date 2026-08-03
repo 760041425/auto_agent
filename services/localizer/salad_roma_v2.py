@@ -788,6 +788,7 @@ def localize_with_salad_roma_v2(
 
     # 迭代阈值：从严格到宽松，逐步精化
     cert_thresholds = [0.1, 0.01, 0.001]
+    actual_iterations = 0  # 实际执行的迭代轮数
 
     for iteration in range(1, max_iterations + 1):
         if adaptive_early_stop(round_errors, patience=1):
@@ -846,6 +847,7 @@ def localize_with_salad_roma_v2(
                 log(f"    ✅ 提升: {nic} 内点, 误差={nerr:.2f}px")
             else:
                 log(f"    未提升: {nic} 内点, 误差={nerr:.2f}px")
+        actual_iterations = iteration  # 记录实际执行的迭代轮数
     if inlier_count < min_inliers:
         log(f"  ⚠️ 内点不足 ({inlier_count} < {min_inliers}), 定位不可靠")
 
@@ -995,8 +997,8 @@ def localize_with_salad_roma_v2(
         },
         "coordinate_transform": coordinate_transform,
         "camera_matrix": K.tolist(),
-        "total_rounds": max_iterations,
-        "n_candidates": len(retrieved),
+        "total_rounds": actual_iterations,  # 实际执行的迭代轮数（0 = 只有初始 PnP，未进入迭代）
+        "n_candidates": len(retrieved),  # SALAD 检索返回的候选 tile 数
         "focal_search_summary": getattr(solve_pnp_with_focal_search, 'last_summary', None),
     }
     return result
