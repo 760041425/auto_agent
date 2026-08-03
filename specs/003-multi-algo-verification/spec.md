@@ -64,6 +64,24 @@
 - 相同代码、数据集和种子重复运行时，报告清单与算法配置一致；
 - 算法推荐只有在真值数据和批准门槛齐备后才产生。
 
+## BUG-003-04 — 一致性检查 Z 维度修复（已修复）
+
+- 状态：已修复并验证
+- 问题：`evaluate_local_coordinate_consistency()` 只比较 XY 平面距离，忽略 Z 分量
+- 修复：计算三维欧氏距离 `slam_xyz=(slam_x, slam_y, 0)` vs `npy_xyz=NPY XYZ`
+- 验证：task #249 单点查询坐标差 0.968m（含 Z=-0.656m），修复前 XY-only 为 0.710m
+- 验收标准：AC-003-16
+- 详见 `bugfix-z-dimension-consistency.md`
+
+## BUG-003-05 — 精化步骤复用初始匹配器（已修复）
+
+- 状态：已修复并验证
+- 问题：`refine_pose_with_roma()` 硬编码 LightGlue，与初始 SALAD+RoMa 使用的 TinyRoMa 不一致
+- 修复：增加 `matcher_type` 参数 + `_dispatch_matcher()` 分派；API 端点从 `match_method` 推导
+- 验证：task #249 精化从 1 对失败 → 273 对成功
+- 验收标准：AC-003-17
+- 详见 `bugfix-refine-matcher-inconsistency.md`
+
 ## TODO — Phase B（暂时遗留）
 
 - [ ] TODO：确认与算法输入解耦的独立位姿真值来源；
