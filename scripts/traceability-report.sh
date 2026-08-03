@@ -18,10 +18,10 @@ mkdir -p "$(dirname "$OUTPUT")"
 
   while IFS= read -r spec_dir; do
     feature_id="$(basename "$spec_dir")"
-    ac_count="$(rg -o 'AC-[0-9]{3}-[0-9]{2}' "$spec_dir/spec.md" | sort -u | wc -l | tr -d ' ')"
-    task_count="$(rg -o 'TASK-[0-9]{3}-[0-9]{2}' "$spec_dir/tasks.md" | sort -u | wc -l | tr -d ' ')"
-    test_count="$(rg -o 'TL-[0-9]{3}-[0-9]{2}' "$spec_dir/testlist.md" | sort -u | wc -l | tr -d ' ')"
-    risk_count="$(rg -o 'RISK-[0-9]{3}-[0-9]{2}' "$spec_dir/risks.md" | sort -u | wc -l | tr -d ' ')"
+    ac_count="$(grep -oE 'AC-[0-9]{3}-[0-9]{2}' "$spec_dir/spec.md" | sort -u | wc -l | tr -d ' ')"
+    task_count="$(grep -oE 'TASK-[0-9]{3}-[0-9]{2}' "$spec_dir/tasks.md" | sort -u | wc -l | tr -d ' ')"
+    test_count="$(grep -oE 'TL-[0-9]{3}-[0-9]{2}' "$spec_dir/testlist.md" | sort -u | wc -l | tr -d ' ')"
+    risk_count="$(grep -oE 'RISK-[0-9]{3}-[0-9]{2}' "$spec_dir/risks.md" | sort -u | wc -l | tr -d ' ')"
     echo "| [$feature_id](../../specs/$feature_id/spec.md) | $ac_count | $task_count | $test_count | $risk_count |"
   done < <(find "$ROOT_DIR/specs" -mindepth 1 -maxdepth 1 -type d | sort)
 
@@ -39,7 +39,7 @@ mkdir -p "$(dirname "$OUTPUT")"
     fi
     echo "### $feature_id"
     echo
-    rg '^\| \*\*TL-[0-9]{3}-[0-9]{2}\*\*' "$spec_dir/testlist.md" || true
+    grep -E '^\| \*\*TL-[0-9]{3}-[0-9]{2}\*\*' "$spec_dir/testlist.md" || true
   done < <(find "$ROOT_DIR/specs" -mindepth 1 -maxdepth 1 -type d | sort)
 } > "$TMP_FILE"
 

@@ -12,6 +12,8 @@
 | 开始一次变更 | [工程实践](engineering-playbook.md)、[测试策略](testing-strategy.md) |
 | 编写测试与重构 | [测试命名规范](test-naming-conventions.md)、[重构规则](refactoring-rules.md) |
 | 查看本地 wiki skills 状态 | [Skill 安装与使用核验](skill-usage-audit.md) |
+| 查看特性变更记录 | [Changelog — Spec 003](CHANGELOG-003.md) |
+| 查看跨会话交接 | [交接记录](handoffs/) |
 
 ## 权威层级
 

@@ -121,4 +121,4 @@ curl -X POST http://localhost:8000/api/localize \
 2. **ACE LAS 验证完善**：与 LAS 点云对比得出精度指标
 3. **混合匹配优化**：DISK+LG 粗匹配 → LoFTR 精匹配 → 联合 PnP
 4. **降低 min_cert**：当前 0.001，可根据场景调整
-5. **精化 SALAD v2 路径**：当前 LoFTR 映射回 LightGlue（位姿偏差大时失败），可考虑用 LoFTR 做精化匹配
+5. **精化匹配器通用化**（BUG-003-05 已修复硬编码 LightGlue）：后续可进一步把 `matcher_type` 抽象为策略对象，支持运行时按场景选择 TinyRoMa / LoFTR / LightGlue

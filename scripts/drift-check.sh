@@ -32,7 +32,7 @@ while IFS= read -r legacy; do
   name="$(basename "$legacy" .md)"
   if [[ ! -s "$ROOT_DIR/specs/$name/spec.md" ]]; then
     fail "$(basename "$legacy"): 没有对应 specs/$name/spec.md"
-  elif ! rg -q "\.\./specs/$name/spec\.md" "$legacy"; then
+  elif ! grep -qE "\.\./specs/$name/spec\.md" "$legacy"; then
     fail "$(basename "$legacy"): 没有指向权威规格"
   fi
 done < <(find "$ROOT_DIR/spec" -maxdepth 1 -type f -name '[0-9][0-9][0-9]-*.md' | sort)

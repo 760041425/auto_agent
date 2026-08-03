@@ -40,16 +40,16 @@ else
       fi
     done
 
-    if [[ -s "$spec_dir/spec.md" ]] && ! rg -q 'AC-[0-9]{3}-[0-9]{2}' "$spec_dir/spec.md"; then
+    if [[ -s "$spec_dir/spec.md" ]] && ! grep -qE 'AC-[0-9]{3}-[0-9]{2}' "$spec_dir/spec.md"; then
       fail "$feature_id/spec.md: 缺少稳定 AC-ID"
     fi
-    if [[ -s "$spec_dir/tasks.md" ]] && ! rg -q 'TASK-[0-9]{3}-[0-9]{2}' "$spec_dir/tasks.md"; then
+    if [[ -s "$spec_dir/tasks.md" ]] && ! grep -qE 'TASK-[0-9]{3}-[0-9]{2}' "$spec_dir/tasks.md"; then
       fail "$feature_id/tasks.md: 缺少稳定 TASK-ID"
     fi
-    if [[ -s "$spec_dir/testlist.md" ]] && ! rg -q 'TL-[0-9]{3}-[0-9]{2}' "$spec_dir/testlist.md"; then
+    if [[ -s "$spec_dir/testlist.md" ]] && ! grep -qE 'TL-[0-9]{3}-[0-9]{2}' "$spec_dir/testlist.md"; then
       fail "$feature_id/testlist.md: 缺少稳定 TL-ID"
     fi
-    if [[ -s "$spec_dir/risks.md" ]] && ! rg -q 'RISK-[0-9]{3}-[0-9]{2}' "$spec_dir/risks.md"; then
+    if [[ -s "$spec_dir/risks.md" ]] && ! grep -qE 'RISK-[0-9]{3}-[0-9]{2}' "$spec_dir/risks.md"; then
       fail "$feature_id/risks.md: 缺少稳定 RISK-ID"
     fi
   done < <(find "$SPEC_ROOT" -mindepth 1 -maxdepth 1 -type d | sort)

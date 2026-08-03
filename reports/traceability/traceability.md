@@ -5,7 +5,8 @@
 | 规格 | AC | TASK | TL | 风险 |
 | --- | ---: | ---: | ---: | ---: |
 | [001-las-image-3d-query](../../specs/001-las-image-3d-query/spec.md) | 6 | 8 | 8 | 6 |
-| [002-realtime-localization-optimization](../../specs/002-realtime-localization-optimization/spec.md) | 7 | 9 | 9 | 7 |
+| [002-realtime-localization-optimization](../../specs/002-realtime-localization-optimization/spec.md) | 10 | 11 | 14 | 8 |
+| [003-multi-algo-verification](../../specs/003-multi-algo-verification/spec.md) | 17 | 19 | 35 | 19 |
 
 ## 测试场景映射
 
@@ -31,3 +32,11 @@
 | **TL-002-07** 表面法线有效 | AC-002-04 | 单元 | 输出单位向量且形状稳定 | 已有自动化测试 |
 | **TL-002-08** 冷启动算法基准 | AC-002-06 | 性能 | 记录加载、推理、PnP 和总耗时 | 待阈值 |
 | **TL-002-09** 热启动算法基准 | AC-002-06 | 性能 | 固定样本报告 p50/p95 和质量 | 待阈值 |
+| **TL-002-10** 四向地面 Euler 契约 | AC-002-08, AC-002-09 | 单元 | 默认仅四个正交 yaw、pitch=-15、roll=0；四元数反解的相机 forward Z<0；显式 0/0/0 不回退轨迹四元数 | 已通过 |
+| **TL-002-11** MapTile 渲染位姿 | AC-002-04, AC-002-09 | 单元/文件 | 接受和拒绝的 tile 均记录本地位置、Euler、四元数、COLMAP 行、约定、FOV 与拒绝原因 | 已通过 |
+| **TL-002-12** 历史 32 向索引迁移 | AC-002-08, AC-002-09 | 单元/文件 | 迁移只发布四向 p-15 计划；复用现有有效文件、缺失视图保留 pose 与拒绝原因，原清单有可恢复备份 | 已通过 |
+| **TL-002-13** 消费端服从当前 MapTile 发布 | AC-002-04, AC-002-08 | 单元/真实数据 | 即使描述子 NPZ 和磁盘仍含旧 p-30/p0/p+15 资产，V2、原版和诊断脚本都只能读取当前 accepted 四向 p-15 tile，不得扫描或伪造已下线路径 | 已通过 |
+| **TL-002-14** 完整轨迹与网格生产计划 | AC-002-10 | 单元/真实数据 | 所有过滤后轨迹位置与所有网格位置先合并再展开四向；生产入口拒绝 `--max-poses`。当前数据为 107 轨迹+576 网格=683 位置、2,732 计划视图 | 已通过 |
+
+### 003-multi-algo-verification
+
