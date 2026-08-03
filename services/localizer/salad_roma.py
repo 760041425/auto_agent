@@ -34,6 +34,7 @@ from PIL import Image
 from services.las_processor.projection import _load_poses_and_offset, _quat_to_rotmat
 
 from services.localizer.logger_config import get_backend_logger
+from services.localizer.pose_utils import solve_pnp_with_focal_search, annotate_pnp_quality
 
 _logger = get_backend_logger("salad_roma")
 
@@ -893,31 +894,46 @@ def _build_3d_2d_matches(kpts_q, kpts_tile, cert, coord_map, min_cert=0.001):
     return np.array(object_pts, dtype=np.float64), np.array(image_pts, dtype=np.float64)
 
 
-def _solve_pnp(object_pts, image_pts, camera_matrix):
-    """PnP 位姿估计"""
+def _solve_pnp(object_pts, image_pts, camera_matrix, fov_deg=75.0):
+    """PnP 位姿估计（多阶段焦距搜索 + 质量门控）。"""
     if len(object_pts) < 4:
         log(f"    [PnP] 点太少: {len(object_pts)} < 4")
         return None, None, None
-    
+
     log(f"    [PnP] 输入: {len(object_pts)} 对 3D-2D 匹配")
-    if len(object_pts) > 0:
-        log(f"    [PnP] 3D点范围: X={object_pts[:,0].min():.1f}~{object_pts[:,0].max():.1f}, Y={object_pts[:,1].min():.1f}~{object_pts[:,1].max():.1f}, Z={object_pts[:,2].min():.1f}~{object_pts[:,2].max():.1f}")
-        log(f"    [PnP] 2D点范围: X={image_pts[:,0].min():.1f}~{image_pts[:,0].max():.1f}, Y={image_pts[:,1].min():.1f}~{image_pts[:,1].max():.1f}")
-    
-    dist_coeffs = np.zeros((4, 1))
-    success, rvec, tvec, inliers = cv2.solvePnPRansac(
-        object_pts, image_pts, camera_matrix, dist_coeffs,
-        iterationsCount=2000, reprojectionError=8.0, confidence=0.85,
-        flags=cv2.SOLVEPNP_ITERATIVE,
+    pts_h, pts_w = 512, 512
+    if image_pts is not None and len(image_pts) > 0:
+        pts_w = float(image_pts[:, 0].max()) * 2 if image_pts[:, 0].max() > 0 else 512.0
+        pts_h = float(image_pts[:, 1].max()) * 2 if image_pts[:, 1].max() > 0 else 512.0
+
+    pnp_out = solve_pnp_with_focal_search(
+        object_pts, image_pts, int(pts_w), int(pts_h),
+        initial_K=camera_matrix, fov_deg=fov_deg,
+        reproj_error=4.0, min_inliers=6,
     )
-    
-    if not success:
-        log(f"    [PnP] 求解失败")
+    pnp_out = annotate_pnp_quality(pnp_out, min_score=4.0, min_inliers=6)
+
+    if not pnp_out.get("success"):
+        log(f"    [PnP] 求解失败: {pnp_out.get('error', 'unknown')}")
         return None, None, None
-    
-    ic = len(inliers) if inliers is not None else len(object_pts)
-    log(f"    [PnP] 成功: {ic}/{len(object_pts)} 内点, tvec={tvec.flatten()[:3]}")
-    return rvec, tvec, inliers
+
+    ic = pnp_out.get("inlier_count", 0)
+    score = pnp_out.get("quality_score", pnp_out.get("score", 0.0))
+    q_pass = pnp_out.get("quality_passed")
+    q_reasons = pnp_out.get("quality_reasons", [])
+    log(f"    [PnP] 成功: {ic}/{len(object_pts)} 内点, score={score:.2f}, "
+        f"quality={'✓' if q_pass else '✗ ' + ','.join(q_reasons)}, "
+        f"tvec={pnp_out['tvec'].flatten()[:3]}")
+    # 把 quality 信息挂到函数属性，供调用方读取
+    _solve_pnp.last_quality = {
+        "score": score,
+        "quality_passed": q_pass,
+        "quality_reasons": q_reasons,
+    }
+    return pnp_out["rvec"], pnp_out["tvec"], pnp_out.get("inliers")
+
+
+_solve_pnp.last_quality = {"score": None, "quality_passed": None, "quality_reasons": []}
 
 
 def _rotation_matrix_to_quaternion(R):
@@ -1347,6 +1363,9 @@ def localize_with_salad_roma(
     # 4. 对 top-1 候选做 LightGlue 匹配 + PnP
     best_rvec, best_tvec = None, None
     best_inliers = 0
+    best_score = None
+    best_quality_passed = None
+    best_quality_reasons = []
     best_reproj_error = float("inf")
     best_3d, best_2d = None, None
     best_pose = None
@@ -1387,8 +1406,8 @@ def localize_with_salad_roma(
         if len(obj_pts) < 4:
             continue
         
-        # PnP
-        rvec_i, tvec_i, inliers_i = _solve_pnp(obj_pts, img_pts, camera_matrix)
+        # PnP（多阶段焦距搜索 + 质量门控）
+        rvec_i, tvec_i, inliers_i = _solve_pnp(obj_pts, img_pts, camera_matrix, fov_deg=75.0)
         if rvec_i is not None:
             ic = len(inliers_i) if inliers_i is not None else len(obj_pts)
             log(f"    PnP: {ic}/{len(obj_pts)} 内点")
@@ -1397,6 +1416,9 @@ def localize_with_salad_roma(
                 best_inliers = ic
                 best_reproj_error = reproj_error_i
                 best_rvec, best_tvec = rvec_i, tvec_i
+                best_score = _solve_pnp.last_quality.get("score")
+                best_quality_passed = _solve_pnp.last_quality.get("quality_passed")
+                best_quality_reasons = _solve_pnp.last_quality.get("quality_reasons", [])
                 best_3d, best_2d = (
                     obj_pts[inliers_i.flatten()] if inliers_i is not None else obj_pts,
                     img_pts[inliers_i.flatten()] if inliers_i is not None else img_pts,
@@ -1504,10 +1526,11 @@ def localize_with_salad_roma(
                 log(f"    3D-2D 匹配不足, 停止迭代")
                 break
 
-            nr, nt, ni = _solve_pnp(obj_pts2, img_pts2, camera_matrix)
+            nr, nt, ni = _solve_pnp(obj_pts2, img_pts2, camera_matrix, fov_deg=75.0)
             if nr is not None:
                 nic = len(ni) if ni is not None else len(obj_pts2)
-                log(f"    PnP: {nic}/{len(obj_pts2)} 内点")
+                log(f"    PnP: {nic}/{len(obj_pts2)} 内点"
+                    f", quality={'✓' if _solve_pnp.last_quality.get('quality_passed') else '✗'}")
 
                 # 用新位姿渲染并评估 SALAD 相似度
                 new_proj = str(out / f"_new_{tag}_{iteration}.png")
@@ -1676,6 +1699,11 @@ def localize_with_salad_roma(
         result['iter_history'] = iter_history
         result['total_rounds'] = len(candidates)
         result['all_candidates'] = all_candidates_out
+        # PnP 质量门控信息
+        result["score"] = float(best_score) if best_score is not None else None
+        result["quality_passed"] = best_quality_passed
+        result["quality_score"] = float(best_score) if best_score is not None else None
+        result["quality_reasons"] = best_quality_reasons
         return result
     
     return {"success": False, "error": f"SALAD+{match_name} PnP 失败", "tag": tag}
