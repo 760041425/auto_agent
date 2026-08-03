@@ -1,26 +1,13 @@
 import json
-import logging
 import os
-from datetime import datetime
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-# 日志配置
-LOG_DIR = Path(__file__).parent.parent.parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-_logger = logging.getLogger("matcher")
-_logger.setLevel(logging.DEBUG)
-_fh = logging.FileHandler(LOG_DIR / "matcher.log", mode="a", encoding="utf-8")
-_fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
-_logger.handlers.clear()
-_logger.addHandler(_fh)
+from services.localizer.logger_config import get_backend_logger
 
-# 同时输出到 stdout
-_sh = logging.StreamHandler()
-_sh.setFormatter(logging.Formatter("%(asctime)s [MATCHER] %(message)s", datefmt="%H:%M:%S"))
-_logger.addHandler(_sh)
+_logger = get_backend_logger("matcher")
 
 
 def log_match_step(msg: str, task_id: int | None = None):
@@ -60,7 +47,8 @@ def _extract_features(image_path: str, method: str = "sift", task_id: int | None
 
 
 # 向后兼容
-_extract_sift = lambda *a, **kw: _extract_features(*a, method="sift", **kw)
+def _extract_sift(*args, **kwargs):
+    return _extract_features(*args, method="sift", **kwargs)
 
 
 def _safe_knn_match(des1, des2, k=2):
@@ -171,7 +159,7 @@ def _try_ransac(q_pts, p_pts, total_matches=0, task_id=None):
     if best_H is not None:
         log_match_step(f"✅ RANSAC最佳: {best_name}, 内点={best_inliers}/{total_matches}", task_id)
     else:
-        log_match_step(f"❌ 所有RANSAC方法均失败", task_id)
+        log_match_step("❌ 所有RANSAC方法均失败", task_id)
     return best_H, best_mask
 
 
@@ -184,8 +172,10 @@ def _match_on_tile(q_kp, q_des, q_w, q_h, tile_info, task_id, feature_method="si
         return None
 
     coord_path = tile_info.get("coord_map_path", "")
-    if not coord_path or not os.path.exists(coord_path):
+    if not coord_path or not os.path.exists(coord_path) or os.path.isdir(coord_path):
         coord_path = str(Path("projections/tiles") / Path(coord_path).name)
+    if not coord_path or not os.path.exists(coord_path) or os.path.isdir(coord_path):
+        return None
 
     p_kp, p_des, p_shape = _extract_features(tile_path, feature_method, task_id)
     if p_des is None or len(p_des) < 4:
@@ -211,8 +201,6 @@ def _match_on_tile(q_kp, q_des, q_w, q_h, tile_info, task_id, feature_method="si
         return None
 
     coord_map = _load_coord_map(coord_path)
-    tile_w, tile_h = tile_info["width"], tile_info["height"]
-
     matched_3d = []
     used_pp = set()
     used_qp = set()
@@ -351,11 +339,11 @@ def match_query_to_projection(
     # 加载 tile 索引
     tile_index_path = Path("projections/tile_index.json")
     if not tile_index_path.exists():
-        log_match_step(f"❌ tile_index.json 不存在，请先运行预处理", task_id)
+        log_match_step("❌ tile_index.json 不存在，请先运行预处理", task_id)
         return {"matched": False, "regions": [], "message": "tile_index.json not found, run preprocess first"}
 
     with open(tile_index_path) as f:
-        tiles = json.load(f)
+        tiles = [tile for tile in json.load(f) if tile.get("accepted", True)]
     log_match_step(f"🗺️ 加载 {len(tiles)} 个 tile", task_id)
 
     best_result = None
@@ -370,7 +358,7 @@ def match_query_to_projection(
             log_match_step(f"  → 当前最佳: {best_count} 内点", task_id)
 
     if best_result is None or best_count < 3:
-        log_match_step(f"❌ 所有 tile 均未匹配成功", task_id)
+        log_match_step("❌ 所有 tile 均未匹配成功", task_id)
         return {"matched": False, "regions": [], "message": "No matching tile found"}
 
     coords = np.array([m["point3d"] for m in best_result], dtype=np.float64)

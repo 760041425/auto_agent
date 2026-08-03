@@ -254,17 +254,122 @@ def ace_localize(model, image, K, normal_map=None):
     if len(pts_2d) < 10:
         print(f"[ACE] ❌ 有效点不足: {len(pts_2d)}")
         return False, None, None, None
-    
+
     dist = np.zeros((4, 1))
     success, rvec, tvec, inliers = cv2.solvePnPRansac(
         pts_3d, pts_2d, K, dist,
         iterationsCount=500, reprojectionError=20.0, confidence=0.95)
-    
+
     if not success or len(pts_2d[inliers.flatten()] if inliers is not None else pts_2d) < 6:
         return False, None, None, None
     inlier_count = len(inliers) if inliers is not None else len(pts_2d)
     print(f"[ACE] ✅ {inlier_count}/{len(pts_2d)} 内点")
     return True, rvec, tvec, inliers
+
+
+# ── RGB-only ACE（方案 C）──
+
+class Encoder3Ch(Encoder):
+    """官方 Encoder 改 3 通道输入（RGB only，不用 Normal）。"""
+    def __init__(self, out_channels=512):
+        super().__init__(out_channels)
+        self.conv1 = nn.Conv2d(3, 32, 3, 1, 1)
+
+
+class ACERegressor3Ch(nn.Module):
+    """ACE Regressor with 3-channel (RGB) input."""
+    OUTPUT_SUBSAMPLE = 8
+
+    def __init__(self, mean, num_head_blocks=1, use_homogeneous=False, num_encoder_features=256):
+        super().__init__()
+        self.feature_dim = num_encoder_features
+        self.encoder = Encoder3Ch(out_channels=self.feature_dim)
+        self.heads = Head(mean, num_head_blocks, use_homogeneous, in_channels=self.feature_dim)
+
+    def forward(self, x):
+        return self.heads(self.encoder(x))
+
+
+def ace_predict_rgb(model, image, max_points=2000):
+    """RGB-only ACE 推理（3ch 输入，无需 normal map）。
+
+    参数
+    ----------
+    model : ACERegressor3Ch
+    image : np.ndarray (H, W, 3) BGR
+    max_points : 最大采样点数
+
+    返回
+    -------
+    (pts_2d, pts_3d, confidence)
+    """
+    model.eval()
+    orig_h, orig_w = image.shape[:2]
+    target_h = max(32, (orig_h // 32) * 32)
+    target_w = max(32, (orig_w // 32) * 32)
+
+    img = cv2.resize(image, (target_w, target_h))
+    rgb = img.astype(np.float32) / 255.0
+    tensor = torch.from_numpy(rgb).permute(2, 0, 1).unsqueeze(0).float().to(DEVICE)
+
+    with torch.no_grad():
+        pred = model(tensor)  # (1, 3, H/8, W/8)
+
+    pred = pred[0].cpu().numpy()
+    valid = np.linalg.norm(pred, axis=0) > 1e-6
+    ys, xs = np.where(valid)
+    if len(ys) == 0:
+        return np.array([]), np.array([]), np.array([])
+
+    scale_x = orig_w / target_w
+    scale_y = orig_h / target_h
+    pts_2d = np.column_stack([xs.astype(float) * 8 * scale_x + 4,
+                              ys.astype(float) * 8 * scale_y + 4])
+    pts_3d = pred[:, ys, xs].T
+
+    if len(pts_2d) > max_points:
+        grid_size = int(np.sqrt(len(pts_2d) / max_points)) + 1
+        grid_coords = (pts_2d / grid_size).astype(int)
+        _, unique_idx = np.unique(grid_coords, axis=0, return_index=True)
+        unique_idx = np.sort(unique_idx)[:max_points]
+        pts_2d, pts_3d = pts_2d[unique_idx], pts_3d[unique_idx]
+
+    return pts_2d, pts_3d, np.ones(len(pts_2d))
+
+
+def train_ace_rgb(tile_index_path="projections/tile_index.json",
+                  model_save_path="projections/ace_model_rgb.pth",
+                  epochs=100, batch_size=2, lr=1e-3):
+    """训练 RGB-only ACE 模型。"""
+    model = ACERegressor3Ch(mean=torch.zeros(3).to(DEVICE)).to(DEVICE)
+    dataset = SceneCoordinateDataset(tile_index_path, max_samples=200)
+    if len(dataset) == 0:
+        print("[ACE RGB] 无训练数据")
+        return
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.5)
+
+    model.train()
+    for epoch in range(epochs):
+        total_loss = 0
+        for img6ch, target in loader:
+            img_rgb = img6ch[:, :3, :, :]  # 仅用 RGB
+            pred = model(img_rgb)
+            target_ds = target[:, ::8, ::8]
+            mask = (target_ds.abs().sum(dim=1, keepdim=True) > 1e-6).float()
+            loss = (pred - target_ds).abs() * mask
+            loss = loss.sum() / max(mask.sum(), 1)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        scheduler.step()
+        if (epoch + 1) % 20 == 0:
+            print(f"[ACE RGB] Epoch {epoch+1}/{epochs} loss={total_loss/len(loader):.4f}")
+
+    torch.save(model.state_dict(), model_save_path)
+    print(f"[ACE RGB] 保存: {model_save_path}")
 
 
 if __name__ == "__main__":

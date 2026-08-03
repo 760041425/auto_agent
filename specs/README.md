@@ -19,6 +19,7 @@
 | --- | --- | --- | --- |
 | 001 | LAS 影像 3D 查询 | 基线补录，待补自动化验收 | [规格](001-las-image-3d-query/spec.md) |
 | 002 | 移动场景实时定位优化 | 迭代中，性能目标待基准证明 | [规格](002-realtime-localization-optimization/spec.md) |
+| 003 | 多方案定位与可信验证修复 | 草案，Phase A 可实施，精度结论待真值 | [规格](003-multi-algo-verification/spec.md) |
 
 ## 质量命令
 

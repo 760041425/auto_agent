@@ -51,18 +51,9 @@ from services.las_processor.colmap_reader import read_images_txt, read_points3d_
 _DL_MATCHER = None  # LightGlueMatcher
 _LOFTR = None       # LoFTR
 
-LOG_DIR = Path(__file__).parent.parent.parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+from services.localizer.logger_config import get_backend_logger
 
-_logger = logging.getLogger("localizer")
-_logger.setLevel(logging.DEBUG)
-_fh = logging.FileHandler(str(LOG_DIR / "localizer.log"), mode="a", encoding="utf-8")
-_fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
-_logger.handlers.clear()
-_logger.addHandler(_fh)
-_sh = logging.StreamHandler()
-_sh.setFormatter(logging.Formatter("%(asctime)s [LOCALIZER] %(message)s", datefmt="%H:%M:%S"))
-_logger.addHandler(_sh)
+_logger = get_backend_logger("localizer")
 
 
 def log(msg: str):
@@ -782,6 +773,7 @@ def localize_image(
     match_method: str = "flann",
     max_iterations: int = 3,
     debug_visualizations: bool = False,
+    coordinate_threshold_m: float = 0.3,
 ) -> dict:
     """
     端到端视觉定位主函数（v2 优化版）。
@@ -809,6 +801,7 @@ def localize_image(
             top_k_retrieval=3,
             debug_visualizations=debug_visualizations,
             algo=algo,
+            coordinate_threshold_m=coordinate_threshold_m,
         )
 
     tag = f"{feature_method}_{match_method}"
@@ -1078,6 +1071,8 @@ def _retrieve_top_poses_by_sift(
     
     results = []
     for ti, tile in enumerate(tile_index):
+        if not tile.get("accepted", True):
+            continue
         # 跳过 top 视图（俯视图与查询图视角差异大，匹配效果差）
         view = tile.get("view", "front")
         if view == "top":

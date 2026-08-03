@@ -16,7 +16,15 @@
 - 上传文件：`query_images/`
 - 地图输入：`las/`
 - 派生产物：`projections/`
-- 日志：`logs/`
+- 日志：`logs/`（分离为 HTTP API 日志和业务日志）
+
+### 日志架构
+
+| 文件 | 用途 | 写入方 |
+|------|------|--------|
+| `logs/http_api.log` | HTTP 请求日志 | FastAPI 中间件 + uvicorn |
+| `logs/backend.log` | 所有业务日志 | localizer, matcher, preprocess 等 |
+| `logs/archive/` | 旧日志归档 | 迁移时保留 |
 
 所有相对路径都以仓库根目录为工作目录。脚本应先解析自身路径再执行，避免依赖调用者当前目录。
 

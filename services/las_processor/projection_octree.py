@@ -46,15 +46,43 @@ OCTREE_CONFIG = os.environ.get(
 TILE_PX = 512
 VIEW_RANGE = 50.0
 SAMPLE_INTERVAL_M = 5.0
-GRID_INTERVAL_M = 10.0  # 网格位姿间隔（每张tile覆盖~77m，10m间距保证充分重叠）
+GRID_INTERVAL_M = 5.0  # 网格位姿间隔（每张tile覆盖~77m，5m间距保证充分重叠）
+TRAJECTORY_OFFSET_M = 5.0  # 网格点距轨迹点太近时，沿轨迹→网格方向偏移此距离以避免重叠
+MIN_MEDIAN_DEPTH_M = 2.0  # 渲染后中位深度低于此值视为相机在建筑内部，拒绝该位置
 BLACK_PIXEL_THRESHOLD = 0.50  # 超过 50% 黑色像素的图像被过滤，不生成文件
 PITCH_DEG = -15.0
-EULER_VIEW_DIRECTIONS = [
+GROUND_VIEW_DIRECTIONS = [
     ('yaw0', 0.0, PITCH_DEG, 0.0),
     ('yaw90', 90.0, PITCH_DEG, 0.0),
     ('yaw180', 180.0, PITCH_DEG, 0.0),
     ('yaw270', 270.0, PITCH_DEG, 0.0),
 ]
+# 兼容旧导入名；生产发布契约以 GROUND_VIEW_DIRECTIONS 为准。
+EULER_VIEW_DIRECTIONS = GROUND_VIEW_DIRECTIONS
+
+# 实验视角：只能写入隔离的 experiments 输出目录，不能覆盖生产 tile_index。
+# 水平视角 pitch=0°，8 个方向 45° 间隔，fov=90
+HORIZONTAL_VIEW_DIRECTIONS = [
+    ('yaw0', 0.0, 0.0, 0.0),
+    ('yaw45', 45.0, 0.0, 0.0),
+    ('yaw90', 90.0, 0.0, 0.0),
+    ('yaw135', 135.0, 0.0, 0.0),
+    ('yaw180', 180.0, 0.0, 0.0),
+    ('yaw225', 225.0, 0.0, 0.0),
+    ('yaw270', 270.0, 0.0, 0.0),
+    ('yaw315', 315.0, 0.0, 0.0),
+]
+HORIZONTAL_FOV_DEG = 90.0
+
+# 多 pitch 视角：pitch ∈ {-30, -15, 0, +15}，每 pitch 8 yaw = 32 向/pose
+MULTI_PITCH_VIEW_DIRECTIONS = []
+for _pitch in [-30.0, -15.0, 0.0, 15.0]:
+    for _yaw in [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0]:
+        MULTI_PITCH_VIEW_DIRECTIONS.append((f"yaw{int(_yaw)}", _yaw, _pitch, 0.0))
+MULTI_PITCH_FOV_DEG = 90.0
+
+# 宽松黑色过滤阈值（方案 A）：允许更多 tile 通过
+RELAXED_BLACK_PIXEL_THRESHOLD = 0.95
 
 
 def _filter_trajectory_poses(
@@ -80,6 +108,58 @@ def _filter_trajectory_poses(
             filtered.append(pose)
             last_kept = pose
     return filtered
+
+
+def _stagger_grid_poses(
+    grid_poses: list[dict],
+    trajectory_poses: list[dict],
+    offset_m: float = TRAJECTORY_OFFSET_M,
+) -> list[dict]:
+    """把距轨迹点过近的网格点偏移到轨迹点旁 offset_m 处，避免两类位置重叠。
+
+    对每个网格点，若其距最近轨迹点的距离 < offset_m，则沿"轨迹→网格"方向
+    将该点推移到距轨迹点恰好 offset_m 的位置；若网格点恰好与轨迹点重合，
+    则向 +X 方向偏移。最终去重（保留 0.1m 精度）。
+    """
+    if not grid_poses or not trajectory_poses:
+        return grid_poses
+
+    traj_xy = np.array([[p["x"], p["y"]] for p in trajectory_poses])
+    seen: set[tuple[float, float]] = set()
+    result: list[dict] = []
+
+    for pose in grid_poses:
+        gx = float(pose["x"])
+        gy = float(pose["y"])
+        delta = traj_xy - np.array([gx, gy])
+        dists = np.sqrt((delta * delta).sum(axis=1))
+        nearest_idx = int(dists.argmin())
+        nearest_dist = float(dists[nearest_idx])
+
+        if nearest_dist < offset_m:
+            dx = gx - traj_xy[nearest_idx, 0]
+            dy = gy - traj_xy[nearest_idx, 1]
+            if nearest_dist < 1e-6:
+                # 与轨迹点重合，向 +X 方向偏移
+                dx, dy = offset_m, 0.0
+            else:
+                dx = dx / nearest_dist * offset_m
+                dy = dy / nearest_dist * offset_m
+            gx = float(traj_xy[nearest_idx, 0] + dx)
+            gy = float(traj_xy[nearest_idx, 1] + dy)
+
+        key = (round(gx, 1), round(gy, 1))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({
+            **pose,
+            "x": gx,
+            "y": gy,
+            "name": f"grid_{gx:.1f}_{gy:.1f}",
+        })
+
+    return result
 
 
 def _check_octree_binaries() -> None:
@@ -431,7 +511,8 @@ def _build_colmap_line(pose: dict, offset_xyz: tuple[float, float, float], z_bia
     qy = pose.get('qy', 0.0)
     qz = pose.get('qz', 0.0)
 
-    use_euler = abs(float(pose.get('yaw_deg', 0.0))) > 1e-9 or abs(float(pose.get('pitch_deg', 0.0))) > 1e-9 or abs(float(pose.get('roll_deg', 0.0))) > 1e-9
+    # Euler 是否显式提供由字段存在性决定；0° 也是有效指令，不能回退轨迹四元数。
+    use_euler = any(key in pose for key in ('yaw_deg', 'pitch_deg', 'roll_deg'))
     if use_euler:
         yaw_deg = float(pose.get('yaw_deg', heading_deg))
         pitch_deg = float(pose.get('pitch_deg', pitch_deg))
@@ -480,6 +561,67 @@ def _build_colmap_line(pose: dict, offset_xyz: tuple[float, float, float], z_bia
         qw, qx, qy, qz = _look_at_colmap_quat(fwd)
 
     return f"{qw:.10f} {qx:.10f} {qy:.10f} {qz:.10f} {tx:.6f} {ty:.6f} {tz:.6f}"
+
+
+def _build_tile_index_record(
+    *,
+    view: dict,
+    pose_id: int,
+    render_line: str,
+    image_path: str,
+    npy_path: str,
+    normal_path: str,
+    width: int,
+    height: int,
+    fov_deg: float,
+    pixel_count: int,
+    accepted: bool,
+    reject_reason: str | None = None,
+    reused: bool = False,
+) -> dict:
+    """Build one auditable MapTile record from the exact render pose."""
+    parts = render_line.split()
+    if len(parts) != 7:
+        raise ValueError("render_line must contain quaternion wxyz and translation xyz")
+    quaternion = [float(value) for value in parts[:4]]
+    tx, ty, tz = [float(value) for value in parts[4:7]]
+    yaw = float(view.get("yaw_deg", view.get("heading_deg", 0.0)))
+    pitch = float(view.get("pitch_deg", PITCH_DEG))
+    roll = float(view.get("roll_deg", 0.0))
+    tile = f"{float(view['x']):.1f}_{float(view['y']):.1f}_{float(view['z']):.1f}"
+    return {
+        "image_path": image_path,
+        "npy_path": npy_path,
+        "normal_path": normal_path,
+        "width": int(width),
+        "height": int(height),
+        "view": str(view["view_dir"]),
+        "tile": tile,
+        "pose_id": int(pose_id),
+        "yaw_deg": yaw,
+        "pitch_deg": pitch,
+        "roll_deg": roll,
+        "camera": {
+            "model": "PINHOLE",
+            "fov_deg": float(fov_deg),
+            "width": int(width),
+            "height": int(height),
+        },
+        "camera_pose": {
+            "position_local_m": {"x": tx, "y": ty, "z": tz},
+            "euler_deg": {"yaw": yaw, "pitch": pitch, "roll": roll},
+            "quaternion_wxyz": quaternion,
+            "colmap_line": render_line,
+            "coordinate_frame": "slam_local",
+            "rotation_convention": "world_to_camera_wxyz",
+            "orientation_source": "euler",
+        },
+        "pixel_count": int(pixel_count),
+        "accepted": bool(accepted),
+        "status": "accepted" if accepted else "rejected",
+        "reject_reason": reject_reason,
+        "reused": bool(reused),
+    }
 
 
 def _quat_to_rotmat_colmap(qw: float, qx: float, qy: float, qz: float) -> np.ndarray:
@@ -737,6 +879,7 @@ def prepare_octree_render_plan(
     max_poses: Optional[int] = None,
     grid_interval_m: float = 10.0,
     use_grid_sampling: bool = True,
+    view_directions: list = None,
 ) -> tuple[Path, list[dict]]:
     """
     生成 octree_render 的投影位姿计划。
@@ -799,12 +942,16 @@ def prepare_octree_render_plan(
                     "name": f"grid_{gx:.1f}_{gy:.1f}",
                 })
 
+        # 网格点与轨迹点错开：过近的网格点偏移到轨迹点旁 TRAJECTORY_OFFSET_M 处
+        grid_poses = _stagger_grid_poses(grid_poses, sampled, offset_m=TRAJECTORY_OFFSET_M)
+
         print(f"[OCTREE] 轨迹位姿: {len(sampled)} 个, 网格位姿: {len(grid_poses)} 个 ({len(grid_x)}x{len(grid_y)})")
         sampled.extend(grid_poses)
 
     views = []
     for pose in sampled:
-        for view_dir, yaw_deg, pitch_deg, roll_deg in EULER_VIEW_DIRECTIONS:
+        _vds = view_directions if view_directions is not None else EULER_VIEW_DIRECTIONS
+        for view_dir, yaw_deg, pitch_deg, roll_deg in _vds:
             views.append({
                 "name": pose.get("name", "pose"),
                 "view_dir": view_dir,
@@ -822,6 +969,16 @@ def prepare_octree_render_plan(
             })
 
     payload = {
+        "schema_version": 2,
+        "view_contract": {
+            "name": "four_direction_ground_facing_euler",
+            "yaw_deg": [0.0, 90.0, 180.0, 270.0],
+            "pitch_deg": PITCH_DEG,
+            "roll_deg": 0.0,
+            "pitch_semantics": "negative_world_z_is_ground_facing",
+        } if view_directions is None or view_directions == GROUND_VIEW_DIRECTIONS else {
+            "name": "experimental_custom_views",
+        },
         "sample_interval_m": float(sample_interval_m),
         "grid_interval_m": float(grid_interval_m),
         "use_grid_sampling": use_grid_sampling,
@@ -870,16 +1027,18 @@ def _is_black_or_nearly_black(image_path: str, black_ratio_threshold: float = BL
 
 
 def _load_z_bias(las_dir: str) -> float:
-    """从 map_config.json 加载 z_bias = rtk_external_param[2] + 3.0"""
+    """从 map_config.json 加载 z_bias = rtk_external_param[2]。
+
+    使用原始轨迹高度，不再额外抬高。轨迹 Z 本身就是采集时的相机高度。
+    """
     map_path = Path(las_dir) / "map_config.json"
     if not map_path.exists():
-        return 3.0
+        return 0.0
     with open(map_path) as f:
         cfg = json.load(f)
     rtk_external = cfg.get("rtk_external_param", [0.0, 0.0, 0.0])
     z_bias = float(rtk_external[2]) if isinstance(rtk_external, list) and len(rtk_external) >= 3 else 0.0
-    z_lift = float(os.environ.get("FALLBACK_Z_LIFT", "3.0"))
-    return z_bias + z_lift
+    return z_bias
 
 
 def project_las_multi_view_octree(
@@ -890,13 +1049,15 @@ def project_las_multi_view_octree(
     render_width: int = TILE_PX,
     render_height: int = TILE_PX,
     progress_callback=None,
+    view_directions: list = None,
+    fov_deg: float = 75.0,
 ) -> list[dict]:
     """
     用 Octree 引擎的多视角投影生成器。
     - 构建八叉树（仅首次）
     - 对每个位姿用 octree_render 渲染
     - 生成 coord_*.json 像素↔3D 映射
-    - 输出兼容旧版 tile_index.json 格式
+    - 输出 MapTile schema v2（含实际渲染位姿与发布状态）
     
     返回: generated tiles list
     """
@@ -953,6 +1114,10 @@ def project_las_multi_view_octree(
         progress_callback("加载位姿数据...", 20)
     
     # 2. 加载位姿
+    # 生产默认：四个正交 yaw、pitch=-15°、roll=0° 的斜向地面 Euler 视角。
+    if view_directions is None:
+        view_directions = GROUND_VIEW_DIRECTIONS
+
     pose_file = Path(output_dir) / "projection_view_poses.json"
     if not poses:
         if pose_file.exists():
@@ -993,7 +1158,8 @@ def project_las_multi_view_octree(
                     sample_interval_m=GRID_INTERVAL_M,
                     max_poses=None,
                     grid_interval_m=GRID_INTERVAL_M,
-            use_grid_sampling=True,
+                    use_grid_sampling=True,
+                    view_directions=view_directions,
                 )
             else:
                 raise RuntimeError("无可用位姿")
@@ -1011,6 +1177,7 @@ def project_las_multi_view_octree(
             max_poses=max_poses,
             grid_interval_m=GRID_INTERVAL_M,
             use_grid_sampling=True,
+            view_directions=view_directions,
         )
     
     # 读取位姿文件获取完整位姿列表（包含网格位姿）
@@ -1035,28 +1202,18 @@ def project_las_multi_view_octree(
             seen_coords.add(key)
             all_poses.append(view)
     
-    # 3. 对每个位姿渲染 3 个视角 (front/side/top)
+    # 3. 对每个位姿渲染生产契约定义的 4 个斜向地面视角。
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     tile_dir = out / "tiles"
     tile_dir.mkdir(parents=True, exist_ok=True)
     
-    # 清理旧投影产物，避免上一次结果污染本次生成
-    for pattern in ["view_*.png", "view_*.npy", "view_*_normal.npy", "coord_*.json", "render_color*.ppm", "render_depth*.pgm"]:
-        for f in out.glob(pattern):
-            if f.exists():
-                f.unlink()
-    for pattern in ["view_*.png", "view_*.npy", "view_*_normal.npy", "coord_*.json"]:
-        for f in tile_dir.glob(pattern):
-            if f.exists():
-                f.unlink()
-    
+    # 不清理历史 tile；tile_index.json 是本次发布清单，旧文件由显式维护任务处理。
     generated = []
     tile_dir = out / "tiles"
     tile_dir.mkdir(parents=True, exist_ok=True)
     
-    # 焦距计算（与旧版保持一致）
-    fov_deg = 75
+    # 焦距计算（支持自定义 FOV）
     f = max(render_width, render_height) / (2 * np.tan(np.deg2rad(fov_deg / 2)))
     focal_norm = f / max(render_width, render_height)
     fx = fy = f
@@ -1083,36 +1240,45 @@ def project_las_multi_view_octree(
         }
         vd = view["view_dir"]
         heading_deg = view.get("heading_deg", view.get("yaw_deg", 0.0))
+        pitch_deg_actual = view.get("pitch_deg", PITCH_DEG)
         fx_str = f"{pose['x']:.1f}_{pose['y']:.1f}_{pose['z']:.1f}"
+
+        # 在任何质量过滤之前固定实际渲染位姿，拒绝项也必须可审计。
+        render_line = _build_colmap_line(
+            pose,
+            offset_xyz,
+            z_bias,
+            heading_deg,
+            pitch_deg_actual,
+            pose.get("roll_deg", 0.0),
+        )
+        pitch_tag = f"p{int(pitch_deg_actual):+d}"
+        fname = f"view_{vd}_{fx_str}_{pi}_{pitch_tag}.png"
+        img_path = str(tile_dir / fname)
+        npy_path = img_path.replace(".png", ".npy")
+        normal_path = img_path.replace(".png", "_normal.npy")
         
         # 过滤 Z 超出范围（平移后 >10m 高度视为无效轨迹坐标）
         pose_z = pose['z'] + z_bias
         if abs(pose_z) > 10.0:
             print(f"[OCTREE] 跳过 {vd} pose#{pi}: z={pose_z:.1f}m 超出范围")
-            pixel_count = 0
-            generated.append({
-                "image_path": "",
-                "npy_path": "",
-                "normal_path": "",
-                "width": render_width,
-                "height": render_height,
-                "view": vd,
-                "tile": fx_str,
-                "pixel_count": 0,
-                "accepted": False,
-            })
+            generated.append(_build_tile_index_record(
+                view=view, pose_id=pi, render_line=render_line,
+                image_path="", npy_path="", normal_path="",
+                width=render_width, height=render_height, fov_deg=fov_deg,
+                pixel_count=0, accepted=False, reject_reason="pose_z_out_of_range",
+            ))
             continue
         
         # 密度过滤：跳过低密度区域
         if density_grid is not None and not _is_dense_enough(pose['x'], pose['y'], density_grid):
             print(f"[OCTREE] 跳过 {vd} pose#{pi}: 点云密度不足")
-            pixel_count = 0
-            generated.append({
-                "image_path": "", "npy_path": "", "normal_path": "",
-                "width": render_width, "height": render_height,
-                "view": vd, "tile": fx_str,
-                "pixel_count": 0, "accepted": False,
-            })
+            generated.append(_build_tile_index_record(
+                view=view, pose_id=pi, render_line=render_line,
+                image_path="", npy_path="", normal_path="",
+                width=render_width, height=render_height, fov_deg=fov_deg,
+                pixel_count=0, accepted=False, reject_reason="insufficient_point_density",
+            ))
             continue
         
         current_render += 1
@@ -1121,34 +1287,14 @@ def project_las_multi_view_octree(
             progress_callback(f"渲染投影图 {current_render}/{total_renders}...", render_progress)
         t0 = time.time()
 
-        # 构建 colmap 行：heading 和 pitch 直接传入（网格位姿用 look-at 计算朝向）
-        render_line = _build_colmap_line(
-            pose,
-            offset_xyz,
-            z_bias,
-            heading_deg,
-            pose.get("pitch_deg", PITCH_DEG),
-            pose.get("roll_deg", 0.0),
-        )
-
-        # 每个视角的输出路径，统一放进 tiles/ 目录，和图像产物绑定
-        fname = f"view_{vd}_{fx_str}_{pi}.png"
-        img_path = str(tile_dir / fname)
-        npy_path = img_path.replace(".png", ".npy")
-        normal_path = img_path.replace(".png", "_normal.npy")
-
         # 如果已存在且不强制重建，跳过
         if os.path.exists(img_path) and os.path.exists(npy_path) and not force_rebuild:
-            generated.append({
-                "image_path": img_path,
-                "npy_path": npy_path,
-                "normal_path": normal_path,
-                "width": render_width,
-                "height": render_height,
-                "view": vd,
-                "tile": fx_str,
-                "pixel_count": 0,
-            })
+            generated.append(_build_tile_index_record(
+                view=view, pose_id=pi, render_line=render_line,
+                image_path=img_path, npy_path=npy_path, normal_path=normal_path,
+                width=render_width, height=render_height, fov_deg=fov_deg,
+                pixel_count=0, accepted=True, reused=True,
+            ))
             continue
 
         with tempfile.TemporaryDirectory(prefix="octree_render_") as tmpdir:
@@ -1163,11 +1309,23 @@ def project_las_multi_view_octree(
             )
             if not ok:
                 print(f"[OCTREE] 跳过 {vd} pose#{pi}")
+                generated.append(_build_tile_index_record(
+                    view=view, pose_id=pi, render_line=render_line,
+                    image_path="", npy_path="", normal_path="",
+                    width=render_width, height=render_height, fov_deg=fov_deg,
+                    pixel_count=0, accepted=False, reject_reason="render_failed",
+                ))
                 continue
 
             if not os.path.exists(color_ppm):
                 print(f"[OCTREE] 无输出: {vd} pose#{pi}")
                 print(f"[OCTREE]   colmap_line: {render_line}")
+                generated.append(_build_tile_index_record(
+                    view=view, pose_id=pi, render_line=render_line,
+                    image_path="", npy_path="", normal_path="",
+                    width=render_width, height=render_height, fov_deg=fov_deg,
+                    pixel_count=0, accepted=False, reject_reason="render_output_missing",
+                ))
                 continue
 
             # 检查输出文件大小
@@ -1177,33 +1335,44 @@ def project_las_multi_view_octree(
             print(f"[OCTREE]   colmap_line: {render_line}")
 
             # 颜色图 → 增强后检查是否为低质量图像（全黑/近乎全黑）
+            depth_for_check = None
             with Image.open(color_ppm) as img:
                 color_img = np.array(img.convert("RGB"))
                 if os.path.exists(depth_raw):
                     depth = np.fromfile(depth_raw, dtype=np.float32)
                     if depth.size == render_width * render_height:
                         depth = depth.reshape(render_height, render_width)
+                        depth_for_check = depth
                         color_img = _apply_camera_like_shading(color_img, depth=depth)
                 else:
                     color_img = _apply_camera_like_shading(color_img)
+
+            # 检测相机是否在建筑内部：中位深度过小表示四周被墙/楼板包围
+            if depth_for_check is not None:
+                valid_depth = depth_for_check[depth_for_check > 0]
+                if valid_depth.size > 0:
+                    median_depth = float(np.median(valid_depth))
+                    if median_depth < MIN_MEDIAN_DEPTH_M:
+                        print(f"[OCTREE] 过滤建筑内部位置（中位深度 {median_depth:.2f}m）: {fname}")
+                        generated.append(_build_tile_index_record(
+                            view=view, pose_id=pi, render_line=render_line,
+                            image_path="", npy_path="", normal_path="",
+                            width=render_width, height=render_height, fov_deg=fov_deg,
+                            pixel_count=0, accepted=False, reject_reason="camera_inside_structure",
+                        ))
+                        continue
 
             # 检查图像是否过暗（超过 BLACK_PIXEL_THRESHOLD 的像素为黑）
             gray = np.mean(color_img, axis=2)
             black_ratio = np.mean(gray < 16)
             if black_ratio >= BLACK_PIXEL_THRESHOLD:
                 print(f"[OCTREE] 过滤低质量图像（{black_ratio:.0%} 黑色）: {fname}")
-                pixel_count = 0
-                generated.append({
-                    "image_path": "",
-                    "npy_path": "",
-                    "normal_path": "",
-                    "width": render_width,
-                    "height": render_height,
-                    "view": vd,
-                    "tile": fx_str,
-                    "pixel_count": 0,
-                    "accepted": False,
-                })
+                generated.append(_build_tile_index_record(
+                    view=view, pose_id=pi, render_line=render_line,
+                    image_path="", npy_path="", normal_path="",
+                    width=render_width, height=render_height, fov_deg=fov_deg,
+                    pixel_count=0, accepted=False, reject_reason="black_pixel_threshold",
+                ))
                 continue
 
             # 通过质量检查，保存 PNG
@@ -1244,17 +1413,16 @@ def project_las_multi_view_octree(
         elapsed = time.time() - t0
         print(f"[OCTREE] {vd} pose#{pi}: {elapsed:.1f}s, {pixel_count}像素")
 
-        generated.append({
-            "image_path": img_path,
-            "npy_path": npy_path,
-            "normal_path": normal_path,
-            "width": render_width,
-            "height": render_height,
-            "view": vd,
-            "tile": fx_str,
-            "pixel_count": pixel_count,
-            "accepted": pixel_count > 0,
-        })
+        accepted = pixel_count > 0
+        generated.append(_build_tile_index_record(
+            view=view, pose_id=pi, render_line=render_line,
+            image_path=img_path if os.path.exists(img_path) else "",
+            npy_path=npy_path if os.path.exists(npy_path) else "",
+            normal_path=normal_path if os.path.exists(normal_path) else "",
+            width=render_width, height=render_height, fov_deg=fov_deg,
+            pixel_count=pixel_count, accepted=accepted,
+            reject_reason=None if accepted else "xyz_map_unavailable",
+        ))
     
     # 4. 保存 tile_index.json
     with open(str(out / "tile_index.json"), "w") as f:

@@ -578,7 +578,182 @@ async function pollPreprocessStatus(btn, statusEl, progressWrap, progressBar, bu
 // ====== 视觉定位 ======
 
 var localizeSelectedId = null;
-var localizeAlgorithmNames = { 'flann': 'SIFT + FLANN kd-tree', 'bf': 'SIFT + BruteForce', 'flann_lowes': 'SIFT + FLANN严格(0.6)', 'bf_cross': 'SIFT + BF交叉验证', 'knn_rank': 'SIFT + KNN Top-50', 'lightglue': 'SIFT + LightGlue', 'loftr': 'SIFT + LoFTR', 'salad_roma': 'SALAD+RoMa', 'salad_lightglue': 'SALAD+LightGlue', 'ace': 'ACE 场景坐标回归' };
+var localizeAlgorithmNames = {
+  'flann': 'SIFT + FLANN kd-tree',
+  'salad_roma': 'SALAD+RoMa (原版)',
+  'salad_roma_v2': 'SALAD v2 (DISK+LightGlue)',
+  'salad_roma_v2_loftr': 'SALAD v2 + LoFTR',
+  'hybrid': 'Hybrid (DISK+LightGlue + LoFTR)',
+  'ace_las': 'ACE + LAS 验证',
+  'multi_strategy': 'Multi-Strategy 融合',
+  'salad_lightglue': 'SALAD+LightGlue',
+  'ace': 'ACE 场景坐标回归'
+};
+
+function escapeLocalizeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+}
+
+function localizeErrorText(error) {
+  if (!error) return '定位无解';
+  if (typeof error === 'string') return error;
+  return error.message || error.detail || error.code || '定位失败';
+}
+
+function localizeStatusBadge(result) {
+  if (!result.success) {
+    return '<span class="status-badge failed">✗ 失败</span>';
+  }
+  var coordinate = result.coordinate_transform || (result.validations || {}).coordinate_crosscheck;
+  var consistency = coordinate && coordinate.consistency;
+  var reliable = coordinate && coordinate.status === 'ready'
+    ? !!(consistency && consistency.status === 'available' && consistency.passed)
+    : result.reliable;
+  if (!reliable) {
+    return '<span class="status-badge" style="background:#fff3e0;color:#e65100">⚠ 低可信</span>';
+  }
+  return '<span class="status-badge completed">✓ 可信</span>';
+}
+
+function renderCoordinateReliabilityDecision(result) {
+  var coordinate = result.coordinate_transform || (result.validations || {}).coordinate_crosscheck || {};
+  var consistency = coordinate.consistency || {};
+  var available = consistency.status === 'available';
+  var passed = available && consistency.passed;
+  var background = passed ? '#e8f5e9' : '#ffebee';
+  var border = passed ? '#2e7d32' : '#c62828';
+  var html = '<div style="margin:0.6rem 0;padding:0.65rem;background:' + background + ';border-radius:4px;border-left:4px solid ' + border + '">';
+  html += '<p style="font-size:0.86rem;font-weight:bold;margin:0 0 0.35rem">坐标差最终判定</p>';
+  if (available) {
+    html += '<p style="font-size:0.8rem;margin:0.2rem 0">中位坐标差: <b>' + Number(consistency.median_m).toFixed(3) + ' m</b></p>';
+    html += '<p style="font-size:0.78rem;margin:0.2rem 0">P95: <b>' + Number(consistency.p95_m).toFixed(3) + ' m</b>；样本: <b>' + consistency.sample_count + '</b></p>';
+    html += '<p style="font-size:0.78rem;margin:0.2rem 0">判定门槛: <b>&lt; ' + Number(consistency.threshold_m).toFixed(3) + ' m</b>；结论: <b>' + (passed ? '通过 / 可信' : '未通过 / 不准') + '</b></p>';
+  } else {
+    html += '<p style="font-size:0.78rem;margin:0.2rem 0">未生成可用的多点坐标差，按最终标准判定为低可信；请重新定位。</p>';
+  }
+  html += '<p style="font-size:0.7rem;color:#666;margin:0.3rem 0 0">最终可信状态只由本地 H→SLAM 与最终位姿 NPY 的多点中位坐标差决定；内点数和相似度仅作辅助诊断。</p></div>';
+  return html;
+}
+
+function renderProjectionConsistency(result) {
+  var validations = result.validations || {};
+  var value = validations.projection_consistency || result.projection_verification;
+  if (!value) return '';
+  var fit = value.homography_fit;
+  var html = '<div style="margin:0.5rem 0;padding:0.5rem;background:#e3f2fd;border-radius:4px;border-left:3px solid #1976d2">';
+  html += '<p style="font-size:0.82rem;font-weight:bold;margin:0 0 0.3rem">2D 几何拟合诊断（非 Benchmark）</p>';
+  if (fit && fit.status === 'available') {
+    html += '<p style="font-size:0.78rem;margin:0.2rem 0">单应内点: <b>' + (fit.n_inliers || 0) + '/' + (fit.n_matches || 0) + '</b></p>';
+    if (fit.inlier_median_residual_px != null) html += '<p style="font-size:0.78rem;margin:0.2rem 0">内点中位残差: <b>' + Number(fit.inlier_median_residual_px).toFixed(3) + ' px</b></p>';
+  } else {
+    html += '<p style="font-size:0.78rem;margin:0.2rem 0">未生成：本轮诊断匹配点不足或未执行。</p>';
+  }
+  html += '<p style="font-size:0.72rem;color:#666;margin:0.25rem 0 0">同源 NPY 不能作为米制验证，已禁止显示同源米制自比较结果。</p></div>';
+  return html;
+}
+
+function renderGroundTruthBenchmark(result) {
+  var truth = (result.validations || {}).ground_truth || {};
+  var html = '<div style="margin:0.5rem 0;padding:0.5rem;background:#fff8e1;border-radius:4px;border-left:3px solid #ff9800">';
+  html += '<p style="font-size:0.82rem;font-weight:bold;margin:0 0 0.3rem">独立真值 Benchmark</p>';
+  if (truth.status === 'available') {
+    html += '<p style="font-size:0.78rem;margin:0.2rem 0">平移误差: <b>' + Number(truth.translation_error_m).toFixed(3) + ' m</b>；旋转误差: <b>' + Number(truth.rotation_error_deg).toFixed(3) + '°</b></p>';
+  } else {
+    html += '<p style="font-size:0.78rem;margin:0.2rem 0">未执行：未提供与地图/算法输入解耦的 holdout 位姿真值（Phase B TODO）。</p>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function formatCoordinateXYZ(value, keys) {
+  if (!value) return '不可用';
+  return '[' + keys.map(function(key) {
+    return value[key] == null ? '-' : Number(value[key]).toFixed(3);
+  }).join(', ') + ']';
+}
+
+async function verifyCoordinatePoint(event, taskId, resultIndex, targetId) {
+  event.preventDefault();
+  event.stopPropagation();
+  var image = event.currentTarget;
+  var rect = image.getBoundingClientRect();
+  var u = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+  var v = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+  var target = document.getElementById(targetId);
+  if (!target) return;
+  target.innerHTML = '<span style="color:#1976d2">正在查询 (' + u.toFixed(4) + ', ' + v.toFixed(4) + ')...</span>';
+
+  try {
+    var response = await fetch(API + '/localize/coordinate-transform', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({task_id: taskId, result_index: resultIndex, u: u, v: v}),
+    });
+    var payload = await response.json();
+    if (!response.ok) {
+      var detail = payload.detail || payload.error || '本地坐标转换产物不可用';
+      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+    }
+    if (payload.status !== 'available') {
+      throw new Error(payload.reason || '坐标源不完整');
+    }
+    target.innerHTML =
+      '<div style="font-weight:bold;margin-bottom:0.25rem">坐标交叉验证（非绝对精度）</div>' +
+      '<div>选点: <b>(' + payload.u.toFixed(4) + ', ' + payload.v.toFixed(4) + ')</b></div>' +
+      '<div>H→SLAM XYZ: <b>' + formatCoordinateXYZ(payload.pixel_to_slam, ['slam_x', 'slam_y', 'slam_z']) + '</b></div>' +
+      '<div>NPY XYZ: <b>' + formatCoordinateXYZ(payload.npy_point, ['x', 'y', 'z']) + '</b></div>' +
+      '<div>坐标差: <b>' + Number(payload.difference_m).toFixed(3) + ' m</b></div>' +
+      '<div style="font-size:0.7rem;color:#666;margin-top:0.2rem">使用当前定位任务自产的单应矩阵与最终位姿投影 NPY；不依赖外部服务，也不替代独立位姿真值 Benchmark。</div>';
+  } catch (error) {
+    target.innerHTML = '<span style="color:#c62828">坐标交叉验证失败：' + escapeLocalizeHtml(error.message) + '</span>';
+  }
+}
+
+function renderLocalizationArtifacts(result, maxHeight, taskId, resultIndex) {
+  var artifacts = result.artifacts || {};
+  var queryImage = _fixImagePath(result.query_image || artifacts.query_image);
+  var reprojectionImage = _fixImagePath(result.reprojection_image || artifacts.reprojection_image);
+  var comparisonImage = _fixImagePath(result.comparison_image || artifacts.comparison_image);
+  var height = maxHeight || 300;
+  var coordinateTransform = result.coordinate_transform || (result.validations || {}).coordinate_crosscheck || {};
+  var coordinateReady = coordinateTransform.status === 'ready';
+  var verificationId = 'coordinate-crosscheck-' + taskId + '-' + resultIndex;
+  var html = '';
+
+  if (queryImage && reprojectionImage) {
+    html += '<div class="localization-artifacts" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:0.7rem;margin-top:0.7rem">';
+    html += '<figure style="margin:0;text-align:center"><figcaption style="font-size:0.78rem;font-weight:bold;margin-bottom:0.25rem">查询图像</figcaption>';
+    if (coordinateReady && taskId != null) {
+      html += '<img src="' + queryImage + '" alt="查询图像（点击取点）" title="点击图像执行本地坐标交叉验证" onclick="verifyCoordinatePoint(event,' + taskId + ',' + resultIndex + ',\'' + verificationId + '\')" style="max-width:100%;max-height:' + height + 'px;border-radius:4px;border:2px solid #1976d2;cursor:crosshair">';
+      html += '<div style="font-size:0.72rem;color:#1976d2;margin-top:0.2rem">点击查询图取点，比较 H→SLAM XYZ 与 NPY XYZ</div>';
+    } else {
+      html += '<a href="' + queryImage + '" target="_blank"><img src="' + queryImage + '" alt="查询图像" style="max-width:100%;max-height:' + height + 'px;border-radius:4px;border:1px solid #ddd"></a>';
+    }
+    html += '</figure>';
+    html += '<figure style="margin:0;text-align:center"><figcaption style="font-size:0.78rem;font-weight:bold;margin-bottom:0.25rem">最终位姿投影</figcaption>';
+    html += '<a href="' + reprojectionImage + '" target="_blank"><img src="' + reprojectionImage + '" alt="最终位姿投影" style="max-width:100%;max-height:' + height + 'px;border-radius:4px;border:1px solid #ddd"></a></figure></div>';
+    if (comparisonImage) {
+      html += '<details style="margin-top:0.45rem"><summary style="cursor:pointer;font-size:0.78rem;color:#1976d2">查看双图对比</summary>';
+      html += '<a href="' + comparisonImage + '" target="_blank"><img src="' + comparisonImage + '" alt="查询图与最终投影对比" style="max-width:100%;max-height:' + height + 'px;margin-top:0.35rem;border-radius:4px;border:1px solid #ddd"></a></details>';
+    }
+    if (coordinateReady && taskId != null) {
+      html += '<div id="' + verificationId + '" style="margin-top:0.5rem;padding:0.55rem;background:#eef7ee;border-left:3px solid #43a047;border-radius:4px;font-size:0.78rem">坐标交叉验证（非绝对精度）：本地 H 内点 <b>' + (coordinateTransform.n_inliers || 0) + '/' + (coordinateTransform.n_matches || 0) + '</b>，请点击查询图像选点。</div>';
+    } else {
+      html += '<div style="margin-top:0.5rem;padding:0.55rem;background:#fff3e0;border-left:3px solid #fb8c00;border-radius:4px;font-size:0.78rem;color:#e65100">本地坐标转换产物不可用：历史结果需重新定位后生成。</div>';
+    }
+    return html;
+  }
+
+  if (comparisonImage) {
+    return '<div style="margin-top:0.5rem;text-align:center"><img src="' + comparisonImage + '" alt="查询图与最终投影对比" style="max-width:100%;max-height:' + height + 'px;border-radius:4px;border:1px solid #ddd"><p style="font-size:0.75rem;color:#888;margin-top:0.2rem">左：查询图像｜右：最终位姿投影</p></div>';
+  }
+
+  var generation = (result.validations || {}).artifact_generation || {};
+  var reason = generation.error || generation.reason || '该结果未返回视觉产物';
+  return '<p class="artifact-missing" style="font-size:0.78rem;color:#e65100;background:#fff3e0;padding:0.45rem;border-radius:4px">视觉产物未生成：' + escapeLocalizeHtml(reason) + '。历史结果需重新定位后生成。</p>';
+}
 
 // 定位页面上传
 document.addEventListener('DOMContentLoaded', function() {
@@ -667,16 +842,14 @@ async function loadLocalizeImages() {
       console.log('[DEBUG] results count:', results.length);
       var resultsEl = document.getElementById('localize-results');
       var html = '<div style="margin-top:1rem"><h4>📋 上次定位结果 (task #' + latest.id + ')</h4></div>';
-      var matchNames = { 'flann': 'FLANN kd-tree', 'bf': 'BruteForce', 'flann_lowes': 'FLANN严格(0.6)', 'bf_cross': 'BF交叉验证', 'knn_rank': 'KNN Top-50', 'lightglue': 'LightGlue (深度学习)', 'loftr': 'LoFTR (深度学习)', 'salad_roma': 'SALAD+RoMa', 'salad_lightglue': 'SALAD+LightGlue', 'ace': 'ACE 场景坐标回归' };
       results.forEach(function(r, idx) {
-        var compImg = _fixImagePath(r.comparison_image);
         html += '<div class="localize-card" style="background:#fff;border-radius:8px;padding:1rem;margin-top:0.8rem;box-shadow:0 1px 3px rgba(0,0,0,0.1)">';
         html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">';
-        html += '<h4 style="margin:0">SIFT + ' + (matchNames[r.match_method] || r.match_method) + '</h4>';
-        html += '<span class="status-badge ' + (r.success ? 'completed' : 'failed') + '">' + (r.success ? '✓ 成功' : '✗ 失败') + '</span>';
+        html += '<h4 style="margin:0">' + escapeLocalizeHtml(localizeAlgorithmNames[r.algorithm_id || r.match_method] || r.algorithm_id || r.match_method) + '</h4>';
+        html += localizeStatusBadge(r);
         html += '</div>';
         if (r.success) {
-          html += '<p style="font-size:0.85rem;margin:0.3rem 0">内点: ' + r.inliers + '</p>';
+          html += '<p style="font-size:0.78rem;color:#777;margin:0.3rem 0">辅助诊断：内点 ' + r.inliers + '</p>';
            if (r.match_method === 'salad_roma' && r.all_candidates && r.all_candidates.length > 1) {
            html += '<details open style="margin:0.3rem 0"><summary style="cursor:pointer;color:#1976d2;font-weight:bold">迭代 ' + r.total_rounds + ' 轮 (点击展开)</summary>';
            html += '<table style="font-size:0.78rem;width:100%;border-collapse:collapse;margin-top:0.3rem">';
@@ -709,15 +882,21 @@ async function loadLocalizeImages() {
           if (r.pose && r.pose.translation) {
             html += '<p style="font-size:0.82rem;color:#666;font-family:monospace">位姿: [' + r.pose.translation.map(function(v) { return v.toFixed(2); }).join(', ') + ']</p>';
           }
-          if (compImg) {
-            html += '<div style="margin-top:0.5rem;text-align:center">';
-            html += '<img src="' + compImg + '" style="max-width:100%;max-height:300px;border-radius:4px;border:1px solid #ddd" onerror="this.style.display=\'none\'">';
-            html += '<p style="font-size:0.75rem;color:#888;margin-top:0.2rem">左: 原图 | 右: 重投影 | 彩色连线: 匹配点</p>';
-            html += '</div>';
+          html += renderCoordinateReliabilityDecision(r);
+          html += '<details style="margin:0.4rem 0"><summary style="cursor:pointer;color:#666;font-size:0.78rem">辅助几何诊断与 Benchmark（不作为最终判定）</summary>';
+          html += renderProjectionConsistency(r);
+          html += renderGroundTruthBenchmark(r);
+          // LAS 验证结果
+          if (r.las_verification && r.las_verification.total > 0) {
+            var lv = r.las_verification;
+            html += '<p style="font-size:0.78rem;margin:0.2rem 0">LAS 验证: <b>' + lv.verified + '/' + lv.total + '</b> 通过 (mean ' + (lv.mean_distance_m || 0).toFixed(2) + 'm)</p>';
           }
+          html += '</details>';
+          html += renderLocalizationArtifacts(r, 300, latest.id, idx);
           html += '<button class="btn-refine" style="margin-top:0.5rem;padding:4px 12px;font-size:0.8rem;background:#ff9800;color:#fff;border:none;border-radius:4px;cursor:pointer" onclick="refinePose(this, ' + latest.id + ', ' + idx + ')">🔄 RoMa 优化</button>';
+          html += ' <button style="margin-top:0.5rem;padding:4px 12px;font-size:0.8rem;background:#1976d2;color:#fff;border:none;border-radius:4px;cursor:pointer" onclick="generateVerifyReport(' + latest.image_id + ')">📐 生成 2D 拟合报告</button>';
         } else {
-          html += '<p style="font-size:0.85rem;color:#f44336">' + (r.error || '失败') + '</p>';
+          html += '<p style="font-size:0.85rem;color:#f44336">' + escapeLocalizeHtml(localizeErrorText(r.error)) + '</p>';
         }
         html += '</div>';
       });
@@ -758,7 +937,7 @@ async function startLocalize() {
   var btn = document.getElementById('localize-btn');
   var statusEl = document.getElementById('localize-status');
   var resultsEl = document.getElementById('localize-results');
-  var algorithms = Array.prototype.map.call(document.querySelectorAll('#localize-algorithms input[type="checkbox"]:checked:not(#localize-debug)'), function(input) { return input.value; });
+  var algorithms = Array.prototype.map.call(document.querySelectorAll('#localize-algorithms input[type="checkbox"]:checked:not(#localize-debug):not(#localize-verify)'), function(input) { return input.value; });
   if (!algorithms.length) { alert('请至少选择一种定位算法'); return; }
 
   btn.disabled = true;
@@ -837,16 +1016,16 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
     var results = data.results || [];
 
     results.forEach(function(r, idx) {
-      var compImg = _fixImagePath(r.comparison_image);
       html += '<div class="localize-card" style="background:#fff;border-radius:8px;padding:1rem;margin-top:0.8rem;box-shadow:0 1px 3px rgba(0,0,0,0.1)">';
       html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">';
-      var matchName = localizeAlgorithmNames[r.match_method] || r.match_method;
-      html += '<h4 style="margin:0">' + matchName + '</h4>';
-      html += '<span class="status-badge ' + (r.success ? 'completed' : 'failed') + '">' + (r.success ? '✓ 成功' : '✗ 失败') + '</span>';
+      var algorithmId = r.algorithm_id || r.match_method;
+      var matchName = localizeAlgorithmNames[algorithmId] || algorithmId;
+      html += '<h4 style="margin:0">' + escapeLocalizeHtml(matchName) + '</h4>';
+      html += localizeStatusBadge(r);
       html += '</div>';
 
       if (r.success) {
-        html += '<p style="font-size:0.85rem;margin:0.3rem 0">内点: ' + r.inliers + ' | 3D点数: ' + (r.total_3d_points || 0) + '</p>';
+        html += '<p style="font-size:0.78rem;color:#777;margin:0.3rem 0">辅助诊断：内点 ' + r.inliers + ' | 3D点数 ' + (r.total_3d_points || 0) + '</p>';
         // SALAD+RoMa 显示轮数
         if (r.match_method === 'salad_roma' && r.all_candidates && r.all_candidates.length > 1) {
           html += '<details open style="margin:0.3rem 0"><summary style="cursor:pointer;color:#1976d2;font-weight:bold">迭代 ' + r.total_rounds + ' 轮 (点击展开)</summary>';
@@ -882,16 +1061,19 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
         if (r.pose && r.pose.translation) {
           html += '<p style="font-size:0.82rem;color:#666;font-family:monospace">位姿: [' + r.pose.translation.map(function(v) { return v.toFixed(2); }).join(', ') + ']</p>';
         }
-        if (compImg) {
-          html += '<div style="margin-top:0.5rem;text-align:center">';
-          html += '<img src="' + compImg + '" style="max-width:100%;max-height:400px;border-radius:4px;border:1px solid #ddd" onerror="this.style.display=\'none\'">';
-          html += '<p style="font-size:0.75rem;color:#888;margin-top:0.2rem">左: 原图 | 右: 重投影 | 彩色连线: 匹配点</p>';
-          html += '</div>';
+        if (!r.reliable) {
+          html += '<p style="font-size:0.78rem;color:#e65100">求解已返回位姿，但质量门槛未满足，请勿作为可信定位结果使用。</p>';
         }
+        html += renderCoordinateReliabilityDecision(r);
+        html += '<details style="margin:0.4rem 0"><summary style="cursor:pointer;color:#666;font-size:0.78rem">辅助几何诊断与 Benchmark（不作为最终判定）</summary>';
+        html += renderProjectionConsistency(r);
+        html += renderGroundTruthBenchmark(r);
+        html += '</details>';
+        html += renderLocalizationArtifacts(r, 400, taskId, idx);
         // 优化按钮（所有成功结果都显示）
         html += '<button class="btn-refine" data-task="' + taskId + '" data-idx="' + idx + '" style="margin-top:0.5rem;padding:4px 12px;font-size:0.8rem;background:#ff9800;color:#fff;border:none;border-radius:4px;cursor:pointer" onclick="refinePose(this, ' + taskId + ', ' + idx + ')">🔄 RoMa 优化</button>';
       } else {
-        html += '<p style="font-size:0.85rem;color:#f44336">' + (r.error || '失败') + '</p>';
+        html += '<p style="font-size:0.85rem;color:#f44336">' + escapeLocalizeHtml(localizeErrorText(r.error)) + '</p>';
       }
 
       html += '</div>';
@@ -946,5 +1128,37 @@ async function refinePose(btn, taskId, methodIdx) {
     btn.textContent = '❌ 请求失败: ' + e.message;
     btn.style.background = '#f44336';
     btn.disabled = false;
+  }
+}
+
+async function generateVerifyReport(imageId) {
+  if (!imageId) {
+    alert('请先选择一张图像');
+    return;
+  }
+  var statusEl = document.getElementById('localize-status');
+  statusEl.classList.remove('hidden');
+  statusEl.className = 'status loading';
+  statusEl.textContent = '生成 2D 拟合报告（约 30s）...';
+  try {
+    // 调用后端 API 生成报告
+    var resp = await fetch(API + '/localize/verify-report', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({image_id: imageId}),
+    });
+    var result = await resp.json();
+    if (result.success) {
+      statusEl.className = 'status completed';
+      statusEl.textContent = '✅ 报告已生成';
+      // 打开报告
+      window.open('/' + result.report_path, '_blank');
+    } else {
+      statusEl.className = 'status failed';
+      statusEl.textContent = '❌ ' + (result.error || result.detail || '生成失败');
+    }
+  } catch(e) {
+    statusEl.className = 'status failed';
+    statusEl.textContent = '❌ 请求失败: ' + e.message;
   }
 }

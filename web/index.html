@@ -91,13 +91,24 @@
       </div>
       <fieldset id="localize-algorithms" style="margin:0 0 0.8rem;padding:0.65rem;border:1px solid #ddd;border-radius:6px">
         <legend style="font-size:0.85rem;color:#555">定位算法（可单选或多选）</legend>
-        <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma" checked> SALAD+RoMa</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma"> SALAD+RoMa (原版)</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma_v2" checked> SALAD v2 (DISK+LG)</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma_v2_loftr"> SALAD v2 + LoFTR</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="hybrid"> Hybrid (联合)</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="ace_las"> ACE + LAS</label>
+        <label style="margin-right:0.8rem"><input type="checkbox" value="multi_strategy"> Multi-Strategy</label>
         <label style="margin-right:0.8rem"><input type="checkbox" value="salad_lightglue"> SALAD+LightGlue</label>
-        <label style="margin-right:0.8rem"><input type="checkbox" value="ace"> ACE 场景坐标回归</label>
         <label style="margin-right:0.8rem"><input type="checkbox" value="flann"> SIFT + FLANN</label>
         <label style="display:block;margin-top:0.5rem;font-size:0.82rem;color:#666"><input id="localize-debug" type="checkbox"> 生成候选轮次调试图（较慢）</label>
       </fieldset>
+      <label style="display:block;margin-top:0.3rem;font-size:0.82rem;color:#666"><input id="localize-verify" type="checkbox" checked> 定位后计算 2D 几何拟合诊断（非 Benchmark）</label>
       <div id="localize-status" class="status hidden"></div>
+      <div id="localize-verify-result" style="margin:0.5rem 0;padding:0.5rem;background:#e3f2fd;border-radius:4px;font-size:0.82rem;display:none">
+        <details open>
+          <summary style="cursor:pointer;font-weight:bold;color:#1565c0">📐 2D 单应拟合诊断（像素残差）</summary>
+          <div id="verify-detail" style="margin-top:0.5rem"></div>
+        </details>
+      </div>
       <div id="localize-results"></div>
     </section>
 
@@ -125,6 +136,6 @@
   </main>
   <footer style="text-align:center;padding:1rem;color:#aaa;font-size:0.8rem">v6</footer>
 </div>
-<script src="/app_v10.js?v=15"></script>
+<script src="/app_v10.js?v=23"></script>
 </body>
 </html>
