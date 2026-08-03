@@ -505,6 +505,13 @@ def solve_pnp_with_focal_search(
     if best is None:
         return {"success": False, "error": f"所有焦距候选 PnP 失败（尝试 {total_attempts} 次）"}
 
+    summary = {
+        "attempts": total_attempts,
+        "success": total_success,
+        "best_normalized_focal": best["normalized_focal"],
+        "best_score": best["score"],
+    }
+    solve_pnp_with_focal_search.last_summary = summary
     return {
         "success": True,
         "rvec": best["rvec"],
@@ -515,13 +522,11 @@ def solve_pnp_with_focal_search(
         "inlier_count": best["inlier_count"],
         "reproj_error_px": best["reproj_error_px"],
         "score": best["score"],
-        "focal_search_summary": {
-            "attempts": total_attempts,
-            "success": total_success,
-            "best_normalized_focal": best["normalized_focal"],
-            "best_score": best["score"],
-        },
+        "focal_search_summary": summary,
     }
+
+
+solve_pnp_with_focal_search.last_summary = None
 
 
 # --------------------------------------------------------------------------- #

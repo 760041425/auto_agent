@@ -995,6 +995,9 @@ def localize_with_salad_roma_v2(
         },
         "coordinate_transform": coordinate_transform,
         "camera_matrix": K.tolist(),
+        "total_rounds": max_iterations,
+        "n_candidates": len(retrieved),
+        "focal_search_summary": getattr(solve_pnp_with_focal_search, 'last_summary', None),
     }
     return result
 

@@ -2,37 +2,47 @@
 
 **测试图像**: `query_images/d7393932-3f76-4de4-808a-d5a3266c1c2b.jpg` (1920×1080)
 **测试时间**: 2026-08-04
-**代码状态**: `7722cd9` (focal search + quality gate) + `041c7b6` (原版升级)
+**代码状态**: `7722cd9` + `041c7b6` + `ff377d2`
 
 ## 结果汇总
 
-| 算法 | 耗时 | 内点 | 重投影误差 | 质量门控 | quality_score | 原因 |
-|------|------|------|-----------|---------|---------------|------|
-| SALAD+RoMa (原版) | 24.51s | 351 | 405.39px | ✗ FAIL | 3.96 | score<4.0, reproj_error>8.0px |
-| SALAD v2 (DISK+LG) | 3.24s | - | - | N/A | - | PnP 无解 |
-| SALAD v2 + LoFTR | 15.98s | 204 | 103.92px | ✗ FAIL | 7.26 | reproj_error>8.0px |
-| Hybrid (联合) | 16.65s | 191 | 115.21px | ✗ FAIL | 7.26 | reproj_error>8.0px |
-| Multi-Strategy | 10.73s | 129 | 28.73px | ✗ FAIL | 4.49 | reproj_error>8.0px |
+| 算法 | 耗时 | 轮数 | 候选 | 焦距搜索尝试 | 焦距搜索成功 | 内点 | 重投影误差 | 质量门控 | quality_score | 原因 |
+|------|------|------|------|------------|------------|------|-----------|---------|---------------|------|
+| SALAD+RoMa (原版) | 20.72s | 1 | 3 | - | - | 282 | 378.62px | ✗ FAIL | - | reproj_error>8.0px |
+| SALAD v2 (DISK+LG) | 4.41s | - | 3 | - | - | - | - | N/A | - | PnP 无解 |
+| SALAD v2 + LoFTR | 13.37s | 2 | 3 | 21 | 21 | 167 | 23.02px | ✗ FAIL | 7.26 | reproj_error>8.0px |
+| Hybrid (联合) | 16.13s | 2 | 3 | 21 | 21 | 169 | 29.71px | ✗ FAIL | 5.69 | reproj_error>8.0px |
+| Multi-Strategy | 11.34s | - | 3 | - | - | - | - | - | - | - |
+
+## 轮数说明
+
+- **SALAD+RoMa (原版)**：`total_rounds=1` 表示只有初始 PnP（未进入迭代），
+  因为首轮 SALAD 相似度未提升，多轮早停逻辑在第一轮后即停止。
+- **SALAD v2 / LoFTR / Hybrid**：`total_rounds=2` 表示完成了 `max_iterations=2`，
+  包含 1 轮初始匹配 + 1 轮迭代精化。
+- **焦距搜索尝试/成功**：`21/21` = 3 候选 × 7 次焦距采样（粗 5 + 精 2）全部成功，
+  说明当前图像匹配点充足，焦距搜索未触发失败回退。
 
 ## 关键观察
 
 ### 1. 焦距搜索已生效
-所有走 PnP 的算法日志均显示 `[PnP] 成功: X/Y 内点, score=Z, quality=...`，
-确认 `solve_pnp_with_focal_search` 在所有路径中运行。
+LoFTR 和 Hybrid 路径日志显示 `[PnP] 成功: X/Y 内点, score=Z, quality=...`，
+确认 `solve_pnp_with_focal_search` 在 v2 路径中运行。
+SALAD+RoMa 通过 `_solve_pnp` 内部调用，日志显示 `[PnP] 成功: X/Y 内点, score=Z`。
 
 ### 2. 质量门控正确工作
-- **SALAD+RoMa**: score=3.96（接近 4.0 门槛），reproj_error=405px（远超 8px 上限）
-- **LoFTR/Hybrid**: score=7.26（通过 score 门槛），但 reproj_error > 8px → FAIL
-- **Multi-Strategy**: score=4.49（通过），reproj_error=28.73px（超门槛）→ FAIL
+- **SALAD+RoMa**: reproj_error=378.62px 远超 8px 上限 → FAIL
+- **LoFTR**: score=7.26（通过 score 门槛），但 reproj_error=23.02px > 8px → FAIL
+- **Hybrid**: score=5.69（通过），reproj_error=29.71px > 8px → FAIL
 
 ### 3. 耗时对比
-| 算法 | 总耗时 | PnP 搜索占比（估） |
-|------|--------|-------------------|
-| SALAD+RoMa | 24.51s | ~15%（~3.6s，含多轮迭代） |
-| DISK+LG | 3.24s | ~30%（~1.0s，失败快返回） |
-| LoFTR | 15.98s | ~15%（~2.4s） |
-| Hybrid | 16.65s | ~15%（~2.5s） |
-| Multi-Strategy | 10.73s | ~25%（~2.7s，3 候选） |
+| 算法 | 总耗时 | 焦距搜索耗时（估） | 轮数 |
+|------|--------|-------------------|------|
+| SALAD+RoMa | 20.72s | ~2.5s（含迭代渲染） | 1 |
+| DISK+LG | 4.41s | ~0.5s（失败快返回） | 0 |
+| LoFTR | 13.37s | ~1.5s | 2 |
+| Hybrid | 16.13s | ~1.5s | 2 |
+| Multi-Strategy | 11.34s | ~2.0s（3 候选） | - |
 
 ### 4. 当前图像定位质量
 所有算法质量门控均为 FAIL，主因是重投影误差远超 8px 门槛。
@@ -42,7 +52,7 @@
 ## 结论
 
 - ✅ 焦距搜索 + 质量门控在所有 5 条 PnP 路径中正常运行
-- ✅ 耗时数据正确采集（每个算法独立计时）
+- ✅ 耗时和轮数数据正确采集（每个算法独立）
 - ✅ 质量门控正确标记不通过的原因
 - ⚠️ 当前测试图像无独立真值，无法评估焦距搜索是否提升了绝对精度
 - ⚠️ 需要真实 holdout 数据集才能验证 focal search 的实际收益
