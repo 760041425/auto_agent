@@ -35,8 +35,8 @@
 | [x] | **TL-003-31** | AC-003-15 | 单元/真实数据 | 给定与当前 tile key 零交集的 245 条旧缓存，以及覆盖当前 key 的 V2 `multi` 缓存，原版选择兼容缓存并能返回候选；不得静默接受旧缓存后返回 0 候选 |
 | [x] | **TL-003-32** | AC-003-01,AC-003-15 | 单元/真实数据 | `salad_roma` 的局部匹配适配器调用 TinyRoMa `match/sample` 并返回像素对应点；测试令 LightGlue 调用直接失败，防止算法标签与实际 runner 再次漂移 |
 | [x] | **TL-003-33** | AC-003-14,AC-003-15 | 单元/真实数据 | 原版 SALAD+RoMa 成功结果生成查询图、最终位姿 XYZ NPY 与 H 上下文；即使 PnP 内点很高，坐标差未通过 `<0.3m` 时 `reliable=false` |
-| [ ] TODO | **TL-003-34** | AC-003-17 | 单元 | 精化步骤根据 `matcher_type` 分派到对应匹配器（SALAD+RoMa → TinyRoMa）；默认无参数时回退 LightGlue 保持向后兼容 |
-| [ ] TODO | **TL-003-35** | AC-003-17 | API/契约 | `/localize/refine` 端点从初始结果 algorithm_id 推导 matcher_type 传入精化函数；未知 matcher_type 返回结构化 422 |
+| [x] | **TL-003-34** | AC-003-17 | 单元 | 精化步骤根据 `matcher_type` 分派到对应匹配器（SALAD+RoMa → TinyRoMa）；默认无参数时回退 LightGlue 保持向后兼容 |
+| [x] | **TL-003-35** | AC-003-17 | API/契约 | `/localize/refine` 端点从初始结果 algorithm_id 推导 matcher_type 传入精化函数；未知 matcher_type 返回结构化 422 |
 
 ## TDD 顺序
 

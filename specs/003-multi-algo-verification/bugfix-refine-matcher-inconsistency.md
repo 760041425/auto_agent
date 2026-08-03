@@ -1,7 +1,7 @@
 # BUG-003-05 — 精化步骤固定使用 LightGlue，与初始定位算法不一致
 
 日期：2026-08-02
-状态：**待修复**
+状态：**已修复**
 
 ## 1. 期望与实际
 
@@ -75,3 +75,8 @@
 ## 10. Changelog
 
 - 2026-08-02：确认缺陷，task #249 日志证据，完成 5 Why；标记为待修复。
+- 2026-08-03：完成 Red → Green TDD。
+  - `salad_roma.py`：新增 `_dispatch_matcher()` 分派函数，`refine_pose_with_roma()` 增加 `matcher_type` 参数（默认 `"lightglue"` 向后兼容）
+  - `api/routes/localize.py`：新增 `_algorithm_id_to_matcher_type()` 推导映射，`/refine` 端点从 `match_method` 推导 matcher_type
+  - 测试：TL-003-34（3 项单元：tiny_roma 分派 / 默认回退 / 未知拒绝）+ TL-003-35（5 项 API 契约：algorithm_id 推导映射）
+  - 快速测试：85 passed, 4 deselected

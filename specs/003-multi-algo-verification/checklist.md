@@ -32,7 +32,7 @@ Phase A 已完成；Phase B 的最终推荐作为 TODO 暂时遗留，待以上�
 - [x] SALAD+RoMa（原版）拒绝零交集旧缓存，在当前地图索引上产生检索候选并真实调用 TinyRoMa
 - [x] SALAD+RoMa（原版）生成最终位姿坐标产物，并严格以 `<0.3m` 而非高内点决定可信状态
 - [x] 一致性判据比较 H→SLAM XYZ（Z=0）与 NPY XYZ 的三维欧氏距离，不再忽略 Z 分量（AC-003-16）
-- [ ] TODO：精化步骤复用初始定位匹配器，不再硬编码 LightGlue（AC-003-17）
+- [x] 精化步骤复用初始定位匹配器，不再硬编码 LightGlue（AC-003-17）
 - [x] `./scripts/validate-specs.sh` 通过
 - [x] `./scripts/run-all-tests.sh fast` 通过
 - [x] 变更范围 Ruff 检查通过

@@ -33,17 +33,9 @@ from PIL import Image
 
 from services.las_processor.projection import _load_poses_and_offset, _quat_to_rotmat
 
-_logger = logging.getLogger("localizer.salad_roma")
-_logger.setLevel(logging.DEBUG)
-LOG_DIR = Path(__file__).parent.parent.parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
-_fh = logging.FileHandler(str(LOG_DIR / "localizer.log"), mode="a", encoding="utf-8")
-_fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
-_logger.handlers.clear()
-_logger.addHandler(_fh)
-_sh = logging.StreamHandler()
-_sh.setFormatter(logging.Formatter("%(asctime)s [SALAD_ROMA] %(message)s", datefmt="%H:%M:%S"))
-_logger.addHandler(_sh)
+from services.localizer.logger_config import get_backend_logger
+
+_logger = get_backend_logger("salad_roma")
 
 
 def log(msg: str):
@@ -103,6 +95,16 @@ def _is_pose_better(candidate_inliers: int, candidate_error: float, current_inli
     if candidate_inliers < current_inliers - 2:
         return False
     return candidate_error < current_error
+
+
+def _apply_coordinate_reliability(result: dict, coordinate_transform: dict) -> dict:
+    """Make coordinate consistency the sole reliability decision for this result."""
+    consistency = coordinate_transform.get("consistency", {})
+    result["coordinate_transform"] = coordinate_transform
+    result["reliable"] = bool(
+        consistency.get("status") == "available" and consistency.get("passed")
+    )
+    return result
 
 
 # ============================================================
@@ -263,6 +265,81 @@ def _extract_multimodal_descriptor(
     return np.concatenate(descs)
 
 
+def _normalise_cached_descriptor(value, expected_dim: int) -> np.ndarray | None:
+    """Return a finite one-dimensional descriptor with the expected shape."""
+    try:
+        descriptor = np.asarray(value, dtype=np.float32).reshape(-1)
+    except (TypeError, ValueError):
+        return None
+    if descriptor.size != expected_dim or not np.isfinite(descriptor).all():
+        return None
+    if float(np.linalg.norm(descriptor)) <= 1e-8:
+        return None
+    return descriptor
+
+
+def _select_compatible_salad_cache(
+    current_keys: set[str],
+    legacy_path: Path,
+    v2_path: Path,
+    expected_dim: int = 1152,
+) -> tuple[dict[str, np.ndarray], str | None]:
+    """Select the cache covering the most keys in the current tile index.
+
+    The original cache stores parallel ``keys``/``descs`` arrays.  The V2
+    cache stores a dict per tile; its ``multi`` descriptor has the same
+    RGB+Normal+XYZ shape required by the original asymmetric retriever.
+    """
+    if not current_keys:
+        return {}, None
+
+    candidates: list[tuple[str, dict[str, np.ndarray]]] = []
+    if legacy_path.exists():
+        try:
+            with np.load(legacy_path, allow_pickle=True) as data:
+                keys = data["keys"]
+                descs = data["descs"]
+                legacy = {}
+                for key, value in zip(keys, descs):
+                    key = str(key)
+                    if key not in current_keys:
+                        continue
+                    descriptor = _normalise_cached_descriptor(value, expected_dim)
+                    if descriptor is not None:
+                        legacy[key] = descriptor
+                if legacy:
+                    candidates.append(("legacy", legacy))
+        except (KeyError, OSError, ValueError):
+            pass
+
+    if v2_path.exists():
+        try:
+            with np.load(v2_path, allow_pickle=True) as data:
+                v2_multi = {}
+                for key in current_keys.intersection(data.files):
+                    raw_entry = data[key]
+                    entry = raw_entry.item() if raw_entry.ndim == 0 else raw_entry
+                    if not isinstance(entry, dict) or "multi" not in entry:
+                        continue
+                    descriptor = _normalise_cached_descriptor(entry["multi"], expected_dim)
+                    if descriptor is not None:
+                        v2_multi[key] = descriptor
+                if v2_multi:
+                    candidates.append(("v2_multi", v2_multi))
+        except (OSError, ValueError):
+            pass
+
+    if not candidates:
+        return {}, None
+
+    # More coverage is safer; retain the original cache when coverage ties.
+    source, selected = max(
+        candidates,
+        key=lambda item: (len(item[1]), item[0] == "legacy"),
+    )
+    return selected, source
+
+
 def _build_salad_index(force_rebuild: bool = False, progress_callback=None):
     """对全量 tile 提取并缓存 DINOv2 全局描述子"""
     global _SALAD_INDEX
@@ -272,25 +349,40 @@ def _build_salad_index(force_rebuild: bool = False, progress_callback=None):
         log(f"  ⚠️ tile_index 为空")
         return
     
+    valid_tiles = [
+        tile
+        for tile in tile_index
+        if tile.get("accepted", True)
+        and tile.get("view", "") != "top"
+        and tile.get("image_path")
+        and os.path.isfile(tile["image_path"])
+    ]
+    current_keys = {
+        os.path.splitext(os.path.basename(tile["image_path"]))[0]
+        for tile in valid_tiles
+    }
+
     cache_path = Path("projections/salad_index.npz")
-    if cache_path.exists() and not force_rebuild:
-        try:
-            data = np.load(cache_path, allow_pickle=True)
-            _SALAD_INDEX = dict(zip(data['keys'], data['descs']))
-            log(f"  ✅ SALAD 索引已加载: {len(_SALAD_INDEX)} tiles")
+    if not force_rebuild:
+        compatible, source = _select_compatible_salad_cache(
+            current_keys,
+            cache_path,
+            Path("projections/salad_index_v2.npz"),
+        )
+        if compatible:
+            _SALAD_INDEX = compatible
+            log(
+                f"  ✅ SALAD 索引已加载: {len(_SALAD_INDEX)}/{len(current_keys)} tiles "
+                f"(source={source})"
+            )
             return
-        except Exception as e:
-            log(f"  ❌ SALAD 索引缓存读取失败: {e}, 将重新构建")
+        if cache_path.exists():
+            log("  ⚠️ SALAD 原版缓存与当前 tile 无兼容交集，将重新构建")
     
     model, scale = _get_dinov2_model(prefer_small=True)
     if model is None:
         log("  ⚠️ DINOv2 不可用，SALAD 检索 fallback 到 SIFT")
         return
-    
-    valid_tiles = []
-    for tile in tile_index:
-        if tile.get("view", "") != "top":
-            valid_tiles.append(tile)
     
     log(f"  开始提取 {len(valid_tiles)} 张 tile 的 DINOv2 描述子...")
     keys = []
@@ -386,6 +478,8 @@ def _salad_retrieve(q_img: np.ndarray, top_k: int = 5) -> list[tuple[str, float,
     valid_descs = []
     valid_tiles = []
     for tile in tile_index:
+        if not tile.get("accepted", True):
+            continue
         view = tile.get("view", "")
         if view == "top":
             continue
@@ -658,8 +752,44 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
 
 
 def _roma_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000) -> tuple:
-    """向前兼容: 使用 LightGlue 替代 RoMa"""
-    return _lightglue_match(img1, img2, sample_num)
+    """Run TinyRoMa dense matching and return pixel-coordinate samples."""
+    model = _get_roma_model()
+    if model is None:
+        return np.array([]), np.array([]), np.array([])
+
+    h0, w0 = img1.shape[:2]
+    h1, w1 = img2.shape[:2]
+    image0 = cv2.cvtColor(img1, cv2.COLOR_BGR2RGB) if img1.ndim == 3 else img1
+    image1 = cv2.cvtColor(img2, cv2.COLOR_BGR2RGB) if img2.ndim == 3 else img2
+    tensor0 = kornia.image.image_to_tensor(image0, keepdim=False).float().div(255.0)
+    tensor1 = kornia.image.image_to_tensor(image1, keepdim=False).float().div(255.0)
+    if tensor0.ndim == 3:
+        tensor0 = tensor0.unsqueeze(0)
+    if tensor1.ndim == 3:
+        tensor1 = tensor1.unsqueeze(0)
+    tensor0 = tensor0.to(DEVICE)
+    tensor1 = tensor1.to(DEVICE)
+
+    try:
+        with torch.inference_mode():
+            dense_matches, dense_certainty = model.match(tensor0, tensor1, batched=False)
+            if dense_certainty.numel() == 0 or float(dense_certainty.sum()) <= 0:
+                return np.array([]), np.array([]), np.array([])
+            matches, certainty = model.sample(
+                dense_matches,
+                dense_certainty,
+                num=sample_num,
+            )
+            kpts0, kpts1 = model.to_pixel_coordinates(matches, h0, w0, h1, w1)
+    except Exception as exc:
+        log(f"  RoMa 匹配失败: {exc}")
+        return np.array([]), np.array([]), np.array([])
+
+    return (
+        kpts0.detach().cpu().numpy().astype(np.float32),
+        kpts1.detach().cpu().numpy().astype(np.float32),
+        certainty.detach().cpu().numpy().astype(np.float32),
+    )
 
 
 def _match_tile_with_lightglue(q_img: np.ndarray, tile_info: dict) -> tuple:
@@ -976,6 +1106,7 @@ def localize_with_salad_roma(
     top_k_retrieval: int = 3,
     debug_visualizations: bool = False,
     algo: str = "lightglue",
+    coordinate_threshold_m: float = 0.3,
 ) -> dict:
     """
     SALAD 全局检索 → 匹配 → PnP 视觉定位。
@@ -985,7 +1116,7 @@ def localize_with_salad_roma(
       - "lightglue": SALAD + LightGlue 稀疏匹配
       - "ace": ACE 场景坐标回归 + PnP
     """
-    from services.localizer import load_colmap, _POINT_INDEX, get_point_cloud_arrays
+    from services.localizer import load_colmap, get_point_cloud_arrays
     
     match_name = {"roma": "RoMa", "lightglue": "LightGlue", "ace": "ACE"}.get(algo, "LightGlue")
     tag = f"salad_{algo}"
@@ -1196,8 +1327,8 @@ def localize_with_salad_roma(
     
     # 2. 加载点云
     known_points, _ = load_colmap()
-    pts_all = _POINT_INDEX["pts"]
     all_pts, all_col = get_point_cloud_arrays()
+    pts_all = all_pts
     log(f"🗺️ {len(pts_all)} 个3D点")
     
     # 3. SALAD 全局检索
@@ -1222,7 +1353,7 @@ def localize_with_salad_roma(
     
     for rank, (name_key, sim, tile) in enumerate(retrieved):
         log(f"\n{'─'*40}")
-        log(f"  LightGlue 匹配候选 #{rank}: {tile['view']}/{name_key} (sim={sim:.3f})")
+        log(f"  {match_name} 匹配候选 #{rank}: {tile['view']}/{name_key} (sim={sim:.3f})")
         
         # 跳过被过滤的 tile（image_path 为空）
         if not tile.get("image_path") or not os.path.exists(tile.get("image_path", "")):
@@ -1304,8 +1435,8 @@ def localize_with_salad_roma(
         for tmp_path in [init_proj]:
             if os.path.exists(tmp_path): os.remove(tmp_path)
         
-        # ── 10 轮迭代优化：相似度不再提升时停止，取最佳 ──
-        MAX_ROUNDS = 10
+        # ── 按调用参数迭代优化：相似度不再提升时提前停止，取最佳 ──
+        MAX_ROUNDS = max(0, int(max_iterations))
 
         rvec, tvec = best_rvec, best_tvec
         inlier_count = best_inliers
@@ -1493,17 +1624,83 @@ def localize_with_salad_roma(
             known_points, camera_matrix, q_w, q_h, q_small,
             out, tag, q_small, all_pts=all_pts, all_col=all_col,
         )
+        query_path = out / f"query_{tag}.png"
+        if cv2.imwrite(str(query_path), q_small):
+            result["query_image"] = os.path.relpath(query_path, Path.cwd())
+
+        coordinate_transform = {
+            "status": "not_available",
+            "reason": "final_2d_3d_correspondences_unavailable",
+        }
+        try:
+            if best_3d is not None and best_2d is not None and len(best_3d) >= 4:
+                from services.localizer.verify_projection import (
+                    build_local_coordinate_transform_context,
+                    build_projection_xyz_map,
+                )
+
+                projection_xyz = build_projection_xyz_map(
+                    all_pts,
+                    best_rvec,
+                    best_tvec,
+                    camera_matrix,
+                    width=q_w,
+                    height=q_h,
+                    splat_radius=1,
+                )
+                coordinate_transform = build_local_coordinate_transform_context(
+                    best_2d,
+                    best_3d,
+                    projection_xyz,
+                    out / f"projection_xyz_{tag}.npy",
+                    consistency_threshold_m=coordinate_threshold_m,
+                )
+                consistency = coordinate_transform.get("consistency", {})
+                log(
+                    f"  本地坐标转换产物: {coordinate_transform.get('status')} "
+                    f"({coordinate_transform.get('n_inliers', 0)}/"
+                    f"{coordinate_transform.get('n_matches', 0)} H inliers); "
+                    f"median difference={consistency.get('median_m', 'n/a')}m, "
+                    f"threshold={coordinate_threshold_m:.3f}m, "
+                    f"passed={consistency.get('passed', False)}"
+                )
+        except Exception as exc:
+            coordinate_transform = {
+                "status": "not_available",
+                "reason": "coordinate_transform_generation_failed",
+                "error": str(exc),
+            }
+            log(f"  本地坐标转换产物生成失败: {exc}")
+
+        _apply_coordinate_reliability(result, coordinate_transform)
         result['iter_history'] = iter_history
         result['total_rounds'] = len(candidates)
         result['all_candidates'] = all_candidates_out
         return result
     
-    return {"success": False, "error": "SALAD+LightGlue PnP 失败", "tag": tag}
+    return {"success": False, "error": f"SALAD+{match_name} PnP 失败", "tag": tag}
 
 
 # ============================================================
 #  LightGlue+PNP 单步优化：基于已有位姿再做稀疏匹配优化
 # ============================================================
+
+def _dispatch_matcher(
+    matcher_type: str,
+    q_img: np.ndarray,
+    ref_img: np.ndarray,
+    sample_num: int = 3000,
+) -> tuple:
+    """根据 matcher_type 分派到对应匹配器。
+
+    返回 (kpts_q, kpts_ref, cert)； matcher_type 未知时抛出 ValueError。
+    """
+    if matcher_type == "tiny_roma":
+        return _roma_match(q_img, ref_img, sample_num=sample_num)
+    if matcher_type in ("lightglue", "disk_lg"):
+        return _lightglue_match(q_img, ref_img, sample_num=sample_num)
+    raise ValueError(f"Unknown matcher_type: {matcher_type!r}")
+
 
 def refine_pose_with_roma(
     query_image_path: str,
@@ -1512,25 +1709,30 @@ def refine_pose_with_roma(
     all_pts, all_col,
     out_dir: str = "projections/localize",
     tag: str = "roma_refine",
+    matcher_type: str = "lightglue",
 ) -> dict:
-    """
-    基于已有 PnP 位姿，用 LightGlue 匹配原图 vs 重投影图，
-    再做 PnP → 评估 SALAD 相似度。
-    
+    """基于已有 PnP 位姿，用指定匹配器匹配原图 vs 重投影图，再做 PnP → 评估 SALAD 相似度。
+
+    matcher_type 可选值：
+    - "tiny_roma" — SALAD+RoMa 路径（默认用于 salad_roma 算法）
+    - "lightglue" — DISK+LightGlue（默认值，向后兼容）
+    - "loftr" — LoFTR 密集匹配
+    - "hybrid" — DISK+LG + LoFTR 联合
+
     返回: {success, rvec, tvec, inliers, salad_sim, comparison_image, ...}
     """
     from services.localizer import _POINT_INDEX, load_colmap
-    
+
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    
+
     query_img = cv2.imread(query_image_path)
     if query_img is None:
         return {"success": False, "error": "Cannot read query image"}
-    
+
     h_orig, w_orig = query_img.shape[:2]
     q_small = cv2.resize(query_img, (512, 512))
-    
+
     # 渲染重投影图
     ref_proj = str(out / f"_refine_{tag}_proj.png")
     ref_proj_path, ref_coord = render_projection_image(
@@ -1539,11 +1741,11 @@ def refine_pose_with_roma(
     )
     if ref_proj_path is None:
         return {"success": False, "error": "Render failed"}
-    
+
     ref_img = cv2.imread(ref_proj_path)
     if ref_img is None:
         return {"success": False, "error": "Read render failed"}
-    
+
     # 初始 SALAD 相似度
     salad_sim = 0.0
     salad_model, salad_scale = _get_dinov2_model()
@@ -1552,14 +1754,19 @@ def refine_pose_with_roma(
         ref_desc = _extract_multimodal_descriptor(salad_model, ref_img, None, None, salad_scale)
         if q_desc is not None and ref_desc is not None:
             salad_sim = float(np.dot(q_desc, ref_desc) / (np.linalg.norm(q_desc) * np.linalg.norm(ref_desc) + 1e-8))
-    
+
     log(f"  [REFINE] 初始 SALAD 相似度: {salad_sim:.4f}")
-    
-    # LightGlue 匹配原图 vs 重投影图
-    kpts_q, kpts_proj, cert = _lightglue_match(q_small, ref_img, sample_num=3000)
+
+    # 根据 matcher_type 分派匹配器
+    try:
+        kpts_q, kpts_proj, cert = _dispatch_matcher(matcher_type, q_small, ref_img, sample_num=3000)
+    except ValueError as e:
+        if os.path.exists(ref_proj): os.remove(ref_proj)
+        return {"success": False, "error": f"Unknown matcher_type: {matcher_type!r}"}
+
     if len(kpts_q) < 10:
         if os.path.exists(ref_proj): os.remove(ref_proj)
-        return {"success": False, "error": f"LightGlue matches too few: {len(kpts_q)}"}
+        return {"success": False, "error": f"{matcher_type} matches too few: {len(kpts_q)}"}
     
     # 构建 3D-2D 匹配
     obj_pts, img_pts = _build_3d_2d_matches(kpts_q, kpts_proj, cert, ref_coord)
