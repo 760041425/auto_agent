@@ -951,10 +951,14 @@ def localize_with_salad_roma_v2(
                 plane_seed=1337,
             )
             consistency = coordinate_transform.get("consistency", {})
+            plane_seg = coordinate_transform.get("plane_segmentation", {})
             log(
                 f"  本地坐标转换产物: {coordinate_transform.get('status')} "
                 f"({coordinate_transform.get('n_inliers', 0)}/"
                 f"{coordinate_transform.get('n_matches', 0)} H inliers); "
+                f"plane_segmentation={plane_seg.get('status', 'N/A')}, "
+                f"ground={plane_seg.get('n_ground_inliers', '-')}/"
+                f"{plane_seg.get('n_total_points', '-')}, "
                 f"median difference={consistency.get('median_m', 'n/a')}m, "
                 f"threshold={coordinate_threshold_m:.3f}m, "
                 f"passed={consistency.get('passed', False)}"
