@@ -952,6 +952,22 @@ def localize_with_salad_roma_v2(
             )
             consistency = coordinate_transform.get("consistency", {})
             plane_seg = coordinate_transform.get("plane_segmentation", {})
+            # 诊断：用 PnP 位姿直接重投影 NPY 3D 点，看纯位姿误差（不经过 H）
+            pose_only_err = None
+            try:
+                if best_3d is not None and best_2d is not None:
+                    proj_pts, _ = cv2.projectPoints(
+                        best_3d.reshape(-1, 1, 3),
+                        best_rvec if 'best_rvec' in dir() else np.zeros(3),
+                        best_tvec if 'best_tvec' in dir() else np.zeros(3),
+                        K, None,
+                    )
+                    proj_pts = proj_pts.reshape(-1, 2)
+                    reproj_px = np.linalg.norm(proj_pts - best_2d, axis=1)
+                    pose_only_err = float(np.median(reproj_px))
+            except Exception:
+                pass
+            reproj_str = f"{pose_only_err:.2f}px" if pose_only_err is not None else "N/A"
             log(
                 f"  本地坐标转换产物: {coordinate_transform.get('status')} "
                 f"({coordinate_transform.get('n_inliers', 0)}/"
@@ -960,8 +976,7 @@ def localize_with_salad_roma_v2(
                 f"ground={plane_seg.get('n_ground_inliers', '-')}/"
                 f"{plane_seg.get('n_total_points', '-')}, "
                 f"median difference={consistency.get('median_m', 'n/a')}m, "
-                f"threshold={coordinate_threshold_m:.3f}m, "
-                f"passed={consistency.get('passed', False)}"
+                f"PnP reproj_median={reproj_str}"
             )
     except Exception as exc:
         coordinate_transform = {
