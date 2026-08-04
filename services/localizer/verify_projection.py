@@ -13,7 +13,10 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
-from services.localizer.plane_detection import segment_plane
+from services.localizer.plane_detection import (
+    project_points_to_plane,
+    segment_plane,
+)
 
 _logger = logging.getLogger("localizer.verify_projection")
 
@@ -321,23 +324,36 @@ def build_local_coordinate_transform_context(
         query_for_h = query
         world_for_h = world
 
-    # --- 坐标归一化 + 单应拟合 ---
-    # 像素坐标 (0~512) 与 SLAM XY（米，offset 减后十几~几十）量级差异大，
-    # 直接喂给 cv2.findHomography 会数值不稳定，导致 H 拟合偏差数十米。
-    # Hartley 归一化把两组点都变换到零均值、sqrt(2) 均方距离，消除量级差。
+    # --- 平面投影 + 坐标归一化 + 单应拟合 ---
+    # 核心改动（对齐 slam-map 的 compute_homography_from_plane）：
+    #   1. 用检测出的地面平面构建 2D 坐标系（非简单取 XY）
+    #   2. 把 3D 点投影到该平面 → 平面坐标 (u, v)
+    #   3. 对像素坐标和平面坐标分别做 Hartley 归一化
+    #   4. 在归一化空间拟合 H，再反归一化得到完整映射
+    #
+    # 这一步同时修复了「立面点拉歪 H」和「量级差导致数值不稳定」两个问题。
+
+    # 平面坐标（地面内点）
+    if plane_params is not None and ground_mask is not None and int(ground_mask.sum()) >= 4:
+        world_plane_xy = project_points_to_plane(world_for_h, plane_params)
+    else:
+        # 无平面检测或无足够地面点：退回到 XY（但仍是地面内点子集或全点）
+        world_plane_xy = world_for_h[:, :2].astype(np.float64)
+
+    # Hartley 归一化
     query_norm, T_query = _normalize_2d(query_for_h)
-    world_xy_norm, T_world = _normalize_2d(world_for_h[:, :2])
+    world_norm, T_world = _normalize_2d(world_plane_xy)
 
     homography_norm, mask = cv2.findHomography(
         query_norm.reshape(-1, 1, 2),
-        world_xy_norm.reshape(-1, 1, 2),
+        world_norm.reshape(-1, 1, 2),
         cv2.RANSAC,
-        0.05,   # 归一化空间阈值：对应约 sqrt(2)*0.05 ≈ 7% 归一化距离
+        0.05,   # 归一化空间阈值（约 7% 归一化距离）
     )
     if homography_norm is None or not np.all(np.isfinite(homography_norm)):
         return {"status": "not_available", "reason": "world_homography_failed"}
 
-    # 组合：pixel → normalized_query → normalized_world → world_meters
+    # 组合：pixel → normalized_query → normalized_world → world_plane_meters
     # H = T_world⁻¹ @ H_norm @ T_query
     try:
         T_world_inv = np.linalg.inv(T_world)

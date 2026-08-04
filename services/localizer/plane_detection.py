@@ -136,3 +136,73 @@ def segment_plane(
         float(refined_d),
     )
     return plane_params, refined_inlier_mask
+
+
+def build_plane_coordinate_frame(
+    plane_params: Tuple[float, float, float, float],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """从平面方程构建平面上的 2D 坐标系。
+
+    返回 ``(origin, x_axis, y_axis)``：
+    - ``origin``: 平面上距离世界原点最近的点（3，）
+    - ``x_axis``: 平面内单位切向量（3，）
+    - ``y_axis``: 平面内单位切向量，与 x_axis 正交（3，）
+
+    对于地面平面（法向量 ≈ [0,0,1]），x/y_axis 大致与 world X/Y 对齐；
+    对于倾斜平面，x/y_axis 自动适应平面方向。
+    """
+    a, b, c, d = plane_params
+    normal = np.array([a, b, c], dtype=np.float64)
+    normal_norm = np.linalg.norm(normal)
+    if normal_norm < 1e-12:
+        raise ValueError("Degenerate plane normal")
+    normal = normal / normal_norm
+    d_norm = d / normal_norm
+
+    # 平面距世界原点最近的点：t = -d / ||n||^2（n 已单位化即 -d）
+    origin = -d_norm * normal
+
+    # 选参考方向：若法向量不接近 Z 轴，用 world Z；否则用 world X
+    if abs(normal[2]) < 0.9:
+        ref = np.array([0.0, 0.0, 1.0])
+    else:
+        ref = np.array([1.0, 0.0, 0.0])
+
+    # x_axis = ref 在平面上的投影（垂直于法向量）
+    x_axis = ref - np.dot(ref, normal) * normal
+    x_len = np.linalg.norm(x_axis)
+    if x_len < 1e-8:
+        # ref 与法向量几乎平行，换一个参考方向
+        ref2 = np.array([0.0, 1.0, 0.0])
+        x_axis = ref2 - np.dot(ref2, normal) * normal
+        x_len = np.linalg.norm(x_axis)
+    x_axis = x_axis / x_len
+
+    # y_axis = normal × x_axis（保证右手系）
+    y_axis = np.cross(normal, x_axis)
+    y_axis = y_axis / np.linalg.norm(y_axis)
+
+    return origin, x_axis, y_axis
+
+
+def project_points_to_plane(
+    points_3d: np.ndarray,
+    plane_params: Tuple[float, float, float, float],
+) -> np.ndarray:
+    """把 3D 点投影到平面上，返回平面坐标系下的 2D 坐标。
+
+    参数
+    ----------
+    points_3d : (N, 3)
+    plane_params : (a, b, c, d) 归一化平面方程 ax+by+cz+d=0
+
+    返回
+    -------
+    plane_coords : (N, 2) — 每行是 (u, v) 平面坐标（单位与输入一致，米）
+    """
+    origin, x_axis, y_axis = build_plane_coordinate_frame(plane_params)
+    pts = np.asarray(points_3d, dtype=np.float64).reshape(-1, 3)
+    centered = pts - origin
+    u = centered @ x_axis
+    v = centered @ y_axis
+    return np.column_stack([u, v])

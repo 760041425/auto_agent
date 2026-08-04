@@ -1677,6 +1677,8 @@ def localize_with_salad_roma(
                     projection_xyz,
                     out / f"projection_xyz_{tag}.npy",
                     consistency_threshold_m=coordinate_threshold_m,
+                    plane_distance_threshold=0.2,
+                    plane_seed=1337,
                 )
                 consistency = coordinate_transform.get("consistency", {})
                 log(
