@@ -13,6 +13,8 @@ from typing import Optional, Tuple
 import cv2
 import numpy as np
 
+from services.localizer.plane_detection import segment_plane
+
 _logger = logging.getLogger("localizer.verify_projection")
 
 
@@ -221,16 +223,79 @@ def build_local_coordinate_transform_context(
     reproj_thresh_m: float = 3.0,
     consistency_threshold_m: float = 0.3,
     consistency_sample_limit: int = 256,
+    plane_distance_threshold: Optional[float] = None,
+    plane_seed: int = 1337,
 ) -> dict:
-    """拟合 query 像素→SLAM XY 单应矩阵并保存最终位姿 XYZ NPY。"""
+    """拟合 query 像素→SLAM XY 单应矩阵并保存最终位姿 XYZ NPY。
+
+    参数
+    ----------
+    query_points : (N, 2) query 图像素坐标
+    world_points : (N, 3) 世界坐标
+    projection_xyz : (H, W, 3) 投影 XYZ 图
+    output_path : 保存 NPY 的路径
+    reproj_thresh_m : H 拟合的 RANSAC 重投影阈值（米）
+    consistency_threshold_m : 一致性判定阈值（米）
+    consistency_sample_limit : 一致性采样上限
+    plane_distance_threshold : 平面检测距离阈值（米），None 时禁用平面检测
+    plane_seed : 平面检测随机种子
+    """
     query = np.asarray(query_points, dtype=np.float32).reshape(-1, 2)
     world = np.asarray(world_points, dtype=np.float32).reshape(-1, 3)
     if len(query) < 4 or len(query) != len(world):
         return {"status": "not_available", "reason": "insufficient_2d_3d_points"}
 
+    # --- 平面检测 + 分层单应 ---
+    plane_params = None
+    ground_mask = None
+    plane_segmentation_meta = {"status": "skipped"}
+
+    if plane_distance_threshold is not None:
+        plane_params, ground_mask = segment_plane(
+            world,
+            distance_threshold=plane_distance_threshold,
+            seed=plane_seed,
+        )
+        if plane_params is not None and ground_mask is not None:
+            n_ground = int(ground_mask.sum())
+            if n_ground >= 4:
+                query_for_h = query[ground_mask]
+                world_for_h = world[ground_mask]
+                plane_segmentation_meta = {
+                    "status": "plane_detected",
+                    "n_ground_inliers": n_ground,
+                    "n_total_points": int(len(world)),
+                    "plane_params": list(map(float, plane_params)),
+                    "distance_threshold_m": float(plane_distance_threshold),
+                }
+            else:
+                plane_segmentation_meta = {
+                    "status": "insufficient_ground_points",
+                    "n_ground_inliers": n_ground,
+                    "n_total_points": int(len(world)),
+                    "distance_threshold_m": float(plane_distance_threshold),
+                }
+                # 回退：用全点
+                query_for_h = query
+                world_for_h = world
+        else:
+            # segment_plane 失败，回退
+            plane_segmentation_meta = {
+                "status": "insufficient_ground_points",
+                "n_ground_inliers": 0,
+                "n_total_points": int(len(world)),
+                "distance_threshold_m": float(plane_distance_threshold),
+            }
+            query_for_h = query
+            world_for_h = world
+    else:
+        query_for_h = query
+        world_for_h = world
+
+    # 用分层后的点拟 H
     homography, mask = cv2.findHomography(
-        query.reshape(-1, 1, 2),
-        world[:, :2].reshape(-1, 1, 2),
+        query_for_h.reshape(-1, 1, 2),
+        world_for_h[:, :2].reshape(-1, 1, 2),
         cv2.RANSAC,
         reproj_thresh_m,
     )
@@ -257,6 +322,7 @@ def build_local_coordinate_transform_context(
         "height": int(xyz.shape[0]),
         "n_matches": int(len(query)),
         "n_inliers": int(mask.sum()) if mask is not None else int(len(query)),
+        "plane_segmentation": plane_segmentation_meta,
     }
     context["consistency"] = evaluate_local_coordinate_consistency(
         context,
