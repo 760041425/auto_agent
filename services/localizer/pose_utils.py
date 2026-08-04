@@ -186,8 +186,17 @@ def is_pose_better(
     cand_inliers: int, cand_err: float,
     cur_inliers: int, cur_err: float,
     inlier_tol: int = 2,
+    err_ratio_limit: float = 2.0,
 ) -> bool:
-    """位姿择优：内点数优先（容差 ±inlier_tol），其次重投影误差更小。"""
+    """位姿择优：内点数优先（容差 ±inlier_tol），其次重投影误差更小。
+
+    误差约束：当候选误差超过当前误差的 ``err_ratio_limit`` 倍时，
+    即使内点更多也不采用。这避免了"联合 PnP 用 37 个额外内点
+    把误差从 23px 拉到 104px"之类的劣化选择。
+    """
+    # 硬约束：误差过大的候选直接拒绝
+    if cur_err > 0 and cand_err > cur_err * err_ratio_limit:
+        return False
     if cand_inliers > cur_inliers + inlier_tol:
         return True
     if abs(cand_inliers - cur_inliers) <= inlier_tol and cand_err < cur_err:
