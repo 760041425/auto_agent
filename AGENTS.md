@@ -10,6 +10,36 @@
 - 旧需求入口：`spec/`（只作兼容索引，不再作为权威规格）
 - 自动化测试：当前位于 `api/tests/`、`services/tests/`，跨上下文测试位于 `tests/`
 
+## 🚨 强制流程门禁（每次变更前必须确认）
+
+> **这是硬约束，不是建议。违反门禁 = 流程 bug，必须报告。**
+
+### 动手前必须回答的三个问题
+
+1. **变更包在哪？**
+   - 非琐碎改动（≥10 行或跨文件）→ `specs/<feature-id>/` 八件套必须存在
+   - 如果没有 → **先建变更包，再动手**
+   - 如果已有但脱节 → **先更新 spec 对齐代码，再动手**
+
+2. **当前 TDD 阶段？**
+   - 从 `testlist.md` 选一个场景 → 写失败测试（Red）→ 跑 → 确认红 → 最小实现（Green）→ 跑 → 确认绿
+   - **禁止一次写一堆测试**
+   - **禁止跳过 Red 直接写实现**
+
+3. **门禁跑了吗？**
+   - 每次改动后：`./scripts/run-all-tests.sh fast`
+   - 涉及 specs/ 时：`./scripts/validate-specs.sh`
+   - 涉及 docs/ 时：`./scripts/drift-check.sh`
+
+### 违规处理
+
+| 违规 | 处置 |
+|---|---|
+| 没有变更包就改了代码 | 停下，补建 specs/，更新 testlist 让已实现的场景标记为 `[x]` |
+| 跳过 Red 直接写实现 | 删除实现，先写失败测试，再重新实现 |
+| 一次改了多个不相关文件 | 拆成多个 commit，每个对应一个 testlist 场景 |
+| 改了代码没跑测试 | 停下，跑测试，修到全绿再继续 |
+
 ## 变更流程
 
 1. 在 `specs/<feature-id>/` 创建或更新 `spec.md`、`clarify.md`、`plan.md`、`tasks.md`、`checklist.md`、`testlist.md`、`risks.md`、`decisions.md`。
