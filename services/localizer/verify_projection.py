@@ -214,6 +214,35 @@ def build_projection_xyz_map(
     return xyz_map
 
 
+def _normalize_2d(points: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Hartley 归一化：把 2D 点平移到零均值、缩放到 sqrt(2) 均方距离。
+
+    返回 ``(normalized, T)``，其中 ``T`` 是 3×3 变换矩阵，满足
+    ``normalized ≈ (T @ homogeneous_original.T).T``。
+
+    使用基于均方距离的尺度（而非包围盒边长）避免某一坐标轴尺度
+    远大于另一轴时产生数值不稳定。
+    """
+    pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    if len(pts) < 2:
+        return pts.copy(), np.eye(3)
+    centroid = pts.mean(axis=0)
+    centered = pts - centroid
+    mean_dist = np.mean(np.linalg.norm(centered, axis=1))
+    if mean_dist < 1e-12:
+        scale = 1.0
+    else:
+        scale = np.sqrt(2.0) / mean_dist
+    T = np.array([
+        [scale, 0.0, -scale * centroid[0]],
+        [0.0, scale, -scale * centroid[1]],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+    homogeneous = np.column_stack([pts, np.ones(len(pts))])
+    normalized = (T @ homogeneous.T).T
+    return normalized[:, :2], T
+
+
 def build_local_coordinate_transform_context(
     query_points: np.ndarray,
     world_points: np.ndarray,
@@ -292,15 +321,29 @@ def build_local_coordinate_transform_context(
         query_for_h = query
         world_for_h = world
 
-    # 用分层后的点拟 H
-    homography, mask = cv2.findHomography(
-        query_for_h.reshape(-1, 1, 2),
-        world_for_h[:, :2].reshape(-1, 1, 2),
+    # --- 坐标归一化 + 单应拟合 ---
+    # 像素坐标 (0~512) 与 SLAM XY（米，offset 减后十几~几十）量级差异大，
+    # 直接喂给 cv2.findHomography 会数值不稳定，导致 H 拟合偏差数十米。
+    # Hartley 归一化把两组点都变换到零均值、sqrt(2) 均方距离，消除量级差。
+    query_norm, T_query = _normalize_2d(query_for_h)
+    world_xy_norm, T_world = _normalize_2d(world_for_h[:, :2])
+
+    homography_norm, mask = cv2.findHomography(
+        query_norm.reshape(-1, 1, 2),
+        world_xy_norm.reshape(-1, 1, 2),
         cv2.RANSAC,
-        reproj_thresh_m,
+        0.05,   # 归一化空间阈值：对应约 sqrt(2)*0.05 ≈ 7% 归一化距离
     )
-    if homography is None or not np.all(np.isfinite(homography)):
+    if homography_norm is None or not np.all(np.isfinite(homography_norm)):
         return {"status": "not_available", "reason": "world_homography_failed"}
+
+    # 组合：pixel → normalized_query → normalized_world → world_meters
+    # H = T_world⁻¹ @ H_norm @ T_query
+    try:
+        T_world_inv = np.linalg.inv(T_world)
+    except np.linalg.LinAlgError:
+        return {"status": "not_available", "reason": "world_normalization_singular"}
+    homography = (T_world_inv @ homography_norm @ T_query).astype(np.float64)
 
     xyz = np.asarray(projection_xyz, dtype=np.float32)
     if xyz.ndim != 3 or xyz.shape[2] != 3:
