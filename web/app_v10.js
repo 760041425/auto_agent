@@ -755,6 +755,37 @@ function renderLocalizationArtifacts(result, maxHeight, taskId, resultIndex) {
   return '<p class="artifact-missing" style="font-size:0.78rem;color:#e65100;background:#fff3e0;padding:0.45rem;border-radius:4px">视觉产物未生成：' + escapeLocalizeHtml(reason) + '。历史结果需重新定位后生成。</p>';
 }
 
+async function runE2ETest() {
+  var btn = document.getElementById('e2e-test-btn');
+  var status = document.getElementById('e2e-test-status');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ 运行中...';
+  status.textContent = '';
+  try {
+    var r = await fetch(API + '/localize/verify-e2e', { method: 'POST' });
+    var data = await r.json();
+    if (data.success) {
+      btn.textContent = '✅ 通过';
+      status.innerHTML = '<span style="color:#2e7d32">端到端回归测试全部通过（' +
+        (data.stdout.match(/(\d+) passed/)?.[1] || '?') + ' tests）</span>';
+    } else {
+      btn.textContent = '❌ 失败';
+      var failInfo = (data.stdout.match(/FAILED.*/g) || []).join('<br>');
+      status.innerHTML = '<span style="color:#c62828">测试失败：</span><br><code style="font-size:0.72rem">' +
+        escapeLocalizeHtml(failInfo || data.error || data.stdout.slice(-500)) + '</code>';
+    }
+  } catch (e) {
+    btn.textContent = '❌ 错误';
+    status.textContent = '调用失败: ' + e.message;
+  } finally {
+    setTimeout(function () {
+      btn.disabled = false;
+      btn.textContent = '🧪 运行回归测试';
+    }, 3000);
+  }
+}
+
 // 定位页面上传
 document.addEventListener('DOMContentLoaded', function() {
   var zone = document.getElementById('localize-upload-zone');

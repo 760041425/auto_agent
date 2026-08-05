@@ -553,6 +553,33 @@ def generate_verify_report(request: dict, db: Session = Depends(get_db)):
         raise HTTPException(500, str(e)) from e
 
 
+@router.post("/verify-e2e")
+def verify_e2e(db: Session = Depends(get_db)):
+    """运行端到端回归测试，返回结构化结果（无需前端手动点 query）。
+
+    用于 CI/CD 门禁和前端"验证"按钮调用。
+    """
+    import subprocess, json
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "pytest",
+             "services/tests/test_e2e_ground_filtering.py",
+             "-v", "--tb=short", "-q"],
+            capture_output=True, text=True, timeout=120,
+            cwd=str(Path(__file__).resolve().parent.parent.parent),
+        )
+        return {
+            "success": r.returncode == 0,
+            "returncode": r.returncode,
+            "stdout": r.stdout[-3000:],
+            "stderr": r.stderr[-1000:],
+        }
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "测试超时（>120s）"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @router.post("/coordinate-transform")
 def coordinate_transform(
     request: CoordinateTransformRequest,

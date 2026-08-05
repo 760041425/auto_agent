@@ -102,6 +102,10 @@
         <label style="display:block;margin-top:0.5rem;font-size:0.82rem;color:#666"><input id="localize-debug" type="checkbox"> 生成候选轮次调试图（较慢）</label>
       </fieldset>
       <label style="display:block;margin-top:0.3rem;font-size:0.82rem;color:#666"><input id="localize-verify" type="checkbox" checked> 定位后计算 2D 几何拟合诊断（非 Benchmark）</label>
+      <div style="margin:0.5rem 0;display:flex;gap:0.5rem;align-items:center">
+        <button id="e2e-test-btn" class="btn-primary" onclick="runE2ETest()" style="white-space:nowrap;padding:0.4rem 0.8rem;font-size:0.82rem">🧪 运行回归测试</button>
+        <span id="e2e-test-status" style="font-size:0.8rem;color:#666"></span>
+      </div>
       <div id="localize-status" class="status hidden"></div>
       <div id="localize-verify-result" style="margin:0.5rem 0;padding:0.5rem;background:#e3f2fd;border-radius:4px;font-size:0.82rem;display:none">
         <details open>
