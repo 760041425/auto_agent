@@ -18,7 +18,8 @@ from services.localizer.plane_detection import (
     segment_plane,
 )
 
-_logger = logging.getLogger("localizer.verify_projection")
+from services.localizer.logger_config import get_backend_logger
+_logger = get_backend_logger("salad_roma_v2")
 
 
 def load_published_tile_images(
