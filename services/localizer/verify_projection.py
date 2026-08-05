@@ -475,13 +475,34 @@ def evaluate_local_coordinate_consistency(
     slam_xy = mapped_xy[ground_mask]
     slam_xyz = np.column_stack([slam_xy, np.zeros(len(slam_xy), dtype=np.float64)])
     distances = np.linalg.norm(slam_xyz - npy_xyz, axis=1)
-    # 调试：输出 Z 分布
+    # 调试：输出 Z 分布 + 前 5 个地面点坐标对比
     z_abs = np.abs(npy_xyz_all[:, 2])
     _logger.info(
         f"🔍 地面点过滤: 总样本={n_total}, |Z|<0.5m={n_ground}, "
         f"Z 范围=[{z_abs.min():.2f}, {z_abs.max():.2f}]m, "
         f"Z 中位={np.median(z_abs):.2f}m"
     )
+    # 采样前 3 个地面点的 H→SLAM vs NPY 坐标
+    try:
+        sample_idxs = np.where(ground_mask)[0][:3]
+        for idx in sample_opts:
+            p2d_x = float(pixel_x[idx])
+            p2d_y = float(pixel_y[idx])
+            mapped_h = mapped[idx]
+            if abs(mapped_h[2]) > 1e-12:
+                hx = mapped_h[0] / mapped_h[2]
+                hy = mapped_h[1] / mapped_h[2]
+                npx = float(npy_xyz_all[idx, 0])
+                npy = float(npy_xyz_all[idx, 1])
+                npz = float(npy_xyz_all[idx, 2])
+                dx = hx - npx
+                dy = hy - npy
+                _logger.info(
+                    f"  pt[{idx}]: H=({hx:.1f},{hy:.1f}) NPY=({npx:.1f},{npy:.1f},{npz:.2f}) "
+                    f"Δ=({dx:.1f},{dy:.1f})"
+                )
+    except Exception as e:
+        _logger.debug(f"采样调试异常: {e}")
     median = float(np.median(distances))
     return {
         **base,
