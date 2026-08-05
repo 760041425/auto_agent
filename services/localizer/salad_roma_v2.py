@@ -910,6 +910,10 @@ def localize_with_salad_roma_v2(
     artifacts = {}
     artifact_error = None
     try:
+        # 计算地面点 bounding box（用于可视化）
+        ground_bbox = None
+        if coordinate_transform.get("plane_segmentation", {}).get("status") == "plane_detected":
+            ground_bbox = coordinate_transform.get("ground_bbox")
         artifacts = _write_final_artifacts(
             q_small,
             all_pts,
@@ -919,6 +923,7 @@ def localize_with_salad_roma_v2(
             K,
             out,
             tag,
+            ground_bbox=ground_bbox,
         )
         log(f"  最终视觉产物: {', '.join(artifacts)}")
     except Exception as exc:
@@ -1234,6 +1239,7 @@ def _write_final_artifacts(
     camera_matrix,
     output_dir,
     tag,
+    ground_bbox=None,
 ):
     """为最终返回位姿生成查询图、最终投影图和带标签双图。"""
     output_dir = Path(output_dir)
@@ -1263,10 +1269,30 @@ def _write_final_artifacts(
     if projection.shape[:2] != query_image.shape[:2]:
         projection = cv2.resize(projection, (width, height))
 
+    # 在 projection 上画地面平面框
+    if ground_bbox is not None:
+        x_min = int(max(0, ground_bbox["x_min"]))
+        y_min = int(max(0, ground_bbox["y_min"]))
+        x_max = int(min(width - 1, ground_bbox["x_max"]))
+        y_max = int(min(height - 1, ground_bbox["y_max"]))
+        cv2.rectangle(projection, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+
     header_height = 28
     canvas = np.zeros((height + header_height, width * 2, 3), dtype=np.uint8)
     canvas[header_height:, :width] = query_image
     canvas[header_height:, width:] = projection
+
+    # 画地面平面检测框（绿色矩形）
+    if ground_bbox is not None:
+        x_min = int(max(0, ground_bbox["x_min"]))
+        y_min = int(max(0, ground_bbox["y_min"]))
+        x_max = int(min(width - 1, ground_bbox["x_max"]))
+        y_max = int(min(height - 1, ground_bbox["y_max"]))
+        # 左图（query image）画框
+        cv2.rectangle(canvas, (x_min, y_min + header_height), (x_max, y_max + header_height), (0, 255, 0), 2)
+        # 右图（projection）画框
+        cv2.rectangle(canvas, (width + x_min, y_min + header_height), (width + x_max, y_max + header_height), (0, 255, 0), 2)
+
     cv2.putText(
         canvas,
         "Query image",
@@ -1287,6 +1313,17 @@ def _write_final_artifacts(
         1,
         cv2.LINE_AA,
     )
+    if ground_bbox is not None:
+        cv2.putText(
+            canvas,
+            "Ground plane detected",
+            (width + 200, 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 255, 0),
+            1,
+            cv2.LINE_AA,
+        )
     if not cv2.imwrite(str(comparison_path), canvas):
         raise RuntimeError(f"cannot write comparison artifact: {comparison_path}")
 

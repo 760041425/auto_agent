@@ -381,9 +381,19 @@ def build_local_coordinate_transform_context(
         fit_3d = np.asarray(world)[ground_mask]
         fitting_2d_list = fit_2d.astype(np.float64).tolist()
         fitting_3d_list = fit_3d.astype(np.float64).tolist()
+        # 地面点的像素 bounding box（用于可视化和框内取点）
+        ground_pixel_x = fit_2d[:, 0]
+        ground_pixel_y = fit_2d[:, 1]
+        bbox = {
+            "x_min": float(np.min(ground_pixel_x)),
+            "y_min": float(np.min(ground_pixel_y)),
+            "x_max": float(np.max(ground_pixel_x)),
+            "y_max": float(np.max(ground_pixel_y)),
+        }
     else:
         fitting_2d_list = []
         fitting_3d_list = []
+        bbox = None
     context = {
         "status": "ready",
         "source": "local_final_pose",
@@ -397,6 +407,7 @@ def build_local_coordinate_transform_context(
         "plane_params": plane_params_for_eval,
         "fitting_2d": fitting_2d_list,
         "fitting_3d": fitting_3d_list,
+        "ground_bbox": bbox,
     }
     context["consistency"] = evaluate_local_coordinate_consistency(
         context,
@@ -444,6 +455,7 @@ def evaluate_local_coordinate_consistency(
         plane_params = context.get("plane_params")
         fitting_2d = context.get("fitting_2d")  # H 拟合时用的像素
         fitting_3d = context.get("fitting_3d")  # H 拟合时用的世界坐标
+        ground_bbox = context.get("ground_bbox")  # 地面点像素 bounding box
     except (KeyError, OSError, TypeError, ValueError):
         return {**base, "reason": "coordinate_transform_artifact_unavailable"}
     if projection_xyz.shape != (height, width, 3):
@@ -456,17 +468,30 @@ def evaluate_local_coordinate_consistency(
     )
 
     if use_fitting_points:
-        # 用 H 拟合的点评估
         fit_2d = np.asarray(fitting_2d, dtype=np.float64)
         fit_3d = np.asarray(fitting_3d, dtype=np.float64)
+        # 用 bounding box 进一步过滤（只保留框内点）
+        if ground_bbox is not None:
+            in_bbox = (
+                (fit_2d[:, 0] >= ground_bbox["x_min"]) & (fit_2d[:, 0] <= ground_bbox["x_max"]) &
+                (fit_2d[:, 1] >= ground_bbox["y_min"]) & (fit_2d[:, 1] <= ground_bbox["y_max"])
+            )
+            fit_2d = fit_2d[in_bbox]
+            fit_3d = fit_3d[in_bbox]
         pixel_x = fit_2d[:, 0]
         pixel_y = fit_2d[:, 1]
         npy_xyz_all = fit_3d
     else:
-        # 回退：从 NPY 采样
+        # 回退：从 NPY 采样 + bounding box 过滤
         finite = np.all(np.isfinite(projection_xyz), axis=2)
         nonzero = np.any(np.asarray(projection_xyz) != 0, axis=2)
         valid_pixels = np.argwhere(finite & nonzero)
+        if ground_bbox is not None:
+            in_bbox = (
+                (valid_pixels[:, 1] >= ground_bbox["x_min"]) & (valid_pixels[:, 1] <= ground_bbox["x_max"]) &
+                (valid_pixels[:, 0] >= ground_bbox["y_min"]) & (valid_pixels[:, 0] <= ground_bbox["y_max"])
+            )
+            valid_pixels = valid_pixels[in_bbox]
         if len(valid_pixels) < min_samples:
             return {
                 **base,
