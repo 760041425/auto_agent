@@ -967,6 +967,30 @@ def localize_with_salad_roma_v2(
                     pose_only_err = float(np.median(reproj_px))
             except Exception:
                 pass
+            # 诊断：采样 5 个 PnP 内点，对比 H→SLAM XY vs NPY XY
+            sample_diag = ""
+            try:
+                if best_3d is not None and best_2d is not None and homography is not None:
+                    # 取前 5 个内点
+                    n_sample = min(5, len(best_3d))
+                    samp_3d = best_3d[:n_sample]
+                    samp_2d = best_2d[:n_sample]
+                    # H→SLAM
+                    hom = np.asarray(coordinate_transform.get("homography", homography))
+                    hom = hom.reshape(3, 3) if hom.size == 9 else None
+                    if hom is not None:
+                        pts_h = np.column_stack([samp_2d[:, 0], samp_2d[:, 1], np.ones(n_sample)])
+                        mapped = (hom @ pts_h.T).T
+                        slam_xy = mapped[:, :2] / mapped[:, 2:3]
+                        # 差异
+                        diffs = np.linalg.norm(slam_xy - samp_3d[:, :2], axis=1)
+                        sample_diag = (
+                            f" | H_vs_NPY_XY_diff=["
+                            + ", ".join(f"{d:.1f}m" for d in diffs)
+                            + "] (前{n_sample}内点)"
+                        )
+            except Exception:
+                pass
             reproj_str = f"{pose_only_err:.2f}px" if pose_only_err is not None else "N/A"
             log(
                 f"  本地坐标转换产物: {coordinate_transform.get('status')} "
@@ -977,6 +1001,7 @@ def localize_with_salad_roma_v2(
                 f"{plane_seg.get('n_total_points', '-')}, "
                 f"median difference={consistency.get('median_m', 'n/a')}m, "
                 f"PnP reproj_median={reproj_str}"
+                f"{sample_diag}"
             )
     except Exception as exc:
         coordinate_transform = {
