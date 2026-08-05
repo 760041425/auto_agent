@@ -1015,6 +1015,36 @@ def localize_with_salad_roma_v2(
     coordinate_reliable = bool(
         consistency.get("status") == "available" and consistency.get("passed")
     )
+
+    # 诊断：采样内点对比 H→SLAM XY vs NPY XY（在 coordinate_transform 生成后）
+    sample_diag = ""
+    try:
+        ct_status = coordinate_transform.get("status")
+        if ct_status == "ready" and best_3d is not None and best_2d is not None:
+            hom_entries = coordinate_transform.get("homography")
+            if hom_entries is not None:
+                hom = np.asarray(hom_entries, dtype=np.float64).reshape(3, 3)
+                n_sample = min(5, len(best_3d))
+                samp_3d = best_3d[:n_sample]
+                samp_2d = best_2d[:n_sample]
+                pts_h = np.column_stack([samp_2d[:, 0], samp_2d[:, 1], np.ones(n_sample)])
+                mapped = (hom @ pts_h.T).T
+                valid_m = np.abs(mapped[:, 2]) > 1e-12
+                if valid_m.any():
+                    slam_xy = mapped[valid_m, :2] / mapped[valid_m, 2:3]
+                    npy_xy = samp_3d[valid_m, :2]
+                    diffs = np.linalg.norm(slam_xy - npy_xy, axis=1)
+                    sample_diag = (
+                        f" | H_vs_NPY_XY(diff m)=["
+                        + ", ".join(f"{d:.1f}" for d in diffs)
+                        + f"] n_valid={int(valid_m.sum())}/{n_sample}"
+                    )
+    except Exception as e:
+        sample_diag = f" | DIAG_ERR={e}"
+
+    if sample_diag:
+        log(f" 🔍 点对比诊断{sample_diag}")
+
     result = {
         "success": True,
         "reliable": coordinate_reliable,
