@@ -397,12 +397,13 @@ def evaluate_local_coordinate_consistency(
     threshold_m: float = 0.3,
     sample_limit: int = 256,
     min_samples: int = 4,
+    ground_z_threshold_m: float = 0.5,
 ) -> dict:
     """以多点 H→SLAM XYZ 与 NPY XYZ 的三维距离中位数作定位可信判据。
 
     单应矩阵 H 把像素映射到 SLAM 地面平面（Z=0），NPY 包含真实高度。
-    比较时把 H→SLAM 的 Z 设为 0，与 NPY 的 XYZ 计算三维欧氏距离，
-    因此 XY 偏移和高度偏差都能被反映到中位差中。
+    为避免高处点（Z>0.5m，如建筑物/招牌）拉歪中位差，只比较地面点
+    （|NPY Z| < ground_z_threshold_m）。这是 H→SLAM 映射的有效域。
     """
     base = {
         "status": "not_available",
@@ -455,13 +456,19 @@ def evaluate_local_coordinate_consistency(
         }
 
     # H 把像素映射到 SLAM 地面平面（Z=0），NPY 包含真实高度。
-    # 比较三维欧氏距离：slam_xyz = (slam_x, slam_y, 0)，npy_xyz = NPY XYZ。
+    # 只比较地面点（|NPY Z| < ground_z_threshold_m），避免高处点拉歪中位差。
     mapped_xy = mapped[valid_h, :2] / mapped[valid_h, 2:3]
-    slam_xyz = np.column_stack([mapped_xy, np.zeros(len(mapped_xy), dtype=np.float64)])
-    npy_xyz = np.asarray(
+    npy_xyz_all = np.asarray(
         projection_xyz[valid_pixels[valid_h, 0], valid_pixels[valid_h, 1]],
         dtype=np.float64,
     )
+    ground_mask = np.abs(npy_xyz_all[:, 2]) < ground_z_threshold_m
+    if int(ground_mask.sum()) < min_samples:
+        # 地面点太少，回退到全点比较
+        ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
+    npy_xyz = npy_xyz_all[ground_mask]
+    slam_xy = mapped_xy[ground_mask]
+    slam_xyz = np.column_stack([slam_xy, np.zeros(len(slam_xy), dtype=np.float64)])
     distances = np.linalg.norm(slam_xyz - npy_xyz, axis=1)
     median = float(np.median(distances))
     return {
