@@ -415,6 +415,7 @@ def evaluate_local_coordinate_consistency(
         "max_m": None,
         "passed": False,
     }
+    _logger.info(f"🔍 evaluate_consistency 被调用: context_status={context.get('status') if isinstance(context, dict) else 'NOT_DICT'}, threshold={threshold_m}")
     if not isinstance(context, dict) or context.get("status") != "ready":
         return {**base, "reason": "coordinate_transform_context_not_ready"}
     try:
