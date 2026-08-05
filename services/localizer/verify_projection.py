@@ -463,13 +463,23 @@ def evaluate_local_coordinate_consistency(
         dtype=np.float64,
     )
     ground_mask = np.abs(npy_xyz_all[:, 2]) < ground_z_threshold_m
-    if int(ground_mask.sum()) < min_samples:
+    n_ground = int(ground_mask.sum())
+    n_total = len(npy_xyz_all)
+    if n_ground < min_samples:
         # 地面点太少，回退到全点比较
-        ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
+        ground_mask = np.ones(n_total, dtype=bool)
+        n_ground = n_total
     npy_xyz = npy_xyz_all[ground_mask]
     slam_xy = mapped_xy[ground_mask]
     slam_xyz = np.column_stack([slam_xy, np.zeros(len(slam_xy), dtype=np.float64)])
     distances = np.linalg.norm(slam_xyz - npy_xyz, axis=1)
+    # 调试：输出 Z 分布
+    z_abs = np.abs(npy_xyz_all[:, 2])
+    _logger.debug(
+        f"地面点过滤: 总样本={n_total}, |Z|<0.5m={n_ground}, "
+        f"Z 范围=[{z_abs.min():.2f}, {z_abs.max():.2f}]m, "
+        f"Z 中位={np.median(z_abs):.2f}m"
+    )
     median = float(np.median(distances))
     return {
         **base,
