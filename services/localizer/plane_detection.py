@@ -178,9 +178,15 @@ def build_plane_coordinate_frame(
         x_len = np.linalg.norm(x_axis)
     x_axis = x_axis / x_len
 
-    # y_axis = normal × x_axis（保证右手系）
-    y_axis = np.cross(normal, x_axis)
+    # y_axis = x_axis × normal（保证右手系且与 world +Y 对齐）
+    # 对于地面平面（normal ≈ [0,0,1] 或 [0,0,-1]）：
+    #   x_axis ≈ [1,0,0], y_axis ≈ [0,1,0]（与 world +Y 同向）
+    y_axis = np.cross(x_axis, normal)
     y_axis = y_axis / np.linalg.norm(y_axis)
+
+    # 验证：地面平面时 y_axis 应接近 world +Y
+    if abs(normal[2]) > 0.9 and y_axis[1] < 0:
+        y_axis = -y_axis
 
     return origin, x_axis, y_axis
 

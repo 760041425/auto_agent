@@ -485,7 +485,7 @@ def evaluate_local_coordinate_consistency(
     # 采样前 3 个地面点的 H→SLAM vs NPY 坐标
     try:
         sample_idxs = np.where(ground_mask)[0][:3]
-        for idx in sample_opts:
+        for idx in sample_idxs:
             p2d_x = float(pixel_x[idx])
             p2d_y = float(pixel_y[idx])
             mapped_h = mapped[idx]
