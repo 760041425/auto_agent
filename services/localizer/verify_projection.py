@@ -258,6 +258,8 @@ def build_local_coordinate_transform_context(
     consistency_sample_limit: int = 256,
     plane_distance_threshold: Optional[float] = None,
     plane_seed: int = 1337,
+    fitting_2d: Optional[np.ndarray] = None,
+    fitting_3d: Optional[np.ndarray] = None,
 ) -> dict:
     """拟合 query 像素→SLAM XY 单应矩阵并保存最终位姿 XYZ NPY。
 
@@ -375,6 +377,9 @@ def build_local_coordinate_transform_context(
         stored_path = str(path.resolve())
     # plane_params 用于 evaluate 时将 NPY 点投影到同一 plane frame
     plane_params_for_eval = tuple(float(p) for p in plane_params) if plane_params is not None else None
+    # fitting_2d/fitting_3d: H 拟合时用的点，供 evaluate 使用（H 只对这些点准确）
+    fitting_2d_list = fitting_2d.astype(np.float64).tolist() if fitting_2d is not None else []
+    fitting_3d_list = fitting_3d.astype(np.float64).tolist() if fitting_3d is not None else []
     context = {
         "status": "ready",
         "source": "local_final_pose",
@@ -386,6 +391,8 @@ def build_local_coordinate_transform_context(
         "n_inliers": int(mask.sum()) if mask is not None else int(len(query)),
         "plane_segmentation": plane_segmentation_meta,
         "plane_params": plane_params_for_eval,
+        "fitting_2d": fitting_2d_list,
+        "fitting_3d": fitting_3d_list,
     }
     context["consistency"] = evaluate_local_coordinate_consistency(
         context,
@@ -431,26 +438,47 @@ def evaluate_local_coordinate_consistency(
             path = Path.cwd() / path
         projection_xyz = np.load(path, mmap_mode="r")
         plane_params = context.get("plane_params")
+        fitting_2d = context.get("fitting_2d")  # H 拟合时用的像素
+        fitting_3d = context.get("fitting_3d")  # H 拟合时用的世界坐标
     except (KeyError, OSError, TypeError, ValueError):
         return {**base, "reason": "coordinate_transform_artifact_unavailable"}
     if projection_xyz.shape != (height, width, 3):
         return {**base, "reason": "projection_npy_shape_mismatch"}
 
-    finite = np.all(np.isfinite(projection_xyz), axis=2)
-    nonzero = np.any(np.asarray(projection_xyz) != 0, axis=2)
-    valid_pixels = np.argwhere(finite & nonzero)
-    if len(valid_pixels) < min_samples:
-        return {
-            **base,
-            "sample_count": int(len(valid_pixels)),
-            "reason": "insufficient_valid_projection_pixels",
-        }
-    if len(valid_pixels) > sample_limit:
-        selected = np.linspace(0, len(valid_pixels) - 1, sample_limit, dtype=np.int64)
-        valid_pixels = valid_pixels[selected]
+    # 优先使用 H 拟合时用的点（H 只对这些点准确）
+    use_fitting_points = (
+        fitting_2d is not None and fitting_3d is not None
+        and len(fitting_2d) >= min_samples
+    )
 
-    pixel_y = valid_pixels[:, 0].astype(np.float64)
-    pixel_x = valid_pixels[:, 1].astype(np.float64)
+    if use_fitting_points:
+        # 用 H 拟合的点评估
+        fit_2d = np.asarray(fitting_2d, dtype=np.float64)
+        fit_3d = np.asarray(fitting_3d, dtype=np.float64)
+        pixel_x = fit_2d[:, 0]
+        pixel_y = fit_2d[:, 1]
+        npy_xyz_all = fit_3d
+    else:
+        # 回退：从 NPY 采样
+        finite = np.all(np.isfinite(projection_xyz), axis=2)
+        nonzero = np.any(np.asarray(projection_xyz) != 0, axis=2)
+        valid_pixels = np.argwhere(finite & nonzero)
+        if len(valid_pixels) < min_samples:
+            return {
+                **base,
+                "sample_count": int(len(valid_pixels)),
+                "reason": "insufficient_valid_projection_pixels",
+            }
+        if len(valid_pixels) > sample_limit:
+            selected = np.linspace(0, len(valid_pixels) - 1, sample_limit, dtype=np.int64)
+            valid_pixels = valid_pixels[selected]
+        pixel_y = valid_pixels[:, 0].astype(np.float64)
+        pixel_x = valid_pixels[:, 1].astype(np.float64)
+        npy_xyz_all = np.asarray(
+            projection_xyz[valid_pixels[:, 0], valid_pixels[:, 1]],
+            dtype=np.float64,
+        )
+
     homogeneous = np.column_stack([pixel_x, pixel_y, np.ones(len(pixel_x))])
     mapped = (homography @ homogeneous.T).T
     valid_h = np.all(np.isfinite(mapped), axis=1) & (np.abs(mapped[:, 2]) > 1e-12)
@@ -461,54 +489,44 @@ def evaluate_local_coordinate_consistency(
             "reason": "insufficient_valid_homography_samples",
         }
 
-    # H 把像素映射到 SLAM 地面平面（Z=0），NPY 包含真实高度。
-    # H→SLAM 输出的是 plane frame 坐标（相对于平面原点）。
-    # NPY 存储的是 tile-local 3D 坐标。
-    # 为了公平比较，把 NPY 点也投影到同一个 plane frame（如果 plane_params 可用）。
+    # H→SLAM 输出 plane frame 坐标（相对于平面原点）。
+    # fitting_3d 是 H 拟合时用的世界坐标（已是地面点）。
+    # 把这些点投影到同一 plane frame 再与 H→SLAM 比较。
     mapped_xy = mapped[valid_h, :2] / mapped[valid_h, 2:3]
-    npy_xyz_all = np.asarray(
-        projection_xyz[valid_pixels[valid_h, 0], valid_pixels[valid_h, 1]],
-        dtype=np.float64,
-    )
 
-    # 地面点过滤：只比较平面距离内的点（|点_Z - 平面_Z| < threshold）
-    if plane_params is not None:
-        try:
-            a, b, c, d = (float(p) for p in plane_params)
-            # 平面高度：对于法向量接近 Z 轴的平面，z_plane = -d / c
-            if abs(c) > 1e-6:
-                z_plane = -d / c
-            else:
-                z_plane = 0.0
-            ground_mask = np.abs(npy_xyz_all[:, 2] - z_plane) < ground_z_threshold_m
-        except Exception:
-            ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
-    else:
+    # 地面点过滤（仅在使用 NPY 采样时）
+    if use_fitting_points:
+        # fitting_3d 已经是地面点（来自 plane 过滤），无需再过滤
         ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
+    else:
+        if plane_params is not None:
+            try:
+                a, b, c, d = (float(p) for p in plane_params)
+                z_plane = -d / c if abs(c) > 1e-6 else 0.0
+                ground_mask = np.abs(npy_xyz_all[:, 2] - z_plane) < ground_z_threshold_m
+            except Exception:
+                ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
+        else:
+            ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
+        n_ground = int(ground_mask.sum())
+        if n_ground < min_samples:
+            ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
 
-    n_ground = int(ground_mask.sum())
-    n_total = len(npy_xyz_all)
-    if n_ground < min_samples:
-        ground_mask = np.ones(n_total, dtype=bool)
-        n_ground = n_total
-
-    # 核心修复：把 NPY 点投影到 plane frame 再与 H→SLAM 比较
+    # 把 NPY 点投影到 plane frame 再与 H→SLAM 比较
     if plane_params is not None:
         try:
             from services.localizer.plane_detection import project_points_to_plane
             npy_projected = project_points_to_plane(npy_xyz_all[ground_mask], tuple(plane_params))
-            # 距离 = H→SLAM plane frame XY vs NPY plane frame XY
             distances = np.linalg.norm(mapped_xy[ground_mask] - npy_projected, axis=1)
         except Exception:
-            # 回退：直接比较 XY（旧行为）
             distances = np.linalg.norm(mapped_xy[ground_mask] - npy_xyz_all[ground_mask, :2], axis=1)
     else:
-        # 无平面参数：直接比较 XY
         distances = np.linalg.norm(mapped_xy[ground_mask] - npy_xyz_all[ground_mask, :2], axis=1)
     # 调试：输出 Z 分布 + 前 5 个地面点坐标对比
     z_abs = np.abs(npy_xyz_all[:, 2])
+    eval_source = "fitting" if use_fitting_points else "npy_sample"
     _logger.info(
-        f"🔍 地面点过滤: 总样本={n_total}, |Z|<0.5m={n_ground}, "
+        f"🔍 地面点过滤: 来源={eval_source}, 样本={len(npy_xyz_all)}, "
         f"Z 范围=[{z_abs.min():.2f}, {z_abs.max():.2f}]m, "
         f"Z 中位={np.median(z_abs):.2f}m"
     )
