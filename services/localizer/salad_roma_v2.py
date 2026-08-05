@@ -1283,17 +1283,6 @@ def _write_final_artifacts(
     canvas[header_height:, :width] = query_image
     canvas[header_height:, width:] = projection
 
-    # 画地面平面检测框（绿色矩形）
-    if ground_bbox is not None:
-        x_min = int(max(0, ground_bbox["x_min"]))
-        y_min = int(max(0, ground_bbox["y_min"]))
-        x_max = int(min(width - 1, ground_bbox["x_max"]))
-        y_max = int(min(height - 1, ground_bbox["y_max"]))
-        # 左图（query image）画框
-        cv2.rectangle(canvas, (x_min, y_min + header_height), (x_max, y_max + header_height), (0, 255, 0), 2)
-        # 右图（projection）画框
-        cv2.rectangle(canvas, (width + x_min, y_min + header_height), (width + x_max, y_max + header_height), (0, 255, 0), 2)
-
     cv2.putText(
         canvas,
         "Query image",
@@ -1314,17 +1303,6 @@ def _write_final_artifacts(
         1,
         cv2.LINE_AA,
     )
-    if ground_bbox is not None:
-        cv2.putText(
-            canvas,
-            "Ground plane detected",
-            (width + 200, 20),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (0, 255, 0),
-            1,
-            cv2.LINE_AA,
-        )
     if not cv2.imwrite(str(comparison_path), canvas):
         raise RuntimeError(f"cannot write comparison artifact: {comparison_path}")
 
