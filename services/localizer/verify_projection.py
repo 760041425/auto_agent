@@ -471,15 +471,16 @@ def evaluate_local_coordinate_consistency(
         dtype=np.float64,
     )
 
-    # 地面点过滤：只比较平面距离内的点
+    # 地面点过滤：只比较平面距离内的点（|点_Z - 平面_Z| < threshold）
     if plane_params is not None:
-        # 有平面参数：用平面距离过滤（更准确）
-        from services.localizer.plane_detection import project_points_to_plane
         try:
-            npy_plane_xy = project_points_to_plane(npy_xyz_all, tuple(plane_params))
-            dist_to_plane = np.abs(npy_xyz_all[:, 2] - np.average(npy_xyz_all[:, 2]))
-            # 用平面投影后的 XY 与 H→SLAM 的 XY 比较
-            ground_mask = np.abs(np.asarray(npy_xyz_all)[:, 2] - float(plane_params[3])) < ground_z_threshold_m
+            a, b, c, d = (float(p) for p in plane_params)
+            # 平面高度：对于法向量接近 Z 轴的平面，z_plane = -d / c
+            if abs(c) > 1e-6:
+                z_plane = -d / c
+            else:
+                z_plane = 0.0
+            ground_mask = np.abs(npy_xyz_all[:, 2] - z_plane) < ground_z_threshold_m
         except Exception:
             ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
     else:
