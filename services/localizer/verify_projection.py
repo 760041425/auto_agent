@@ -475,8 +475,8 @@ def evaluate_local_coordinate_consistency(
     distances = np.linalg.norm(slam_xyz - npy_xyz, axis=1)
     # 调试：输出 Z 分布
     z_abs = np.abs(npy_xyz_all[:, 2])
-    _logger.debug(
-        f"地面点过滤: 总样本={n_total}, |Z|<0.5m={n_ground}, "
+    _logger.info(
+        f"🔍 地面点过滤: 总样本={n_total}, |Z|<0.5m={n_ground}, "
         f"Z 范围=[{z_abs.min():.2f}, {z_abs.max():.2f}]m, "
         f"Z 中位={np.median(z_abs):.2f}m"
     )
