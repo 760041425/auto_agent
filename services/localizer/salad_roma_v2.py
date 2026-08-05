@@ -1022,23 +1022,25 @@ def localize_with_salad_roma_v2(
         ct_status = coordinate_transform.get("status")
         if ct_status == "ready" and best_3d is not None and best_2d is not None:
             hom_entries = coordinate_transform.get("homography")
+            plane_seg = coordinate_transform.get("plane_segmentation", {})
+            plane_params = plane_seg.get("plane_params")
             if hom_entries is not None:
                 hom = np.asarray(hom_entries, dtype=np.float64).reshape(3, 3)
-                n_sample = min(5, len(best_3d))
-                samp_3d = best_3d[:n_sample]
-                samp_2d = best_2d[:n_sample]
-                pts_h = np.column_stack([samp_2d[:, 0], samp_2d[:, 1], np.ones(n_sample)])
-                mapped = (hom @ pts_h.T).T
-                valid_m = np.abs(mapped[:, 2]) > 1e-12
-                if valid_m.any():
-                    slam_xy = mapped[valid_m, :2] / mapped[valid_m, 2:3]
-                    npy_xy = samp_3d[valid_m, :2]
-                    diffs = np.linalg.norm(slam_xy - npy_xy, axis=1)
+                # 取第 1 个内点做详细展示
+                p2d = best_2d[0]
+                p3d = best_3d[0]
+                pt_h = np.array([p2d[0], p2d[1], 1.0])
+                mapped = hom @ pt_h
+                if abs(mapped[2]) > 1e-12:
+                    slam_x, slam_y = mapped[0] / mapped[2], mapped[1] / mapped[2]
                     sample_diag = (
-                        f" | H_vs_NPY_XY(diff m)=["
-                        + ", ".join(f"{d:.1f}" for d in diffs)
-                        + f"] n_valid={int(valid_m.sum())}/{n_sample}"
+                        f" | pt0: pixel=({p2d[0]:.1f},{p2d[1]:.1f})"
+                        f" → H=({slam_x:.1f},{slam_y:.1f})"
+                        f" vs NPY=({p3d[0]:.1f},{p3d[1]:.1f},{p3d[2]:.1f})"
+                        f" Δ=({slam_x-p3d[0]:.1f},{slam_y-p3d[1]:.1f})"
                     )
+                    if plane_params:
+                        sample_diag += f" plane=[{','.join(f'{p:.2f}' for p in plane_params)}]"
     except Exception as e:
         sample_diag = f" | DIAG_ERR={e}"
 
