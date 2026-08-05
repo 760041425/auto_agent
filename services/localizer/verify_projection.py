@@ -373,6 +373,8 @@ def build_local_coordinate_transform_context(
         stored_path = path.resolve().relative_to(Path.cwd().resolve()).as_posix()
     except ValueError:
         stored_path = str(path.resolve())
+    # plane_params 用于 evaluate 时将 NPY 点投影到同一 plane frame
+    plane_params_for_eval = tuple(float(p) for p in plane_params) if plane_params is not None else None
     context = {
         "status": "ready",
         "source": "local_final_pose",
@@ -383,6 +385,7 @@ def build_local_coordinate_transform_context(
         "n_matches": int(len(query)),
         "n_inliers": int(mask.sum()) if mask is not None else int(len(query)),
         "plane_segmentation": plane_segmentation_meta,
+        "plane_params": plane_params_for_eval,
     }
     context["consistency"] = evaluate_local_coordinate_consistency(
         context,
@@ -427,6 +430,7 @@ def evaluate_local_coordinate_consistency(
         if not path.is_absolute():
             path = Path.cwd() / path
         projection_xyz = np.load(path, mmap_mode="r")
+        plane_params = context.get("plane_params")
     except (KeyError, OSError, TypeError, ValueError):
         return {**base, "reason": "coordinate_transform_artifact_unavailable"}
     if projection_xyz.shape != (height, width, 3):
@@ -458,23 +462,48 @@ def evaluate_local_coordinate_consistency(
         }
 
     # H 把像素映射到 SLAM 地面平面（Z=0），NPY 包含真实高度。
-    # 只比较地面点（|NPY Z| < ground_z_threshold_m），避免高处点拉歪中位差。
+    # H→SLAM 输出的是 plane frame 坐标（相对于平面原点）。
+    # NPY 存储的是 tile-local 3D 坐标。
+    # 为了公平比较，把 NPY 点也投影到同一个 plane frame（如果 plane_params 可用）。
     mapped_xy = mapped[valid_h, :2] / mapped[valid_h, 2:3]
     npy_xyz_all = np.asarray(
         projection_xyz[valid_pixels[valid_h, 0], valid_pixels[valid_h, 1]],
         dtype=np.float64,
     )
-    ground_mask = np.abs(npy_xyz_all[:, 2]) < ground_z_threshold_m
+
+    # 地面点过滤：只比较平面距离内的点
+    if plane_params is not None:
+        # 有平面参数：用平面距离过滤（更准确）
+        from services.localizer.plane_detection import project_points_to_plane
+        try:
+            npy_plane_xy = project_points_to_plane(npy_xyz_all, tuple(plane_params))
+            dist_to_plane = np.abs(npy_xyz_all[:, 2] - np.average(npy_xyz_all[:, 2]))
+            # 用平面投影后的 XY 与 H→SLAM 的 XY 比较
+            ground_mask = np.abs(np.asarray(npy_xyz_all)[:, 2] - float(plane_params[3])) < ground_z_threshold_m
+        except Exception:
+            ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
+    else:
+        ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
+
     n_ground = int(ground_mask.sum())
     n_total = len(npy_xyz_all)
     if n_ground < min_samples:
-        # 地面点太少，回退到全点比较
         ground_mask = np.ones(n_total, dtype=bool)
         n_ground = n_total
-    npy_xyz = npy_xyz_all[ground_mask]
-    slam_xy = mapped_xy[ground_mask]
-    slam_xyz = np.column_stack([slam_xy, np.zeros(len(slam_xy), dtype=np.float64)])
-    distances = np.linalg.norm(slam_xyz - npy_xyz, axis=1)
+
+    # 核心修复：把 NPY 点投影到 plane frame 再与 H→SLAM 比较
+    if plane_params is not None:
+        try:
+            from services.localizer.plane_detection import project_points_to_plane
+            npy_projected = project_points_to_plane(npy_xyz_all[ground_mask], tuple(plane_params))
+            # 距离 = H→SLAM plane frame XY vs NPY plane frame XY
+            distances = np.linalg.norm(mapped_xy[ground_mask] - npy_projected, axis=1)
+        except Exception:
+            # 回退：直接比较 XY（旧行为）
+            distances = np.linalg.norm(mapped_xy[ground_mask] - npy_xyz_all[ground_mask, :2], axis=1)
+    else:
+        # 无平面参数：直接比较 XY
+        distances = np.linalg.norm(mapped_xy[ground_mask] - npy_xyz_all[ground_mask, :2], axis=1)
     # 调试：输出 Z 分布 + 前 5 个地面点坐标对比
     z_abs = np.abs(npy_xyz_all[:, 2])
     _logger.info(
