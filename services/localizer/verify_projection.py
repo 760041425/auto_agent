@@ -258,8 +258,6 @@ def build_local_coordinate_transform_context(
     consistency_sample_limit: int = 256,
     plane_distance_threshold: Optional[float] = None,
     plane_seed: int = 1337,
-    fitting_2d: Optional[np.ndarray] = None,
-    fitting_3d: Optional[np.ndarray] = None,
 ) -> dict:
     """拟合 query 像素→SLAM XY 单应矩阵并保存最终位姿 XYZ NPY。
 
@@ -377,9 +375,15 @@ def build_local_coordinate_transform_context(
         stored_path = str(path.resolve())
     # plane_params 用于 evaluate 时将 NPY 点投影到同一 plane frame
     plane_params_for_eval = tuple(float(p) for p in plane_params) if plane_params is not None else None
-    # fitting_2d/fitting_3d: H 拟合时用的点，供 evaluate 使用（H 只对这些点准确）
-    fitting_2d_list = fitting_2d.astype(np.float64).tolist() if fitting_2d is not None else []
-    fitting_3d_list = fitting_3d.astype(np.float64).tolist() if fitting_3d is not None else []
+    # 如果 plane_params 和 ground_mask 可用，只用地面子集（H 是用这些点拟合的）
+    if plane_params is not None and ground_mask is not None and int(ground_mask.sum()) >= 4:
+        fit_2d = np.asarray(query)[ground_mask]
+        fit_3d = np.asarray(world)[ground_mask]
+        fitting_2d_list = fit_2d.astype(np.float64).tolist()
+        fitting_3d_list = fit_3d.astype(np.float64).tolist()
+    else:
+        fitting_2d_list = []
+        fitting_3d_list = []
     context = {
         "status": "ready",
         "source": "local_final_pose",
