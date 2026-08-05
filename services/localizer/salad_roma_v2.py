@@ -907,29 +907,7 @@ def localize_with_salad_roma_v2(
     log(f"🏆 结果: 内点={inlier_count}, 误差={current_error:.2f}px, "
         f"t=({t_vec_out[0]:.2f},{t_vec_out[1]:.2f},{t_vec_out[2]:.2f})")
 
-    artifacts = {}
-    artifact_error = None
-    try:
-        # 计算地面点 bounding box（用于可视化）
-        ground_bbox = None
-        if coordinate_transform.get("plane_segmentation", {}).get("status") == "plane_detected":
-            ground_bbox = coordinate_transform.get("ground_bbox")
-        artifacts = _write_final_artifacts(
-            q_small,
-            all_pts,
-            all_col,
-            rvec,
-            tvec,
-            K,
-            out,
-            tag,
-            ground_bbox=ground_bbox,
-        )
-        log(f"  最终视觉产物: {', '.join(artifacts)}")
-    except Exception as exc:
-        artifact_error = str(exc)
-        log(f"  最终视觉产物生成失败: {exc}")
-
+    # 先计算 coordinate_transform（含地面 bounding box）
     coordinate_transform = {
         "status": "not_available",
         "reason": "final_2d_3d_correspondences_unavailable",
@@ -1020,6 +998,29 @@ def localize_with_salad_roma_v2(
     coordinate_reliable = bool(
         consistency.get("status") == "available" and consistency.get("passed")
     )
+
+    # 生成视觉产物（在 coordinate_transform 之后，以便画地面框）
+    artifacts = {}
+    artifact_error = None
+    try:
+        ground_bbox = None
+        if coordinate_transform.get("plane_segmentation", {}).get("status") == "plane_detected":
+            ground_bbox = coordinate_transform.get("ground_bbox")
+        artifacts = _write_final_artifacts(
+            q_small,
+            all_pts,
+            all_col,
+            rvec,
+            tvec,
+            K,
+            out,
+            tag,
+            ground_bbox=ground_bbox,
+        )
+        log(f"  最终视觉产物: {', '.join(artifacts)}")
+    except Exception as exc:
+        artifact_error = str(exc)
+        log(f"  最终视觉产物生成失败: {exc}")
 
     # 诊断：采样内点对比 H→SLAM XY vs NPY XY（在 coordinate_transform 生成后）
     sample_diag = ""
