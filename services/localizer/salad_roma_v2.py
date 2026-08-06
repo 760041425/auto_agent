@@ -1270,13 +1270,25 @@ def _write_final_artifacts(
     if projection.shape[:2] != query_image.shape[:2]:
         projection = cv2.resize(projection, (width, height))
 
-    # 在 projection 上画地面平面框
+    # 在 projection 上画地面平面框，然后重新保存
     if ground_bbox is not None:
         x_min = int(max(0, ground_bbox["x_min"]))
         y_min = int(max(0, ground_bbox["y_min"]))
         x_max = int(min(width - 1, ground_bbox["x_max"]))
         y_max = int(min(height - 1, ground_bbox["y_max"]))
         cv2.rectangle(projection, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+        cv2.putText(
+            projection,
+            "Ground plane",
+            (x_min + 4, y_min - 8),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 255, 0),
+            1,
+            cv2.LINE_AA,
+        )
+        # 重新保存带框的 projection
+        cv2.imwrite(str(projection_path), projection)
 
     header_height = 28
     canvas = np.zeros((height + header_height, width * 2, 3), dtype=np.uint8)
