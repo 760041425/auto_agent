@@ -258,6 +258,7 @@ def build_local_coordinate_transform_context(
     consistency_sample_limit: int = 256,
     plane_distance_threshold: Optional[float] = None,
     plane_seed: int = 1337,
+    dense_points: Optional[np.ndarray] = None,
 ) -> dict:
     """拟合 query 像素→SLAM XY 单应矩阵并保存最终位姿 XYZ NPY。
 
@@ -284,33 +285,33 @@ def build_local_coordinate_transform_context(
     plane_segmentation_meta = {"status": "skipped"}
 
     if plane_distance_threshold is not None:
-        plane_params, ground_mask = segment_plane(
-            world,
+        # 优先用密集点云检测平面（更准确），否则用稀疏特征点
+        plane_source = dense_points if dense_points is not None and len(dense_points) >= 4 else world
+        plane_params, _ = segment_plane(
+            plane_source,
             distance_threshold=plane_distance_threshold,
             seed=plane_seed,
         )
-        if plane_params is not None and ground_mask is not None:
+        if plane_params is not None:
+            # 用检测出的平面计算 world 中哪些点是地面点
+            dists_to_plane = np.abs(world @ np.array(plane_params[:3]) + plane_params[3])
+            ground_mask = dists_to_plane < plane_distance_threshold
             n_ground = int(ground_mask.sum())
+            plane_segmentation_meta = {
+                "status": "plane_detected",
+                "n_ground_inliers": n_ground,
+                "n_total_points": int(len(world)),
+                "plane_params": list(map(float, plane_params)),
+                "distance_threshold_m": float(plane_distance_threshold),
+            }
             if n_ground >= 4:
                 query_for_h = query[ground_mask]
                 world_for_h = world[ground_mask]
-                plane_segmentation_meta = {
-                    "status": "plane_detected",
-                    "n_ground_inliers": n_ground,
-                    "n_total_points": int(len(world)),
-                    "plane_params": list(map(float, plane_params)),
-                    "distance_threshold_m": float(plane_distance_threshold),
-                }
             else:
-                plane_segmentation_meta = {
-                    "status": "insufficient_ground_points",
-                    "n_ground_inliers": n_ground,
-                    "n_total_points": int(len(world)),
-                    "distance_threshold_m": float(plane_distance_threshold),
-                }
-                # 回退：用全点
+                # 地面点太少，回退全点
                 query_for_h = query
                 world_for_h = world
+                plane_segmentation_meta["status"] = "insufficient_ground_points"
         else:
             # segment_plane 失败，回退
             plane_segmentation_meta = {
