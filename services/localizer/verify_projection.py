@@ -382,10 +382,17 @@ def build_local_coordinate_transform_context(
         fit_3d = np.asarray(world)[ground_mask]
         fitting_2d_list = fit_2d.astype(np.float64).tolist()
         fitting_3d_list = fit_3d.astype(np.float64).tolist()
+        # 地面点的像素 bounding box（用于可视化和框内取点）
+        bbox = {
+            "x_min": float(np.min(fit_2d[:, 0])),
+            "y_min": float(np.min(fit_2d[:, 1])),
+            "x_max": float(np.max(fit_2d[:, 0])),
+            "y_max": float(np.max(fit_2d[:, 1])),
+        }
     else:
         fitting_2d_list = []
         fitting_3d_list = []
-    bbox = None
+        bbox = None
     context = {
         "status": "ready",
         "source": "local_final_pose",
