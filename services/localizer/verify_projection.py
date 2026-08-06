@@ -218,6 +218,41 @@ def build_projection_xyz_map(
     return xyz_map
 
 
+def _fill_ground_gaps(xyz: np.ndarray, plane_params: Tuple[float, float, float, float]) -> np.ndarray:
+    """填充地面区域内的 NPY 空隙。
+
+    对零值像素，用最近的非零像素填充（最近邻插值）。
+    只在地面平面区域内填充。
+    """
+    height, width, _ = xyz.shape
+    valid_mask = np.any(xyz != 0, axis=2)
+
+    if valid_mask.all() or not valid_mask.any():
+        return xyz
+
+    # 找到所有有效和无效像素的坐标
+    valid_coords = np.argwhere(valid_mask)  # (N, 2) - (y, x)
+    valid_values = xyz[valid_mask]  # (N, 3)
+
+    invalid_coords = np.argwhere(~valid_mask)  # (M, 2)
+
+    if len(invalid_coords) == 0 or len(valid_coords) == 0:
+        return xyz
+
+    # 对每个无效像素，找最近的有效像素（分块处理避免内存爆炸）
+    chunk_size = 1000
+    filled = xyz.copy()
+    for start in range(0, len(invalid_coords), chunk_size):
+        chunk = invalid_coords[start:start + chunk_size]
+        # 计算到所有有效像素的距离
+        # chunk: (C, 2), valid_coords: (N, 2)
+        dists = np.sqrt(((chunk[:, np.newaxis, :] - valid_coords[np.newaxis, :, :]) ** 2).sum(axis=2))
+        nearest_idx = dists.argmin(axis=1)
+        filled[chunk[:, 0], chunk[:, 1]] = valid_values[nearest_idx]
+
+    return filled
+
+
 def _normalize_2d(points: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Hartley 归一化：把 2D 点平移到零均值、缩放到 sqrt(2) 均方距离。
 
@@ -366,6 +401,10 @@ def build_local_coordinate_transform_context(
     xyz = np.asarray(projection_xyz, dtype=np.float32)
     if xyz.ndim != 3 or xyz.shape[2] != 3:
         return {"status": "not_available", "reason": "projection_xyz_shape_invalid"}
+
+    # 插值填充地面区域内的空隙（让点击任意地面位置都有数据）
+    if plane_params is not None and ground_mask is not None and int(ground_mask.sum()) >= 4:
+        xyz = _fill_ground_gaps(xyz, plane_params)
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
