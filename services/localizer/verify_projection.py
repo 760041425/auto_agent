@@ -219,37 +219,35 @@ def build_projection_xyz_map(
 
 
 def _fill_ground_gaps(xyz: np.ndarray, plane_params: Tuple[float, float, float, float]) -> np.ndarray:
-    """填充地面区域内的 NPY 空隙。
-
-    对零值像素，用最近的非零像素填充（最近邻插值）。
-    只在地面平面区域内填充。
-    """
-    height, width, _ = xyz.shape
+    """填充 NPY 空隙（最近邻插值），使用 KDTree 加速。"""
     valid_mask = np.any(xyz != 0, axis=2)
 
     if valid_mask.all() or not valid_mask.any():
         return xyz
 
-    # 找到所有有效和无效像素的坐标
-    valid_coords = np.argwhere(valid_mask)  # (N, 2) - (y, x)
+    valid_coords = np.argwhere(valid_mask)  # (N, 2)
     valid_values = xyz[valid_mask]  # (N, 3)
-
     invalid_coords = np.argwhere(~valid_mask)  # (M, 2)
 
     if len(invalid_coords) == 0 or len(valid_coords) == 0:
         return xyz
 
-    # 对每个无效像素，找最近的有效像素（分块处理避免内存爆炸）
-    chunk_size = 1000
-    filled = xyz.copy()
-    for start in range(0, len(invalid_coords), chunk_size):
-        chunk = invalid_coords[start:start + chunk_size]
-        # 计算到所有有效像素的距离
-        # chunk: (C, 2), valid_coords: (N, 2)
-        dists = np.sqrt(((chunk[:, np.newaxis, :] - valid_coords[np.newaxis, :, :]) ** 2).sum(axis=2))
-        nearest_idx = dists.argmin(axis=1)
-        filled[chunk[:, 0], chunk[:, 1]] = valid_values[nearest_idx]
+    # 用 scipy KDTree 加速最近邻查找
+    try:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(valid_coords)
+        _, nearest_idx = tree.query(invalid_coords, k=1)
+    except ImportError:
+        # 回退：暴力计算（慢）
+        chunk_size = 500
+        nearest_idx = np.empty(len(invalid_coords), dtype=np.int64)
+        for start in range(0, len(invalid_coords), chunk_size):
+            chunk = invalid_coords[start:start + chunk_size]
+            dists = ((chunk[:, np.newaxis, :] - valid_coords[np.newaxis, :, :]) ** 2).sum(axis=2)
+            nearest_idx[start:start + len(chunk)] = dists.argmin(axis=1)
 
+    filled = xyz.copy()
+    filled[invalid_coords[:, 0], invalid_coords[:, 1]] = valid_values[nearest_idx]
     return filled
 
 
