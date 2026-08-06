@@ -999,13 +999,15 @@ def localize_with_salad_roma_v2(
         consistency.get("status") == "available" and consistency.get("passed")
     )
 
-    # 生成视觉产物（在 coordinate_transform 之后，以便画地面框）
+    # 生成视觉产物（在 coordinate_transform 之后，以便画地面多边形）
     artifacts = {}
     artifact_error = None
     try:
-        ground_bbox = None
+        ground_polygon = None
         if coordinate_transform.get("plane_segmentation", {}).get("status") == "plane_detected":
-            ground_bbox = coordinate_transform.get("ground_bbox")
+            plane_params = coordinate_transform.get("plane_params")
+            if plane_params is not None:
+                ground_polygon = _compute_ground_polygon(rvec, tvec, K, plane_params, q_small.shape[:2])
         artifacts = _write_final_artifacts(
             q_small,
             all_pts,
@@ -1015,7 +1017,7 @@ def localize_with_salad_roma_v2(
             K,
             out,
             tag,
-            ground_bbox=ground_bbox,
+            ground_polygon=ground_polygon,
         )
         log(f"  最终视觉产物: {', '.join(artifacts)}")
     except Exception as exc:
@@ -1231,6 +1233,62 @@ def _render_projection_local(all_pts, all_col, rvec, tvec, K, w, h, out_dir, nam
         return None
 
 
+def _compute_ground_polygon(rvec, tvec, K, plane_params, image_shape):
+    """计算地面平面在图像中的可见多边形。
+
+    从相机中心穿过图像四个角发射射线，求与地面的交点，
+    返回这些交点的像素坐标（在图像范围内的）。
+    """
+    import numpy as np
+    height, width = image_shape[:2]
+    a, b, c, d = plane_params
+
+    # 相机中心（世界坐标）
+    R = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))[0]
+    t = np.asarray(tvec, dtype=np.float64).reshape(3, 1)
+    cam_center = -R.T @ t  # (3, 1)
+
+    # 图像四个角 + 边缘中点（更精确）
+    corners = [
+        (0, 0), (width // 2, 0), (width - 1, 0),
+        (0, height // 2), (width - 1, height // 2),
+        (0, height - 1), (width // 2, height - 1), (width - 1, height - 1),
+    ]
+
+    K_inv = np.linalg.inv(K)
+    intersections = []
+
+    for u, v in corners:
+        # 像素 → 相机射线方向
+        ray_cam = K_inv @ np.array([u, v, 1.0])  # 相机坐标系下的方向
+        ray_world = R.T @ ray_cam  # 世界坐标系下的方向
+
+        # 射线: P = cam_center + t * ray_world
+        # 平面: a*x + b*y + c*z + d = 0
+        # 代入: a*(cx + t*rx) + b*(cy + t*ry) + c*(cz + t*rz) + d = 0
+        denom = a * ray_world[0] + b * ray_world[1] + c * ray_world[2]
+        if abs(denom) < 1e-10:
+            continue  # 射线与平面平行
+
+        t_param = -(a * cam_center[0, 0] + b * cam_center[1, 0] + c * cam_center[2, 0] + d) / denom
+        if t_param <= 0:
+            continue  # 交点在相机后方
+
+        # 交点像素坐标（就是当前的 u, v）
+        if 0 <= u < width and 0 <= v < height:
+            intersections.append((int(u), int(v)))
+
+    # 去重
+    seen = set()
+    unique = []
+    for pt in intersections:
+        if pt not in seen:
+            seen.add(pt)
+            unique.append(pt)
+
+    return unique if len(unique) >= 3 else None
+
+
 def _write_final_artifacts(
     query_image,
     all_pts,
@@ -1240,7 +1298,7 @@ def _write_final_artifacts(
     camera_matrix,
     output_dir,
     tag,
-    ground_bbox=None,
+    ground_polygon=None,
 ):
     """为最终返回位姿生成查询图、最终投影图和带标签双图。"""
     output_dir = Path(output_dir)
@@ -1270,17 +1328,17 @@ def _write_final_artifacts(
     if projection.shape[:2] != query_image.shape[:2]:
         projection = cv2.resize(projection, (width, height))
 
-    # 在 projection 上画地面平面框，然后重新保存
-    if ground_bbox is not None:
-        x_min = int(max(0, ground_bbox["x_min"]))
-        y_min = int(max(0, ground_bbox["y_min"]))
-        x_max = int(min(width - 1, ground_bbox["x_max"]))
-        y_max = int(min(height - 1, ground_bbox["y_max"]))
-        cv2.rectangle(projection, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
+    # 在 projection 上画地面平面多边形，然后重新保存
+    if ground_polygon is not None and len(ground_polygon) >= 3:
+        pts = np.array(ground_polygon, dtype=np.int32).reshape((-1, 1, 2))
+        cv2.polylines(projection, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
+        # 标签放在多边形第一个点上方
+        label_x = int(np.min(np.array(ground_polygon)[:, 0])) + 4
+        label_y = int(np.min(np.array(ground_polygon)[:, 1])) - 8
         cv2.putText(
             projection,
             "Ground plane",
-            (x_min + 4, y_min - 8),
+            (label_x, max(15, label_y)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.45,
             (0, 255, 0),
