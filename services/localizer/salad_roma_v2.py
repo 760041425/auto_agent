@@ -1237,10 +1237,8 @@ def _render_projection_local(all_pts, all_col, rvec, tvec, K, w, h, out_dir, nam
 def _compute_ground_polygon(rvec, tvec, K, plane_params, image_shape):
     """计算地面平面在图像中的可见多边形。
 
-    从相机中心穿过图像四个角发射射线，求与地面的交点，
-    返回这些交点的像素坐标（在图像范围内的）。
+    求地面平面与图像四条边的交点，按顺序排列形成多边形。
     """
-    import numpy as np
     height, width = image_shape[:2]
     a, b, c, d = plane_params
 
@@ -1249,40 +1247,65 @@ def _compute_ground_polygon(rvec, tvec, K, plane_params, image_shape):
     t = np.asarray(tvec, dtype=np.float64).reshape(3, 1)
     cam_center = -R.T @ t  # (3, 1)
 
-    # 图像四个角 + 边缘中点（更精确）
-    corners = [
-        (0, 0), (width // 2, 0), (width - 1, 0),
-        (0, height // 2), (width - 1, height // 2),
-        (0, height - 1), (width // 2, height - 1), (width - 1, height - 1),
-    ]
-
     K_inv = np.linalg.inv(K)
-    intersections = []
 
-    for u, v in corners:
-        # 像素 → 相机射线方向
-        ray_cam = K_inv @ np.array([u, v, 1.0])  # 相机坐标系下的方向
-        ray_world = R.T @ ray_cam  # 世界坐标系下的方向
+    def ray_for_pixel(u, v):
+        """返回相机射线在世界坐标系下的方向"""
+        ray_cam = K_inv @ np.array([u, v, 1.0])
+        return R.T @ ray_cam
 
-        # 射线: P = cam_center + t * ray_world
-        # 平面: a*x + b*y + c*z + d = 0
-        # 代入: a*(cx + t*rx) + b*(cy + t*ry) + c*(cz + t*rz) + d = 0
+    def plane_intersection(u, v):
+        """求射线与平面的交点参数 t，返回 None 如果平行或在后方"""
+        ray_world = ray_for_pixel(u, v)
         denom = a * ray_world[0] + b * ray_world[1] + c * ray_world[2]
         if abs(denom) < 1e-10:
-            continue  # 射线与平面平行
-
+            return None
         t_param = -(a * cam_center[0, 0] + b * cam_center[1, 0] + c * cam_center[2, 0] + d) / denom
-        if t_param <= 0:
-            continue  # 交点在相机后方
+        return t_param if t_param > 0 else None
 
-        # 交点像素坐标（就是当前的 u, v）
-        if 0 <= u < width and 0 <= v < height:
-            intersections.append((int(u), int(v)))
+    def intersect_edge(edge_type, fixed_val, range_min, range_max, steps=100):
+        """在一条边缘上二分查找与平面的交点"""
+        # edge_type: 'h' = horizontal (y=fixed, x varies), 'v' = vertical (x=fixed, y varies)
+        best = None
+        for i in range(steps + 1):
+            val = range_min + (range_max - range_min) * i / steps
+            if edge_type == 'h':
+                u, v = int(val), fixed_val
+            else:
+                u, v = fixed_val, int(val)
+            t = plane_intersection(u, v)
+            if t is not None:
+                best = (u, v, t)
+                break  # 找到第一个交点就返回（从边缘开始）
+        return best
+
+    # 计算四条边的交点
+    pts = []
+
+    # 上边缘 (y=0, x: 0 -> width-1)
+    hit = intersect_edge('h', 0, 0, width - 1)
+    if hit:
+        pts.append((hit[0], hit[1]))
+
+    # 右边缘 (x=width-1, y: 0 -> height-1)
+    hit = intersect_edge('v', width - 1, 0, height - 1)
+    if hit:
+        pts.append((hit[0], hit[1]))
+
+    # 下边缘 (y=height-1, x: width-1 -> 0)
+    hit = intersect_edge('h', height - 1, width - 1, 0)
+    if hit:
+        pts.append((hit[0], hit[1]))
+
+    # 左边缘 (x=0, y: height-1 -> 0)
+    hit = intersect_edge('v', 0, height - 1, 0)
+    if hit:
+        pts.append((hit[0], hit[1]))
 
     # 去重
     seen = set()
     unique = []
-    for pt in intersections:
+    for pt in pts:
         if pt not in seen:
             seen.add(pt)
             unique.append(pt)
