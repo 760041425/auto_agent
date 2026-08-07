@@ -1007,10 +1007,13 @@ def localize_with_salad_roma_v2(
         ground_polygon = None
         if coordinate_transform.get("plane_segmentation", {}).get("status") == "plane_detected":
             plane_params = coordinate_transform.get("plane_params")
-            if plane_params is not None and all_pts is not None:
-                # 用密集点云投影到像素，筛选地面点，计算凸包
-                ground_pixels = _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, q_small.shape[:2])
-                ground_polygon = _compute_ground_polygon(ground_pixels=ground_pixels)
+            if plane_params is not None:
+                # 用射线-平面求交计算可见地面多边形
+                ground_polygon = _compute_ground_polygon(
+                    rvec=rvec, tvec=tvec, K=K,
+                    plane_params=plane_params,
+                    image_shape=q_small.shape[:2],
+                )
         artifacts = _write_final_artifacts(
             q_small,
             all_pts,
@@ -1284,21 +1287,105 @@ def _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, image_shape):
     return ground_pixels
 
 
-def _compute_ground_polygon(ground_pixels=None):
-    """计算地面区域凸包（对齐 slam-map）。"""
-    if ground_pixels is None or len(ground_pixels) < 3:
+def _compute_ground_polygon(ground_pixels=None, rvec=None, tvec=None, K=None, plane_params=None, image_shape=None):
+    """计算可见地面区域多边形。
+
+    优先用射线-平面求交（精确），回退到凸包（如果求交失败）。
+    """
+    # 方法1: 射线-平面求交（精确计算可见地面边界）
+    if rvec is not None and tvec is not None and K is not None and plane_params is not None and image_shape is not None:
+        polygon = _compute_ground_polygon_by_ray_plane(rvec, tvec, K, plane_params, image_shape)
+        if polygon is not None:
+            return polygon
+
+    # 方法2: 回退到凸包
+    if ground_pixels is not None and len(ground_pixels) >= 3:
+        try:
+            from scipy.spatial import ConvexHull
+            unique_points = np.unique(np.array(ground_pixels, dtype=np.int32), axis=0)
+            if len(unique_points) >= 3:
+                hull = ConvexHull(unique_points)
+                hull_points = unique_points[hull.vertices]
+                return [(int(p[0]), int(p[1])) for p in hull_points]
+        except Exception:
+            pass
+    return None
+
+
+def _compute_ground_polygon_by_ray_plane(rvec, tvec, K, plane_params, image_shape):
+    """通过相机射线与地面平面求交，计算可见地面多边形。"""
+    height, width = image_shape[:2]
+    a, b, c, d = plane_params
+
+    R = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))[0]
+    t = np.asarray(tvec, dtype=np.float64).reshape(3, 1)
+    cam_center = -R.T @ t
+
+    K_inv = np.linalg.inv(K)
+
+    # 采样四条边缘上的点，找与平面的交点
+    n_samples = 200
+    edge_points = []
+
+    # 上边缘 (y=0, x: 0 -> width-1)
+    for i in range(n_samples + 1):
+        u = int(width * i / n_samples)
+        pt = _ray_plane_intersection(u, 0, R, cam_center, K_inv, a, b, c, d)
+        if pt is not None:
+            edge_points.append(pt)
+
+    # 右边缘 (x=width-1, y: 0 -> height-1)
+    for i in range(n_samples + 1):
+        v = int(height * i / n_samples)
+        pt = _ray_plane_intersection(width - 1, v, R, cam_center, K_inv, a, b, c, d)
+        if pt is not None:
+            edge_points.append(pt)
+
+    # 下边缘 (y=height-1, x: width-1 -> 0)
+    for i in range(n_samples + 1):
+        u = int(width * (1 - i / n_samples))
+        pt = _ray_plane_intersection(u, height - 1, R, cam_center, K_inv, a, b, c, d)
+        if pt is not None:
+            edge_points.append(pt)
+
+    # 左边缘 (x=0, y: height-1 -> 0)
+    for i in range(n_samples + 1):
+        v = int(height * (1 - i / n_samples))
+        pt = _ray_plane_intersection(0, v, R, cam_center, K_inv, a, b, c, d)
+        if pt is not None:
+            edge_points.append(pt)
+
+    if len(edge_points) < 3:
         return None
 
-    try:
-        from scipy.spatial import ConvexHull
-        unique_points = np.unique(np.array(ground_pixels, dtype=np.int32), axis=0)
-        if len(unique_points) < 3:
-            return None
-        hull = ConvexHull(unique_points)
-        hull_points = unique_points[hull.vertices]
-        return [(int(p[0]), int(p[1])) for p in hull_points]
-    except Exception:
-        return None
+    # 去重并排序（顺时针）
+    seen = set()
+    unique = []
+    for pt in edge_points:
+        key = (int(pt[0]), int(pt[1]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(key)
+
+    return unique if len(unique) >= 3 else None
+
+
+def _ray_plane_intersection(u, v, R, cam_center, K_inv, a, b, c, d):
+    """求射线与平面的交点，返回像素坐标或 None。"""
+    # 射线方向
+    ray_cam = K_inv @ np.array([u, v, 1.0])
+    ray_world = R.T @ ray_cam
+
+    denom = a * ray_world[0] + b * ray_world[1] + c * ray_world[2]
+    if abs(denom) < 1e-10:
+        return None  # 平行
+
+    t_param = -(a * cam_center[0, 0] + b * cam_center[1, 0] + c * cam_center[2, 0] + d) / denom
+    if t_param <= 0:
+        return None  # 在相机后方
+
+    # 交点像素坐标就是 (u, v)
+    return (int(u), int(v))
 
 
 def _write_final_artifacts(
