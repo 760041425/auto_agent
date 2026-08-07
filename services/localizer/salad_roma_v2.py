@@ -1000,15 +1000,21 @@ def localize_with_salad_roma_v2(
         consistency.get("status") == "available" and consistency.get("passed")
     )
 
-    # 生成视觉产物（在 coordinate_transform 之后，以便画地面多边形）
+    # 生成视觉产物（在 coordinate_transform 之后，以便画地面凸包）
     artifacts = {}
     artifact_error = None
     try:
         ground_polygon = None
         if coordinate_transform.get("plane_segmentation", {}).get("status") == "plane_detected":
-            plane_params = coordinate_transform.get("plane_params")
-            if plane_params is not None:
-                ground_polygon = _compute_ground_polygon(rvec, tvec, K, plane_params, q_small.shape[:2])
+            # 用地面点像素坐标计算凸包（对齐 slam-map）
+            fitting_2d = coordinate_transform.get("fitting_2d")
+            if fitting_2d is not None and len(fitting_2d) >= 3:
+                ground_polygon = _compute_ground_polygon(
+                    rvec, tvec, K,
+                    coordinate_transform.get("plane_params"),
+                    q_small.shape[:2],
+                    ground_pixels=fitting_2d,
+                )
         artifacts = _write_final_artifacts(
             q_small,
             all_pts,
@@ -1234,83 +1240,27 @@ def _render_projection_local(all_pts, all_col, rvec, tvec, K, w, h, out_dir, nam
         return None
 
 
-def _compute_ground_polygon(rvec, tvec, K, plane_params, image_shape):
-    """计算地面平面在图像中的可见多边形。
+def _compute_ground_polygon(rvec, tvec, K, plane_params, image_shape, ground_pixels=None):
+    """计算地面区域多边形（凸包方式，对齐 slam-map）。
 
-    求地面平面与图像四条边的交点，按顺序排列形成多边形。
+    如果提供 ground_pixels（地面点的像素坐标），用凸包计算。
+    否则返回 None。
     """
-    height, width = image_shape[:2]
-    a, b, c, d = plane_params
+    if ground_pixels is None or len(ground_pixels) < 3:
+        return None
 
-    # 相机中心（世界坐标）
-    R = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))[0]
-    t = np.asarray(tvec, dtype=np.float64).reshape(3, 1)
-    cam_center = -R.T @ t  # (3, 1)
-
-    K_inv = np.linalg.inv(K)
-
-    def ray_for_pixel(u, v):
-        """返回相机射线在世界坐标系下的方向"""
-        ray_cam = K_inv @ np.array([u, v, 1.0])
-        return R.T @ ray_cam
-
-    def plane_intersection(u, v):
-        """求射线与平面的交点参数 t，返回 None 如果平行或在后方"""
-        ray_world = ray_for_pixel(u, v)
-        denom = a * ray_world[0] + b * ray_world[1] + c * ray_world[2]
-        if abs(denom) < 1e-10:
+    try:
+        from scipy.spatial import ConvexHull
+        # 去重
+        unique_points = np.unique(np.array(ground_pixels, dtype=np.int32), axis=0)
+        if len(unique_points) < 3:
             return None
-        t_param = -(a * cam_center[0, 0] + b * cam_center[1, 0] + c * cam_center[2, 0] + d) / denom
-        return t_param if t_param > 0 else None
-
-    def intersect_edge(edge_type, fixed_val, range_min, range_max, steps=100):
-        """在一条边缘上二分查找与平面的交点"""
-        # edge_type: 'h' = horizontal (y=fixed, x varies), 'v' = vertical (x=fixed, y varies)
-        best = None
-        for i in range(steps + 1):
-            val = range_min + (range_max - range_min) * i / steps
-            if edge_type == 'h':
-                u, v = int(val), fixed_val
-            else:
-                u, v = fixed_val, int(val)
-            t = plane_intersection(u, v)
-            if t is not None:
-                best = (u, v, t)
-                break  # 找到第一个交点就返回（从边缘开始）
-        return best
-
-    # 计算四条边的交点
-    pts = []
-
-    # 上边缘 (y=0, x: 0 -> width-1)
-    hit = intersect_edge('h', 0, 0, width - 1)
-    if hit:
-        pts.append((hit[0], hit[1]))
-
-    # 右边缘 (x=width-1, y: 0 -> height-1)
-    hit = intersect_edge('v', width - 1, 0, height - 1)
-    if hit:
-        pts.append((hit[0], hit[1]))
-
-    # 下边缘 (y=height-1, x: width-1 -> 0)
-    hit = intersect_edge('h', height - 1, width - 1, 0)
-    if hit:
-        pts.append((hit[0], hit[1]))
-
-    # 左边缘 (x=0, y: height-1 -> 0)
-    hit = intersect_edge('v', 0, height - 1, 0)
-    if hit:
-        pts.append((hit[0], hit[1]))
-
-    # 去重
-    seen = set()
-    unique = []
-    for pt in pts:
-        if pt not in seen:
-            seen.add(pt)
-            unique.append(pt)
-
-    return unique if len(unique) >= 3 else None
+        # 计算凸包
+        hull = ConvexHull(unique_points)
+        hull_points = unique_points[hull.vertices]
+        return [(int(p[0]), int(p[1])) for p in hull_points]
+    except Exception:
+        return None
 
 
 def _write_final_artifacts(
