@@ -1267,8 +1267,8 @@ def _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, image_shape):
     py = np.clip(np.rint(pixels[:, 1]).astype(int), 0, height - 1)
 
     # 筛选地面点（到平面距离 < 0.5m）
-    normal = np.array([a, b, c], dtype=np.float64)
-    dists = np.abs(pts[valid] @ normal + d)
+    normal = np.array([a, b, c], dtype=np.float64).flatten()
+    dists = np.abs(pts[valid] @ normal + float(d))
     ground_mask = dists < 0.5
 
     if ground_mask.sum() < 3:
