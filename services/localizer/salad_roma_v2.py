@@ -933,6 +933,9 @@ def localize_with_salad_roma_v2(
                 plane_distance_threshold=0.2,
                 plane_seed=1337,
                 dense_points=all_pts,
+                pose_rvec=best_rvec,
+                pose_tvec=best_tvec,
+                pose_K=K,
             )
             consistency = coordinate_transform.get("consistency", {})
             plane_seg = coordinate_transform.get("plane_segmentation", {})

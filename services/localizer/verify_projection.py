@@ -292,6 +292,9 @@ def build_local_coordinate_transform_context(
     plane_distance_threshold: Optional[float] = None,
     plane_seed: int = 1337,
     dense_points: Optional[np.ndarray] = None,
+    pose_rvec: Optional[np.ndarray] = None,
+    pose_tvec: Optional[np.ndarray] = None,
+    pose_K: Optional[np.ndarray] = None,
 ) -> dict:
     """拟合 query 像素→SLAM XY 单应矩阵并保存最终位姿 XYZ NPY。
 
@@ -448,9 +451,9 @@ def build_local_coordinate_transform_context(
         "fitting_2d": fitting_2d_list,
         "fitting_3d": fitting_3d_list,
         "ground_bbox": bbox,
-        "rvec": best_rvec.flatten().tolist() if best_rvec is not None else [],
-        "tvec": best_tvec.flatten().tolist() if best_tvec is not None else [],
-        "K": K.tolist() if K is not None else [],
+        "rvec": pose_rvec.flatten().tolist() if pose_rvec is not None else [],
+        "tvec": pose_tvec.flatten().tolist() if pose_tvec is not None else [],
+        "K": pose_K.tolist() if pose_K is not None else [],
     }
     context["consistency"] = evaluate_local_coordinate_consistency(
         context,
