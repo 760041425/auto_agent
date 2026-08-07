@@ -448,6 +448,9 @@ def build_local_coordinate_transform_context(
         "fitting_2d": fitting_2d_list,
         "fitting_3d": fitting_3d_list,
         "ground_bbox": bbox,
+        "rvec": best_rvec.flatten().tolist() if best_rvec is not None else [],
+        "tvec": best_tvec.flatten().tolist() if best_tvec is not None else [],
+        "K": K.tolist() if K is not None else [],
     }
     context["consistency"] = evaluate_local_coordinate_consistency(
         context,
@@ -642,7 +645,11 @@ def evaluate_local_coordinate_consistency(
 
 
 def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> dict:
-    """在本地任务产物上执行单点 H→SLAM / NPY XYZ 坐标交叉验证。"""
+    """在本地任务产物上执行单点坐标交叉验证。
+
+    使用 PnP 位姿 + K 矩阵重投影 NPY 3D 点到像素，与查询像素比较。
+    这比 homography 更准确，因为 PnP 使用真 3D 点。
+    """
     base = {
         "status": "not_available",
         "validation_type": "local_coordinate_crosscheck",
@@ -651,20 +658,23 @@ def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> di
         "v": float(v),
         "pixel_to_slam": None,
         "npy_point": None,
-        "difference_m": None,
-        "note": "local homography/NPY consistency; not independent pose accuracy",
+        "difference_px": None,
+        "note": "PnP pose reprojection check; not independent pose accuracy",
     }
     if not isinstance(context, dict) or context.get("status") != "ready":
         return {**base, "reason": "coordinate_transform_context_not_ready"}
 
     try:
-        homography = np.asarray(context["homography"], dtype=np.float64).reshape(3, 3)
         width = int(context["width"])
         height = int(context["height"])
         path = Path(context["projection_npy"])
         if not path.is_absolute():
             path = Path.cwd() / path
         projection_xyz = np.load(path, mmap_mode="r")
+        # PnP 位姿
+        rvec = np.asarray(context.get("rvec", []), dtype=np.float64).reshape(3, 1)
+        tvec = np.asarray(context.get("tvec", []), dtype=np.float64).reshape(3, 1)
+        K = np.asarray(context.get("K", []), dtype=np.float64).reshape(3, 3)
     except (KeyError, OSError, TypeError, ValueError):
         return {**base, "reason": "coordinate_transform_artifact_unavailable"}
 
@@ -673,15 +683,6 @@ def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> di
 
     pixel_x = float(u) * (width - 1)
     pixel_y = float(v) * (height - 1)
-    mapped = homography @ np.array([pixel_x, pixel_y, 1.0])
-    if not np.all(np.isfinite(mapped)) or abs(mapped[2]) < 1e-12:
-        return {**base, "reason": "homography_projection_invalid"}
-    slam_x, slam_y = mapped[:2] / mapped[2]
-    pixel_to_slam = {
-        "slam_x": round(float(slam_x), 3),
-        "slam_y": round(float(slam_y), 3),
-        "slam_z": 0.0,
-    }
 
     npy_xyz = np.asarray(
         projection_xyz[int(pixel_y), int(pixel_x)], dtype=np.float64
@@ -689,7 +690,6 @@ def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> di
     if not np.all(np.isfinite(npy_xyz)) or np.allclose(npy_xyz, 0.0):
         return {
             **base,
-            "pixel_to_slam": pixel_to_slam,
             "reason": "projection_npy_pixel_invalid",
         }
     npy_point = {
@@ -697,29 +697,27 @@ def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> di
         "y": round(float(npy_xyz[1]), 3),
         "z": round(float(npy_xyz[2]), 3),
     }
-    # H→SLAM 输出 plane frame 坐标，NPY 存储 world XYZ
-    # 将 NPY 点投影到同一 plane frame 再比较
-    plane_params = context.get("plane_params")
-    difference_m = None
-    if plane_params is not None:
-        try:
-            from services.localizer.plane_detection import project_points_to_plane
-            npy_projected = project_points_to_plane(npy_xyz.reshape(1, 3), tuple(plane_params))
-            difference_m = round(float(np.linalg.norm(
-                np.array([slam_x, slam_y]) - npy_projected[0]
-            )), 3)
-        except Exception:
-            pass
-    if difference_m is None:
-        # 回退：直接比较（不准确）
-        difference_m = round(float(np.linalg.norm(
-            np.array([slam_x, slam_y]) - npy_xyz[:2]
-        )), 3)
-    return {
-        **base,
-        "status": "available",
-        "pixel_to_slam": pixel_to_slam,
-        "npy_point": npy_point,
-        "difference_m": difference_m,
-        "reason": None,
-    }
+
+    # 用 PnP 位姿重投影 NPY 3D 点到像素
+    try:
+        proj_pts, _ = cv2.projectPoints(
+            npy_xyz.reshape(1, 1, 3), rvec, tvec, K, None
+        )
+        proj_px = proj_pts.reshape(2)
+        # 差异（像素）
+        diff_px = np.sqrt((proj_px[0] - pixel_x)**2 + (proj_px[1] - pixel_y)**2)
+        return {
+            **base,
+            "status": "available",
+            "npy_point": npy_point,
+            "projected_px": [round(float(proj_px[0]), 1), round(float(proj_px[1]), 1)],
+            "query_px": [round(float(pixel_x), 1), round(float(pixel_y), 1)],
+            "difference_px": round(float(diff_px), 1),
+            "reason": None,
+        }
+    except Exception:
+        return {
+            **base,
+            "npy_point": npy_point,
+            "reason": "reprojection_failed",
+        }
