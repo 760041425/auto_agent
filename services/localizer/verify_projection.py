@@ -328,6 +328,9 @@ def build_local_coordinate_transform_context(
         if plane_params is not None:
             # 用检测出的平面计算 world 中哪些点是地面点
             normal = np.array(plane_params[:3], dtype=np.float64).flatten()
+            # DEBUG
+            import sys
+            print(f"DEBUG verify: world.shape={world.shape}, normal.shape={normal.shape}", file=sys.stderr)
             dists_to_plane = np.abs(world @ normal + float(plane_params[3]))
             ground_mask = dists_to_plane < plane_distance_threshold
             n_ground = int(ground_mask.sum())
@@ -582,8 +585,16 @@ def evaluate_local_coordinate_consistency(
     if plane_params is not None:
         try:
             from services.localizer.plane_detection import project_points_to_plane
-            npy_projected = project_points_to_plane(npy_xyz_all[ground_mask], tuple(plane_params))
-            distances = np.linalg.norm(mapped_xy[ground_mask] - npy_projected, axis=1)
+            npy_xyz_ground = npy_xyz_all[ground_mask]
+            # 只保留真正地面点（|NPY Z - plane_Z| < 0.5m）
+            a, b, c, d = (float(p) for p in plane_params)
+            z_plane = -d / c if abs(c) > 1e-6 else 0.0
+            on_ground = np.abs(npy_xyz_ground[:, 2] - z_plane) < 0.5
+            if on_ground.sum() >= min_samples:
+                npy_projected = project_points_to_plane(npy_xyz_ground[on_ground], tuple(plane_params))
+                distances = np.linalg.norm(mapped_xy[ground_mask][on_ground] - npy_projected, axis=1)
+            else:
+                distances = np.linalg.norm(mapped_xy[ground_mask] - npy_xyz_all[ground_mask, :2], axis=1)
         except Exception:
             distances = np.linalg.norm(mapped_xy[ground_mask] - npy_xyz_all[ground_mask, :2], axis=1)
     else:
