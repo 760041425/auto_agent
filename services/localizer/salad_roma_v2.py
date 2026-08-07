@@ -1006,15 +1006,11 @@ def localize_with_salad_roma_v2(
     try:
         ground_polygon = None
         if coordinate_transform.get("plane_segmentation", {}).get("status") == "plane_detected":
-            # 用地面点像素坐标计算凸包（对齐 slam-map）
-            fitting_2d = coordinate_transform.get("fitting_2d")
-            if fitting_2d is not None and len(fitting_2d) >= 3:
-                ground_polygon = _compute_ground_polygon(
-                    rvec, tvec, K,
-                    coordinate_transform.get("plane_params"),
-                    q_small.shape[:2],
-                    ground_pixels=fitting_2d,
-                )
+            plane_params = coordinate_transform.get("plane_params")
+            if plane_params is not None and all_pts is not None:
+                # 用密集点云投影到像素，筛选地面点，计算凸包
+                ground_pixels = _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, q_small.shape[:2])
+                ground_polygon = _compute_ground_polygon(ground_pixels=ground_pixels)
         artifacts = _write_final_artifacts(
             q_small,
             all_pts,
@@ -1240,22 +1236,48 @@ def _render_projection_local(all_pts, all_col, rvec, tvec, K, w, h, out_dir, nam
         return None
 
 
-def _compute_ground_polygon(rvec, tvec, K, plane_params, image_shape, ground_pixels=None):
-    """计算地面区域多边形（凸包方式，对齐 slam-map）。
+def _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, image_shape):
+    """将密集 3D 点投影到像素，筛选地面点。"""
+    import numpy as np
+    height, width = image_shape[:2]
+    a, b, c, d = plane_params
 
-    如果提供 ground_pixels（地面点的像素坐标），用凸包计算。
-    否则返回 None。
-    """
+    # 3D 点投影到像素
+    R = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))[0]
+    t = np.asarray(tvec, dtype=np.float64).reshape(1, 3)
+    pts = np.asarray(all_pts, dtype=np.float64).reshape(-1, 3)
+    cam_pts = (R @ pts.T).T + t.T
+    depth = cam_pts[:, 2]
+    valid = (depth > 0.1) & np.isfinite(depth)
+    if not valid.any():
+        return None
+
+    proj = (K @ cam_pts[valid].T).T
+    pixels = proj[:, :2] / proj[:, 2:3]
+    px = np.clip(np.rint(pixels[:, 0]).astype(int), 0, width - 1)
+    py = np.clip(np.rint(pixels[:, 1]).astype(int), 0, height - 1)
+
+    # 筛选地面点（到平面距离 < 0.5m）
+    dists = np.abs(pts[valid] @ np.array([a, b, c]) + d)
+    ground_mask = dists < 0.5
+
+    if ground_mask.sum() < 3:
+        return None
+
+    ground_pixels = np.column_stack([px[ground_mask], py[ground_mask]])
+    return ground_pixels
+
+
+def _compute_ground_polygon(ground_pixels=None):
+    """计算地面区域凸包（对齐 slam-map）。"""
     if ground_pixels is None or len(ground_pixels) < 3:
         return None
 
     try:
         from scipy.spatial import ConvexHull
-        # 去重
         unique_points = np.unique(np.array(ground_pixels, dtype=np.int32), axis=0)
         if len(unique_points) < 3:
             return None
-        # 计算凸包
         hull = ConvexHull(unique_points)
         hull_points = unique_points[hull.vertices]
         return [(int(p[0]), int(p[1])) for p in hull_points]
