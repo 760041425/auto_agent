@@ -1238,14 +1238,23 @@ def _render_projection_local(all_pts, all_col, rvec, tvec, K, w, h, out_dir, nam
 
 def _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, image_shape):
     """将密集 3D 点投影到像素，筛选地面点。"""
-    import numpy as np
     height, width = image_shape[:2]
     a, b, c, d = plane_params
+
+    # 确保 all_pts 是 numpy 数组
+    pts = np.asarray(all_pts, dtype=np.float64).reshape(-1, 3)
+    if len(pts) == 0:
+        return None
+
+    # 下采样（避免 500 万点导致内存/性能问题）
+    max_pts = 50000
+    if len(pts) > max_pts:
+        idx = np.random.choice(len(pts), max_pts, replace=False)
+        pts = pts[idx]
 
     # 3D 点投影到像素
     R = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))[0]
     t = np.asarray(tvec, dtype=np.float64).reshape(1, 3)
-    pts = np.asarray(all_pts, dtype=np.float64).reshape(-1, 3)
     cam_pts = (R @ pts.T).T + t.T
     depth = cam_pts[:, 2]
     valid = (depth > 0.1) & np.isfinite(depth)
@@ -1258,7 +1267,8 @@ def _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, image_shape):
     py = np.clip(np.rint(pixels[:, 1]).astype(int), 0, height - 1)
 
     # 筛选地面点（到平面距离 < 0.5m）
-    dists = np.abs(pts[valid] @ np.array([a, b, c]) + d)
+    normal = np.array([a, b, c], dtype=np.float64)
+    dists = np.abs(pts[valid] @ normal + d)
     ground_mask = dists < 0.5
 
     if ground_mask.sum() < 3:
