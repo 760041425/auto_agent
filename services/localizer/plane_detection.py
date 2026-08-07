@@ -84,7 +84,7 @@ def segment_plane(
         d = -np.dot(normal, sample_center)
 
         # 计算所有点到平面距离 |points @ n + d|（法向量已归一化，无需再除）
-        distances = np.abs(pts @ normal + d)
+        distances = np.abs(pts @ normal.flatten() + float(d))
 
         # 统计内点（距离 < distance_threshold）
         inlier_mask = distances < distance_threshold
@@ -122,7 +122,7 @@ def segment_plane(
     refined_d = refined_d / norm
 
     # 用精化后的平面重新计算内点掩码（更精确）
-    refined_distances = np.abs(pts @ refined_normal + refined_d)
+    refined_distances = np.abs(pts @ refined_normal.flatten() + float(refined_d))
     refined_inlier_mask = refined_distances < distance_threshold
     refined_inlier_count = int(refined_inlier_mask.sum())
     if refined_inlier_count < min_inliers:

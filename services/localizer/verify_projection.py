@@ -327,7 +327,8 @@ def build_local_coordinate_transform_context(
         )
         if plane_params is not None:
             # 用检测出的平面计算 world 中哪些点是地面点
-            dists_to_plane = np.abs(world @ np.array(plane_params[:3]) + plane_params[3])
+            normal = np.array(plane_params[:3], dtype=np.float64).flatten()
+            dists_to_plane = np.abs(world @ normal + float(plane_params[3]))
             ground_mask = dists_to_plane < plane_distance_threshold
             n_ground = int(ground_mask.sum())
             plane_segmentation_meta = {
