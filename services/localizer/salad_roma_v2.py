@@ -1007,13 +1007,10 @@ def localize_with_salad_roma_v2(
         ground_polygon = None
         if coordinate_transform.get("plane_segmentation", {}).get("status") == "plane_detected":
             plane_params = coordinate_transform.get("plane_params")
-            if plane_params is not None:
-                # 用射线-平面求交计算可见地面多边形
-                ground_polygon = _compute_ground_polygon(
-                    rvec=rvec, tvec=tvec, K=K,
-                    plane_params=plane_params,
-                    image_shape=q_small.shape[:2],
-                )
+            npy_path = coordinate_transform.get("projection_npy")
+            if plane_params is not None and npy_path is not None:
+                # 用 NPY 中实际地面点的凸包绘制地面区域
+                ground_polygon = _compute_ground_polygon_from_npy(npy_path, plane_params, q_small.shape[:2])
         artifacts = _write_final_artifacts(
             q_small,
             all_pts,
@@ -1287,29 +1284,44 @@ def _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, image_shape):
     return ground_pixels
 
 
-def _compute_ground_polygon(ground_pixels=None, rvec=None, tvec=None, K=None, plane_params=None, image_shape=None):
-    """计算可见地面区域多边形。
+def _compute_ground_polygon_from_npy(npy_path, plane_params, image_shape):
+    """从 NPY 文件中提取实际地面点，计算凸包。
 
-    优先用射线-平面求交（精确），回退到凸包（如果求交失败）。
+    只保留 NPY Z 值接近地面的点，用这些点的像素坐标计算凸包。
     """
-    # 方法1: 射线-平面求交（精确计算可见地面边界）
-    if rvec is not None and tvec is not None and K is not None and plane_params is not None and image_shape is not None:
-        polygon = _compute_ground_polygon_by_ray_plane(rvec, tvec, K, plane_params, image_shape)
-        if polygon is not None:
-            return polygon
+    from pathlib import Path
+    npy = np.load(str(Path(npy_path)), mmap_mode="r")
+    height, width = npy.shape[:2]
 
-    # 方法2: 回退到凸包
-    if ground_pixels is not None and len(ground_pixels) >= 3:
-        try:
-            from scipy.spatial import ConvexHull
-            unique_points = np.unique(np.array(ground_pixels, dtype=np.int32), axis=0)
-            if len(unique_points) >= 3:
-                hull = ConvexHull(unique_points)
-                hull_points = unique_points[hull.vertices]
-                return [(int(p[0]), int(p[1])) for p in hull_points]
-        except Exception:
-            pass
-    return None
+    # 找出有效像素（非零）
+    valid = np.any(npy != 0, axis=2)
+    if not valid.any():
+        return None
+
+    # 地面点过滤：|NPY Z - plane_Z| < 0.5m
+    a, b, c, d = (float(p) for p in plane_params)
+    z_plane = -d / c if abs(c) > 1e-6 else 0.0
+    z_vals = npy[:, :, 2]
+    on_ground = valid & (np.abs(z_vals - z_plane) < 0.5)
+
+    if on_ground.sum() < 3:
+        return None
+
+    # 地面点的像素坐标
+    ys, xs = np.where(on_ground)
+    pixels = np.column_stack([xs, ys])
+
+    # 凸包
+    try:
+        from scipy.spatial import ConvexHull
+        unique_pixels = np.unique(pixels, axis=0)
+        if len(unique_pixels) < 3:
+            return None
+        hull = ConvexHull(unique_pixels)
+        hull_points = unique_pixels[hull.vertices]
+        return [(int(p[0]), int(p[1])) for p in hull_points]
+    except Exception:
+        return None
 
 
 def _compute_ground_polygon_by_ray_plane(rvec, tvec, K, plane_params, image_shape):
