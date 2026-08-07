@@ -697,14 +697,29 @@ def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> di
         "y": round(float(npy_xyz[1]), 3),
         "z": round(float(npy_xyz[2]), 3),
     }
-    slam_xyz = np.array(
-        [pixel_to_slam["slam_x"], pixel_to_slam["slam_y"], pixel_to_slam["slam_z"]]
-    )
+    # H→SLAM 输出 plane frame 坐标，NPY 存储 world XYZ
+    # 将 NPY 点投影到同一 plane frame 再比较
+    plane_params = context.get("plane_params")
+    difference_m = None
+    if plane_params is not None:
+        try:
+            from services.localizer.plane_detection import project_points_to_plane
+            npy_projected = project_points_to_plane(npy_xyz.reshape(1, 3), tuple(plane_params))
+            difference_m = round(float(np.linalg.norm(
+                np.array([slam_x, slam_y]) - npy_projected[0]
+            )), 3)
+        except Exception:
+            pass
+    if difference_m is None:
+        # 回退：直接比较（不准确）
+        difference_m = round(float(np.linalg.norm(
+            np.array([slam_x, slam_y]) - npy_xyz[:2]
+        )), 3)
     return {
         **base,
         "status": "available",
         "pixel_to_slam": pixel_to_slam,
         "npy_point": npy_point,
-        "difference_m": round(float(np.linalg.norm(slam_xyz - npy_xyz)), 3),
+        "difference_m": difference_m,
         "reason": None,
     }
