@@ -578,23 +578,26 @@ def evaluate_local_coordinate_consistency(
     if n_ground < min_samples:
         ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
 
-    # 把 NPY 点投影到 plane frame 再与 H→SLAM 比较
+    # 比较 H→SLAM 与 NPY 在 plane frame 下的差异
+    # 注意：H→SLAM 输出 plane frame 坐标，NPY 存储 world XYZ
+    # 需要将 NPY 点投影到 plane frame 后再比较
     if plane_params is not None:
         try:
             from services.localizer.plane_detection import project_points_to_plane
-            npy_projected = project_points_to_plane(npy_xyz_all[ground_mask], tuple(plane_params))
-            distances = np.linalg.norm(mapped_xy[ground_mask] - npy_projected, axis=1)
+            npy_xyz_ground = npy_xyz_all[ground_mask]
+            # 只保留真正地面点（|NPY Z - plane_Z| < 0.5m）
+            a, b, c, d = (float(p) for p in plane_params)
+            z_plane = -d / c if abs(c) > 1e-6 else 0.0
+            on_ground = np.abs(npy_xyz_ground[:, 2] - z_plane) < 0.5
+            if on_ground.sum() >= min_samples:
+                npy_projected = project_points_to_plane(npy_xyz_ground[on_ground], tuple(plane_params))
+                distances = np.linalg.norm(mapped_xy[ground_mask][on_ground] - npy_projected, axis=1)
+            else:
+                distances = np.linalg.norm(mapped_xy[ground_mask] - npy_xyz_all[ground_mask, :2], axis=1)
         except Exception:
             distances = np.linalg.norm(mapped_xy[ground_mask] - npy_xyz_all[ground_mask, :2], axis=1)
     else:
         distances = np.linalg.norm(mapped_xy[ground_mask] - npy_xyz_all[ground_mask, :2], axis=1)
-    # 调试：输出 Z 分布
-    z_abs = np.abs(npy_xyz_all[:, 2])
-    _logger.debug(
-        f"地面点过滤: 总样本={len(npy_xyz_all)}, |Z|<0.5m={ground_mask.sum()}, "
-        f"Z 范围=[{z_abs.min():.2f}, {z_abs.max():.2f}]m, "
-        f"Z 中位={np.median(z_abs):.2f}m"
-    )
     # 调试：输出 Z 分布 + 前 5 个地面点坐标对比
     z_abs = np.abs(npy_xyz_all[:, 2])
     eval_source = "fitting" if use_fitting_points else "npy_sample"
