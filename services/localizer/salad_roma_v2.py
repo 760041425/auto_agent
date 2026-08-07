@@ -1258,7 +1258,7 @@ def _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, image_shape):
     R = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))[0]
     t = np.asarray(tvec, dtype=np.float64).reshape(1, 3)
     import sys
-    print(f"DEBUG proj: R.shape={R.shape}, pts.shape={pts.shape}", file=sys.stderr)
+    print(f"DEBUG proj: R.shape={R.shape}, pts.shape={pts.shape}, t.shape={t.shape}, t.T.shape={t.T.shape}", file=sys.stderr)
     cam_pts = (R @ pts.T).T + t.T
     depth = cam_pts[:, 2]
     valid = (depth > 0.1) & np.isfinite(depth)
