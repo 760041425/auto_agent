@@ -1270,6 +1270,10 @@ def _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, image_shape):
 
     # 筛选地面点（到平面距离 < 0.5m）
     normal = np.array([a, b, c], dtype=np.float64).flatten()
+    import sys, traceback
+    print(f"DEBUG _project_ground_pixels: pts.shape={pts.shape}, valid.sum={valid.sum()}, normal.shape={normal.shape}", file=sys.stderr)
+    if valid.sum() > 0:
+        print(f"  pts[valid].shape={pts[valid].shape}", file=sys.stderr)
     dists = np.abs(pts[valid] @ normal + float(d))
     ground_mask = dists < 0.5
 
@@ -1309,6 +1313,8 @@ def _write_final_artifacts(
     ground_polygon=None,
 ):
     """为最终返回位姿生成查询图、最终投影图和带标签双图。"""
+    import sys
+    print(f"DEBUG _write_final_artifacts: all_pts type={type(all_pts)}, len={len(all_pts) if all_pts is not None else 'None'}", file=sys.stderr)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     query_path = output_dir / f"query_{tag}.png"
