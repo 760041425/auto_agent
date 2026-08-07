@@ -563,38 +563,27 @@ def evaluate_local_coordinate_consistency(
     # 把这些点投影到同一 plane frame 再与 H→SLAM 比较。
     mapped_xy = mapped[valid_h, :2] / mapped[valid_h, 2:3]
 
-    # 地面点过滤（仅在使用 NPY 采样时）
-    if use_fitting_points:
-        # fitting_3d 已经是地面点（来自 plane 过滤），无需再过滤
-        ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
+    # 地面点过滤
+    if plane_params is not None:
+        try:
+            a, b, c, d = (float(p) for p in plane_params)
+            z_plane = -d / c if abs(c) > 1e-6 else 0.0
+            ground_mask = np.abs(npy_xyz_all[:, 2] - z_plane) < ground_z_threshold_m
+        except Exception:
+            ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
     else:
-        if plane_params is not None:
-            try:
-                a, b, c, d = (float(p) for p in plane_params)
-                z_plane = -d / c if abs(c) > 1e-6 else 0.0
-                ground_mask = np.abs(npy_xyz_all[:, 2] - z_plane) < ground_z_threshold_m
-            except Exception:
-                ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
-        else:
-            ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
-        n_ground = int(ground_mask.sum())
-        if n_ground < min_samples:
-            ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
+        ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
+
+    n_ground = int(ground_mask.sum())
+    if n_ground < min_samples:
+        ground_mask = np.ones(len(npy_xyz_all), dtype=bool)
 
     # 把 NPY 点投影到 plane frame 再与 H→SLAM 比较
     if plane_params is not None:
         try:
             from services.localizer.plane_detection import project_points_to_plane
-            npy_xyz_ground = npy_xyz_all[ground_mask]
-            # 只保留真正地面点（|NPY Z - plane_Z| < 0.5m）
-            a, b, c, d = (float(p) for p in plane_params)
-            z_plane = -d / c if abs(c) > 1e-6 else 0.0
-            on_ground = np.abs(npy_xyz_ground[:, 2] - z_plane) < 0.5
-            if on_ground.sum() >= min_samples:
-                npy_projected = project_points_to_plane(npy_xyz_ground[on_ground], tuple(plane_params))
-                distances = np.linalg.norm(mapped_xy[ground_mask][on_ground] - npy_projected, axis=1)
-            else:
-                distances = np.linalg.norm(mapped_xy[ground_mask] - npy_xyz_all[ground_mask, :2], axis=1)
+            npy_projected = project_points_to_plane(npy_xyz_all[ground_mask], tuple(plane_params))
+            distances = np.linalg.norm(mapped_xy[ground_mask] - npy_projected, axis=1)
         except Exception:
             distances = np.linalg.norm(mapped_xy[ground_mask] - npy_xyz_all[ground_mask, :2], axis=1)
     else:
