@@ -1239,7 +1239,9 @@ def _render_projection_local(all_pts, all_col, rvec, tvec, K, w, h, out_dir, nam
 def _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, image_shape):
     """将密集 3D 点投影到像素，筛选地面点。"""
     height, width = image_shape[:2]
-    a, b, c, d = plane_params
+    # 确保 plane_params 是 1D
+    pp = np.asarray(plane_params, dtype=np.float64).flatten()
+    a, b, c, d = pp[0], pp[1], pp[2], pp[3]
 
     # 确保 all_pts 是 numpy 数组
     pts = np.asarray(all_pts, dtype=np.float64).reshape(-1, 3)
