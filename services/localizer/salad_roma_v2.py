@@ -1007,10 +1007,10 @@ def localize_with_salad_roma_v2(
         ground_polygon = None
         if coordinate_transform.get("plane_segmentation", {}).get("status") == "plane_detected":
             plane_params = coordinate_transform.get("plane_params")
-            npy_path = coordinate_transform.get("projection_npy")
-            if plane_params is not None and npy_path is not None:
-                # 用 NPY 中实际地面点的凸包绘制地面区域
-                ground_polygon = _compute_ground_polygon_from_npy(npy_path, plane_params, q_small.shape[:2])
+            if plane_params is not None and all_pts is not None:
+                # 用密集点云投影到像素，筛选地面点，计算凸包
+                ground_pixels = _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, q_small.shape[:2])
+                ground_polygon = _compute_ground_polygon(ground_pixels=ground_pixels)
         artifacts = _write_final_artifacts(
             q_small,
             all_pts,
@@ -1398,6 +1398,22 @@ def _ray_plane_intersection(u, v, R, cam_center, K_inv, a, b, c, d):
 
     # 交点像素坐标就是 (u, v)
     return (int(u), int(v))
+
+
+def _compute_ground_polygon(ground_pixels=None):
+    """计算地面区域凸包。"""
+    if ground_pixels is None or len(ground_pixels) < 3:
+        return None
+    try:
+        from scipy.spatial import ConvexHull
+        unique_points = np.unique(np.array(ground_pixels, dtype=np.int32), axis=0)
+        if len(unique_points) < 3:
+            return None
+        hull = ConvexHull(unique_points)
+        hull_points = unique_points[hull.vertices]
+        return [(int(p[0]), int(p[1])) for p in hull_points]
+    except Exception:
+        return None
 
 
 def _write_final_artifacts(
