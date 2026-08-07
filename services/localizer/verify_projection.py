@@ -563,7 +563,7 @@ def evaluate_local_coordinate_consistency(
     # 把这些点投影到同一 plane frame 再与 H→SLAM 比较。
     mapped_xy = mapped[valid_h, :2] / mapped[valid_h, 2:3]
 
-    # 地面点过滤
+    # 地面点过滤：只保留 NPY Z 值接近地面的点
     if plane_params is not None:
         try:
             a, b, c, d = (float(p) for p in plane_params)
@@ -588,6 +588,13 @@ def evaluate_local_coordinate_consistency(
             distances = np.linalg.norm(mapped_xy[ground_mask] - npy_xyz_all[ground_mask, :2], axis=1)
     else:
         distances = np.linalg.norm(mapped_xy[ground_mask] - npy_xyz_all[ground_mask, :2], axis=1)
+    # 调试：输出 Z 分布
+    z_abs = np.abs(npy_xyz_all[:, 2])
+    _logger.debug(
+        f"地面点过滤: 总样本={len(npy_xyz_all)}, |Z|<0.5m={ground_mask.sum()}, "
+        f"Z 范围=[{z_abs.min():.2f}, {z_abs.max():.2f}]m, "
+        f"Z 中位={np.median(z_abs):.2f}m"
+    )
     # 调试：输出 Z 分布 + 前 5 个地面点坐标对比
     z_abs = np.abs(npy_xyz_all[:, 2])
     eval_source = "fitting" if use_fitting_points else "npy_sample"
