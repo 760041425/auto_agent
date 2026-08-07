@@ -1006,10 +1006,10 @@ def localize_with_salad_roma_v2(
     try:
         ground_polygon = None
         if coordinate_transform.get("plane_segmentation", {}).get("status") == "plane_detected":
-            plane_params = coordinate_transform.get("plane_params")
-            if plane_params is not None and all_pts is not None:
-                # 用密集点云投影到像素，筛选地面点，计算凸包
-                ground_pixels = _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, q_small.shape[:2])
+            # 用 PnP 内点（实际匹配点）计算凸包
+            fitting_2d = coordinate_transform.get("fitting_2d")
+            if fitting_2d is not None and len(fitting_2d) >= 3:
+                ground_pixels = np.array(fitting_2d, dtype=np.float64)
                 ground_polygon = _compute_ground_polygon(ground_pixels=ground_pixels)
         artifacts = _write_final_artifacts(
             q_small,
