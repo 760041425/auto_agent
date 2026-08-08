@@ -1232,204 +1232,96 @@ async function generateVerifyReport(imageId) {
 // 3D 点云瓦片加载
 // =====================================================================
 
-let pcScene = null;
-let pcCamera = null;
-let pcRenderer = null;
-let pcControls = null;
-let pcTileCache = {};
-let pcTileMeta = [];
-let pcLoadedTiles = new Set();
-let pcInitialized = false;
+
+// =====================================================================
+// 3D 点云（简化版，全自动加载）
+// =====================================================================
+let pcScene, pcCamera, pcRenderer, pcControls, pcTileCache = {}, pcTileMeta = [], pcTileSize = 50, pcInitialized = false, pcLoading = false;
 
 function initPointCloud() {
   if (pcInitialized) return;
   pcInitialized = true;
-
-  // 延迟初始化，等待 tab 切换完成
   setTimeout(() => {
-    const container = document.getElementById('pc-canvas-container');
-    if (!container || container.clientWidth === 0) return;
-
-    // Three.js 场景
+    const c = document.getElementById('pc-canvas-container');
+    if (!c || c.clientWidth === 0) return;
     pcScene = new THREE.Scene();
     pcScene.background = new THREE.Color(0x1a1a2e);
-
-    pcCamera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.1, 10000);
-    pcCamera.position.set(100, 100, 100);
-
+    pcCamera = new THREE.PerspectiveCamera(60, c.clientWidth / c.clientHeight, 0.1, 10000);
     pcRenderer = new THREE.WebGLRenderer({ antialias: true });
-    pcRenderer.setSize(container.clientWidth, container.clientHeight);
-    pcRenderer.setPixelRatio(window.devicePixelRatio);
-    container.appendChild(pcRenderer.domElement);
-
+    pcRenderer.setSize(c.clientWidth, c.clientHeight);
+    pcRenderer.setPixelRatio(devicePixelRatio);
+    c.appendChild(pcRenderer.domElement);
     pcControls = new THREE.OrbitControls(pcCamera, pcRenderer.domElement);
     pcControls.enableDamping = true;
-    pcControls.dampingFactor = 0.05;
-
-    pcScene.add(new THREE.AxesHelper(50));
+    pcScene.add(new THREE.AxesHelper(30));
     pcScene.add(new THREE.GridHelper(300, 30, 0x444466, 0x333355));
-
-    // 点大小调节
-    const sizeInput = document.getElementById('pc-point-size');
-    if (sizeInput) {
-      sizeInput.addEventListener('input', function() {
-        document.getElementById('pc-point-size-val').textContent = this.value;
-        for (const key in pcTileCache) pcTileCache[key].material.size = parseFloat(this.value);
-      });
-    }
-
-    // 窗口 resize
-    window.addEventListener('resize', onPCResize);
-
-    // 相机变化时加载附近瓦片
-    pcControls.addEventListener('change', onPCCameraChange);
-
-    animatePC();
+    addEventListener('resize', () => {
+      if (!pcCamera) return;
+      pcCamera.aspect = c.clientWidth / c.clientHeight;
+      pcCamera.updateProjectionMatrix();
+      pcRenderer.setSize(c.clientWidth, c.clientHeight);
+    });
+    pcControls.addEventListener('change', loadNearbyTiles);
+    (function a(){ requestAnimationFrame(a); if(pcControls) pcControls.update(); if(pcRenderer) pcRenderer.render(pcScene, pcCamera); })();
+    loadPointCloud();
   }, 100);
 }
 
-function onPCResize() {
-  const container = document.getElementById('pc-canvas-container');
-  if (!container || !pcCamera || !pcRenderer) return;
-  pcCamera.aspect = container.clientWidth / container.clientHeight;
-  pcCamera.updateProjectionMatrix();
-  pcRenderer.setSize(container.clientWidth, container.clientHeight);
-}
-
-function animatePC() {
-  requestAnimationFrame(animatePC);
-  if (pcControls) pcControls.update();
-  if (pcRenderer && pcScene && pcCamera) pcRenderer.render(pcScene, pcCamera);
-}
-
-function onPCCameraChange() {
-  if (!pcTileMeta.length) return;
-  loadNearbyTiles();
-}
-
-async function loadPointCloudTiles() {
-  const tileSize = parseFloat(document.getElementById('pc-tile-size').value) || 50;
-  const maxPts = parseInt(document.getElementById('pc-max-pts').value) || 50000;
-
+async function loadPointCloud() {
+  if (pcLoading) return;
+  pcLoading = true;
   document.getElementById('pc-loading').style.display = 'block';
-  document.getElementById('pc-stats').style.display = 'none';
-
-  // 清除旧瓦片
-  for (const key in pcTileCache) {
-    pcScene.remove(pcTileCache[key]);
-    pcTileCache[key].geometry.dispose();
-    pcTileCache[key].material.dispose();
-  }
+  for (const k in pcTileCache) { pcScene.remove(pcTileCache[k]); pcTileCache[k].geometry.dispose(); pcTileCache[k].material.dispose(); }
   pcTileCache = {};
-  pcLoadedTiles.clear();
   pcTileMeta = [];
-
   try {
-    const resp = await fetch(`/api/point-cloud/tiles?tile_size=${tileSize}`);
-    const data = await resp.json();
-    if (data.error) {
-      document.getElementById('pc-loading').textContent = '错误: ' + data.error;
-      return;
-    }
-    pcTileMeta = data.tiles;
-
-    document.getElementById('pc-total').textContent = data.total_points.toLocaleString();
+    const d = await fetch(`/api/point-cloud/tiles?tile_size=${pcTileSize}`).then(r => r.json());
+    if (d.error) { document.getElementById('pc-loading').textContent = '错误: ' + d.error; pcLoading = false; return; }
+    pcTileMeta = d.tiles;
+    document.getElementById('pc-total').textContent = d.total_points.toLocaleString();
     document.getElementById('pc-tiles').textContent = pcTileMeta.length;
     document.getElementById('pc-stats').style.display = 'block';
     document.getElementById('pc-loading').style.display = 'none';
-
-    // 调整相机到点云中心
-    if (data.bounds && data.bounds.min) {
-      const cx = (data.bounds.min[0] + data.bounds.max[0]) / 2;
-      const cy = (data.bounds.min[1] + data.bounds.max[1]) / 2;
-      const cz = (data.bounds.min[2] + data.bounds.max[2]) / 2;
-      const size = Math.max(
-        data.bounds.max[0] - data.bounds.min[0],
-        data.bounds.max[1] - data.bounds.min[1],
-        data.bounds.max[2] - data.bounds.min[2]
-      );
-      pcControls.target.set(cx, cy, cz);
-      pcCamera.position.set(cx + size * 0.8, cy + size * 0.8, cz + size * 0.8);
-      pcControls.update();
-    }
-
+    const xs = pcTileMeta.flatMap(t => [t.min[0], t.max[0]]);
+    const ys = pcTileMeta.flatMap(t => [t.min[1], t.max[1]]);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const cz = (Math.min(...pcTileMeta.flatMap(t=>[t.min[2],t.max[2]])) + Math.max(...pcTileMeta.flatMap(t=>[t.min[2],t.max[2]]))) / 2;
+    const sz = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+    pcControls.target.set(cx, cy, cz);
+    pcCamera.position.set(cx + sz * 0.8, cy + sz * 0.8, cz + sz * 0.8);
+    pcControls.update();
     await loadNearbyTiles();
-  } catch (e) {
-    document.getElementById('pc-loading').textContent = '加载失败: ' + e.message;
+  } catch(e) {
+    document.getElementById('pc-loading').textContent = '失败: ' + e.message;
   }
+  pcLoading = false;
 }
 
 async function loadNearbyTiles() {
-  if (!pcTileMeta.length || !pcControls) return;
-
-  const tileSize = parseFloat(document.getElementById('pc-tile-size').value) || 50;
-  const maxPts = parseInt(document.getElementById('pc-max-pts').value) || 50000;
-  const camX = pcControls.target.x;
-  const camY = pcControls.target.y;
-  const camIX = Math.floor(camX / tileSize);
-  const camIY = Math.floor(camY / tileSize);
-
-  // 加载周围 5x5 瓦片
+  if (!pcTileMeta.length || !pcControls || pcLoading) return;
+  const camX = pcControls.target.x, camY = pcControls.target.y;
+  const cix = Math.floor(camX / pcTileSize), ciy = Math.floor(camY / pcTileSize);
   const wanted = new Set();
-  for (let dx = -2; dx <= 2; dx++) {
-    for (let dy = -2; dy <= 2; dy++) {
-      wanted.add(`${camIX + dx},${camIY + dy}`);
-    }
+  for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) wanted.add(`${cix+dx},${ciy+dy}`);
+  for (const k of Object.keys(pcTileCache)) if (!wanted.has(k)) {
+    pcScene.remove(pcTileCache[k]); pcTileCache[k].geometry.dispose(); pcTileCache[k].material.dispose(); delete pcTileCache[k];
   }
-
-  // 卸载远处瓦片
-  for (const key of pcLoadedTiles) {
-    if (!wanted.has(key)) {
-      const obj = pcTileCache[key];
-      if (obj) {
-        pcScene.remove(obj);
-        obj.geometry.dispose();
-        obj.material.dispose();
-        delete pcTileCache[key];
-      }
-      pcLoadedTiles.delete(key);
-    }
-  }
-
-  // 加载新瓦片
-  for (const key of wanted) {
-    if (pcLoadedTiles.has(key)) continue;
-    const [ix, iy] = key.split(',').map(Number);
-    const meta = pcTileMeta.find(t => t.ix === ix && t.iy === iy);
-    if (!meta) continue;
-
+  for (const k of wanted) {
+    if (pcTileCache[k]) continue;
+    const [ix, iy] = k.split(',').map(Number);
+    if (!pcTileMeta.some(t => t.ix === ix && t.iy === iy)) continue;
     try {
-      const resp = await fetch(`/api/point-cloud/tile/${ix}/${iy}?tile_size=${tileSize}&max_points=${maxPts}`);
-      const data = await resp.json();
-      if (data.error || !data.points.length) continue;
-
-      const positions = new Float32Array(data.points.flat());
-      const colors = new Float32Array(data.colors.flat());
-
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-      const material = new THREE.PointsMaterial({
-        size: parseFloat(document.getElementById('pc-point-size') ? document.getElementById('pc-point-size').value : 1.0),
-        vertexColors: true,
-        sizeAttenuation: true,
-      });
-
-      const points = new THREE.Points(geometry, material);
-      pcScene.add(points);
-      pcTileCache[key] = points;
-      pcLoadedTiles.add(key);
-    } catch (e) {
-      console.warn(`瓦片 ${key} 加载失败:`, e);
-    }
+      const d = await fetch(`/api/point-cloud/tile/${ix}/${iy}?tile_size=${pcTileSize}&max_points=50000`).then(r=>r.json());
+      if (d.error || !d.points.length) continue;
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(d.points.flat()), 3));
+      g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(d.colors.flat()), 3));
+      const pts = new THREE.Points(g, new THREE.PointsMaterial({ size: 0.8, vertexColors: true, sizeAttenuation: true }));
+      pcScene.add(pts);
+      pcTileCache[k] = pts;
+    } catch(e) {}
   }
-
-  // 更新统计
-  let totalPts = 0;
-  for (const key in pcTileCache) {
-    totalPts += pcTileCache[key].geometry.attributes.position.count;
-  }
-  document.getElementById('pc-loaded-tiles').textContent = pcLoadedTiles.size;
-  document.getElementById('pc-loaded-pts').textContent = totalPts.toLocaleString();
+  document.getElementById('pc-loaded-tiles').textContent = Object.keys(pcTileCache).length;
+  document.getElementById('pc-loaded-pts').textContent = Object.values(pcTileCache).reduce((s,p)=>s+p.geometry.attributes.position.count,0).toLocaleString();
 }
