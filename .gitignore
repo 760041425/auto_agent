@@ -9,6 +9,10 @@ venv/
 .env
 *.db
 *.sqlite3
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # Node / Frontend
 web/node_modules/
@@ -25,8 +29,18 @@ projections/*
 !query_images/.gitkeep
 !projections/.gitkeep
 
+# Runtime
+/.uvicorn.pid
+logs/*
+!logs/.gitkeep
+reports/generated/
+
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+.DS_Store
+
+# Claude worktrees
+.claude/worktrees/

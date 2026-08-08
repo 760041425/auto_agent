@@ -1,0 +1,4 @@
+interface:
+  display_name: "Wiki Issue Dev"
+  short_description: "按照已批准规格用测试驱动方式完成实现、分层验证与需求追踪"
+  default_prompt: "Use $wiki-issue-dev to implement this approved issue with TDD, verification, and traceability."

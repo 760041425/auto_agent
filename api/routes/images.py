@@ -49,9 +49,23 @@ async def upload_image(file: UploadFile = File(...), db: Session = Depends(get_d
     return record
 
 
-@router.get("", response_model=list[ImageListResponse])
+@router.get("")
 def list_images(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
-    return db.query(ImageModel).order_by(ImageModel.created_at.desc()).offset(skip).limit(limit).all()
+    results = db.query(ImageModel).order_by(ImageModel.created_at.desc()).all()
+    # 过滤掉文件已不存在的孤立记录（避免前端 404）
+    valid = []
+    for img in results:
+        if os.path.exists(img.path):
+            valid.append({
+                "id": img.id,
+                "filename": img.filename,
+                "original_name": img.original_name,
+                "status": img.status,
+                "width": img.width,
+                "height": img.height,
+                "created_at": img.created_at.isoformat() if img.created_at else None,
+            })
+    return valid[skip:skip + limit]
 
 
 @router.get("/{image_id}", response_model=ImageListResponse)

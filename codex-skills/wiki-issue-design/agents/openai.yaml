@@ -1,0 +1,4 @@
+interface:
+  display_name: "Wiki Issue Design"
+  short_description: "将模糊需求整理成有领域边界、可验收、可追踪的完整规格包"
+  default_prompt: "Use $wiki-issue-design to turn this requirement into a reviewed, traceable specification package."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Wiki Bug Fix"
+  short_description: "复现问题、分析根因、补回归测试并完成全链路可验证修复"
+  default_prompt: "Use $wiki-bug-fix to reproduce this bug, identify the root cause, add a regression test, and implement a verified fix."

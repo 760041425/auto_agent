@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c ' *)",
+      "Bash(.venv/bin/python3 -c ' *)",
+      "Bash(.venv/bin/python3 -c \"import torch; print\\('torch ok'\\)\")",
+      "Bash(python3 -c \"import torch; print\\('torch ok'\\)\")",
+      "Bash(/opt/miniconda3/bin/python3.13 -c \"import torch; print\\('torch ok'\\)\")"
+    ]
+  }
+}
