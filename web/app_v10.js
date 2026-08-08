@@ -22,7 +22,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (tab === 'pointcloud') {
         initPointCloud();
         // 自动加载点云（数据在本地，无需上传）
-        setTimeout(() => loadPointCloudTiles(), 200);
+        // 点云加载由 initPointCloud 处理
       }
     });
   });
@@ -1241,9 +1241,14 @@ let pcScene, pcCamera, pcRenderer, pcControls, pcTileCache = {}, pcTileMeta = []
 function initPointCloud() {
   if (pcInitialized) return;
   pcInitialized = true;
-  setTimeout(() => {
+  // 等待容器可见（tab 切换后 display: none → block）
+  let retries = 0;
+  const tryInit = () => {
     const c = document.getElementById('pc-canvas-container');
-    if (!c || c.clientWidth === 0) return;
+    if (!c || c.clientWidth === 0) {
+      if (++retries < 50) return setTimeout(tryInit, 100);
+      return; // 5s 后放弃
+    }
     pcScene = new THREE.Scene();
     pcScene.background = new THREE.Color(0x1a1a2e);
     pcCamera = new THREE.PerspectiveCamera(60, c.clientWidth / c.clientHeight, 0.1, 10000);
