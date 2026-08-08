@@ -2,69 +2,28 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>3D 点云可视化（瓦片加载）</title>
+  <title>3D 点云</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #eee; overflow: hidden; }
     #container { width: 100vw; height: 100vh; }
-    #controls {
-      position: fixed; top: 16px; left: 16px; z-index: 10;
-      background: rgba(30, 30, 50, 0.92); padding: 16px; border-radius: 8px;
-      min-width: 240px; box-shadow: 0 4px 20px rgba(0,0,0,0.4);
-    }
-    #controls h2 { font-size: 14px; margin-bottom: 12px; }
-    .control-row { margin-bottom: 10px; }
-    .control-row label { display: block; font-size: 12px; color: #aaa; margin-bottom: 4px; }
-    .control-row .value { color: #4fc3f7; }
-    .control-row input[type="range"] { width: 100%; }
-    button {
-      width: 100%; padding: 8px; margin-top: 8px; border: none; border-radius: 4px;
-      background: #1976d2; color: #fff; cursor: pointer; font-size: 13px;
-    }
-    button:hover { background: #1565c0; }
+    #loading { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 16px; color: #4fc3f7; }
     #stats {
       position: fixed; bottom: 16px; left: 16px; z-index: 10;
-      background: rgba(30, 30, 50, 0.92); padding: 12px; border-radius: 6px;
-      font-size: 12px; line-height: 1.6;
+      background: rgba(30, 30, 50, 0.9); padding: 12px; border-radius: 6px;
+      font-size: 12px; line-height: 1.6; display: none;
     }
     #stats span { color: #4fc3f7; }
-    #loading { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 16px; color: #4fc3f7; }
-    #tile-status {
-      position: fixed; top: 16px; right: 16px; z-index: 10;
-      background: rgba(30, 30, 50, 0.92); padding: 10px 14px; border-radius: 6px;
-      font-size: 12px;
-    }
   </style>
 </head>
 <body>
   <div id="container"></div>
-
-  <div id="controls">
-    <h2>3D 点云（瓦片加载）</h2>
-    <div class="control-row">
-      <label>瓦片大小: <span class="value" id="tileSizeValue">50m</span></label>
-      <input type="range" id="tileSize" min="10" max="100" step="10" value="50">
-    </div>
-    <div class="control-row">
-      <label>每瓦片最大点数: <span class="value" id="maxPtsValue">50000</span></label>
-      <input type="range" id="maxPts" min="5000" max="200000" step="5000" value="50000">
-    </div>
-    <div class="control-row">
-      <label>点大小: <span class="value" id="sizeValue">1.0</span></label>
-      <input type="range" id="pointSize" min="0.1" max="5" step="0.1" value="1.0">
-    </div>
-    <button id="reloadBtn">重新加载瓦片</button>
+  <div id="loading">加载中...</div>
+  <div id="stats">
+    总点数: <span id="total">-</span><br>
+    已加载: <span id="loaded">-</span> 点<br>
+    相机: <span id="cam-pos">-</span>
   </div>
-
-  <div id="stats" style="display:none">
-    总点数: <span id="totalPoints">-</span><br>
-    瓦片数: <span id="tileCount">-</span><br>
-    已加载: <span id="loadedTiles">-</span> 瓦片 / <span id="loadedPoints">-</span> 点
-  </div>
-
-  <div id="tile-status" style="display:none">加载中...</div>
-  <div id="loading">加载瓦片列表...</div>
 
   <script type="importmap">
   {
@@ -80,13 +39,12 @@
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
     let scene, camera, renderer, controls;
-    let tileCache = {};       // { "ix,iy": THREE.Points }
-    let tileMetadata = [];    // [{ix, iy, count, min, max}]
-    let loadedTiles = new Set();
-    let currentTileSize = 50;
-    let currentMaxPts = 50000;
-    let totalLoadedPts = 0;
+    let tileCache = {};
+    let tileMeta = [];
+    let tileSize = 50;
+    let totalLoaded = 0;
 
+    // 初始化 Three.js
     function init() {
       const container = document.getElementById('container');
       scene = new THREE.Scene();
@@ -104,155 +62,112 @@
       controls.enableDamping = true;
       controls.dampingFactor = 0.05;
 
-      scene.add(new THREE.AxesHelper(50));
+      // 坐标轴 + 网格
+      scene.add(new THREE.AxesHelper(30));
       scene.add(new THREE.GridHelper(300, 30, 0x444466, 0x333355));
 
-      window.addEventListener('resize', onResize);
-      controls.addEventListener('change', onCameraChange);
-      animate();
-    }
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
 
-    function onResize() {
-      camera.aspect = window.innerWidth / window.innerHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(window.innerWidth, window.innerHeight);
+      controls.addEventListener('change', loadNearbyTiles);
+      animate();
     }
 
     function animate() {
       requestAnimationFrame(animate);
       controls.update();
       renderer.render(scene, camera);
+      document.getElementById('cam-pos').textContent =
+        `${camera.position.x.toFixed(0)}, ${camera.position.y.toFixed(0)}, ${camera.position.z.toFixed(0)}`;
     }
 
-    function onCameraChange() {
-      // 相机变化时，加载附近瓦片
+    // 加载瓦片列表
+    async function loadTileList() {
+      const resp = await fetch(`/api/point-cloud/tiles?tile_size=${tileSize}`);
+      const data = await resp.json();
+      if (data.error) {
+        document.getElementById('loading').textContent = '错误: ' + data.error;
+        return;
+      }
+      tileMeta = data.tiles;
+      document.getElementById('total').textContent = data.total_points.toLocaleString();
+      document.getElementById('stats').style.display = 'block';
+      document.getElementById('loading').style.display = 'none';
+
+      // 自动定位相机到点云中心
+      const xs = tileMeta.flatMap(t => [t.min[0], t.max[0]]);
+      const ys = tileMeta.flatMap(t => [t.min[1], t.max[1]]);
+      const zs = tileMeta.flatMap(t => [t.min[2], t.max[2]]);
+      const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+      const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+      const cz = (Math.min(...zs) + Math.max(...zs)) / 2;
+      const size = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+
+      controls.target.set(cx, cy, cz);
+      camera.position.set(cx + size * 0.8, cy + size * 0.8, cz + size * 0.8);
+      controls.update();
+
+      // 加载初始瓦片
       loadNearbyTiles();
     }
 
-    async function loadTileList() {
-      document.getElementById('loading').style.display = 'block';
-      loadedTiles.clear();
-      totalLoadedPts = 0;
-
-      // 清除旧瓦片
-      for (const key in tileCache) {
-        scene.remove(tileCache[key]);
-        tileCache[key].geometry.dispose();
-        tileCache[key].material.dispose();
-      }
-      tileCache = {};
-
-      try {
-        const resp = await fetch(`/api/point-cloud/tiles?tile_size=${currentTileSize}`);
-        const data = await resp.json();
-        if (data.error) {
-          document.getElementById('loading').textContent = '错误: ' + data.error;
-          return;
-        }
-        tileMetadata = data.tiles;
-        document.getElementById('totalPoints').textContent = data.total_points.toLocaleString();
-        document.getElementById('tileCount').textContent = tileMetadata.length;
-        document.getElementById('stats').style.display = 'block';
-        document.getElementById('loading').style.display = 'none';
-
-        // 加载初始瓦片
-        loadNearbyTiles();
-      } catch (e) {
-        document.getElementById('loading').textContent = '加载失败: ' + e.message;
-      }
-    }
-
+    // 加载相机附近的瓦片
     async function loadNearbyTiles() {
-      if (!tileMetadata.length) return;
+      if (!tileMeta.length) return;
 
-      // 相机位置 → 瓦片索引
       const camX = controls.target.x;
       const camY = controls.target.y;
-      const camIX = Math.floor(camX / currentTileSize);
-      const camIY = Math.floor(camY / currentTileSize);
+      const camIX = Math.floor(camX / tileSize);
+      const camIY = Math.floor(camY / tileSize);
 
-      // 加载周围 3x3 瓦片
+      // 周围 5x5 瓦片
       const wanted = new Set();
-      for (let dx = -1; dx <= 1; dx++) {
-        for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        for (let dy = -2; dy <= 2; dy++) {
           wanted.add(`${camIX + dx},${camIY + dy}`);
         }
       }
 
-      // 卸载远处瓦片
-      for (const key of loadedTiles) {
+      // 卸载远处
+      for (const key of Object.keys(tileCache)) {
         if (!wanted.has(key)) {
-          const obj = tileCache[key];
-          if (obj) {
-            scene.remove(obj);
-            obj.geometry.dispose();
-            obj.material.dispose();
-            delete tileCache[key];
-          }
-          loadedTiles.delete(key);
+          scene.remove(tileCache[key]);
+          tileCache[key].geometry.dispose();
+          tileCache[key].material.dispose();
+          delete tileCache[key];
         }
       }
 
       // 加载新瓦片
-      let loaded = 0;
       for (const key of wanted) {
-        if (loadedTiles.has(key)) continue;
+        if (tileCache[key]) continue;
         const [ix, iy] = key.split(',').map(Number);
-        const meta = tileMetadata.find(t => t.ix === ix && t.iy === iy);
-        if (!meta) continue;
+        if (!tileMeta.some(t => t.ix === ix && t.iy === iy)) continue;
 
         try {
-          const resp = await fetch(`/api/point-cloud/tile/${ix}/${iy}?tile_size=${currentTileSize}&max_points=${currentMaxPts}`);
+          const resp = await fetch(`/api/point-cloud/tile/${ix}/${iy}?tile_size=${tileSize}&max_points=50000`);
           const data = await resp.json();
           if (data.error || !data.points.length) continue;
 
-          const positions = new Float32Array(data.points.flat());
-          const colors = new Float32Array(data.colors.flat());
+          const geom = new THREE.BufferGeometry();
+          geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(data.points.flat()), 3));
+          geom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(data.colors.flat()), 3));
 
-          const geometry = new THREE.BufferGeometry();
-          geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-          geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-
-          const material = new THREE.PointsMaterial({
-            size: parseFloat(document.getElementById('pointSize').value),
-            vertexColors: true,
-            sizeAttenuation: true,
-          });
-
-          const points = new THREE.Points(geometry, material);
+          const mat = new THREE.PointsMaterial({ size: 0.8, vertexColors: true, sizeAttenuation: true });
+          const points = new THREE.Points(geom, mat);
           scene.add(points);
           tileCache[key] = points;
-          loadedTiles.add(key);
-          totalLoadedPts += data.count;
-          loaded++;
-        } catch (e) {
-          console.warn(`瓦片 ${key} 加载失败:`, e);
-        }
+          totalLoaded += data.count;
+        } catch (e) { /* ignore */ }
       }
 
-      if (loaded > 0) {
-        document.getElementById('loadedTiles').textContent = loadedTiles.size;
-        document.getElementById('loadedPoints').textContent = totalLoadedPts.toLocaleString();
-      }
+      document.getElementById('loaded').textContent = totalLoaded.toLocaleString();
     }
 
-    // 控件事件
-    document.getElementById('tileSize').addEventListener('input', (e) => {
-      document.getElementById('tileSizeValue').textContent = e.target.value + 'm';
-      currentTileSize = parseFloat(e.target.value);
-    });
-    document.getElementById('maxPts').addEventListener('input', (e) => {
-      document.getElementById('maxPtsValue').textContent = e.target.value;
-      currentMaxPts = parseInt(e.target.value);
-    });
-    document.getElementById('reloadBtn').addEventListener('click', loadTileList);
-    document.getElementById('pointSize').addEventListener('input', (e) => {
-      document.getElementById('sizeValue').textContent = e.target.value;
-      const size = parseFloat(e.target.value);
-      for (const key in tileCache) tileCache[key].material.size = size;
-    });
-
-    // 初始化
+    // 启动
     init();
     loadTileList();
   </script>
