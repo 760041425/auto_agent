@@ -1241,15 +1241,25 @@ async function generateVerifyReport(imageId) {
 let pcScene, pcCamera, pcRenderer, pcControls, pcTileCache = {}, pcTileMeta = [], pcTileSize = 50, pcInitialized = false, pcLoading = false;
 
 function initPointCloud() {
-  if (pcInitialized) return;
+  console.log('[PC] initPointCloud called, pcInitialized=', pcInitialized);
+  if (pcInitialized) {
+    // 已初始化但可能没加载数据（首次 tab 切换）
+    if (!Object.keys(pcTileCache).length && !pcLoading) {
+      console.log('[PC] already initialized but no tiles, loading...');
+      loadPointCloud();
+    }
+    return;
+  }
   pcInitialized = true;
 
   // 等待容器可见后初始化（tab 切换后 display: none → block）
   let retries = 0;
   const tryInit = () => {
     const c = document.getElementById('pc-canvas-container');
+    console.log('[PC] tryInit retry=' + retries + ', clientWidth=' + (c ? c.clientWidth : 'null'));
     if (!c || c.clientWidth === 0) {
       if (++retries < 50) return setTimeout(tryInit, 100);
+      console.warn('[PC] container not visible after 5s');
       return;
     }
     initScene(c);
