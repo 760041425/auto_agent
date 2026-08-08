@@ -649,13 +649,10 @@ def evaluate_local_coordinate_consistency(
 
 
 def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> dict:
-    """单点坐标交叉验证：H→SLAM 世界坐标 vs NPY 世界坐标 + 误差（米）。
+    """单点坐标交叉验证。
 
-    对齐 slam-map 的显示方式：
-    - 显示 H(pixel) 计算的世界坐标（SLAM XY）
-    - 显示 NPY 实际的世界坐标（XYZ）
-    - 显示两者误差（米）
-    - 同时保留 PnP 重投影像素误差作为辅助
+    用 PnP 位姿 + NPY 3D 点反算世界坐标，与 NPY 实际坐标比较。
+    这是最准确的方法，因为 PnP 位姿比 homography 更可靠。
     """
     base = {
         "status": "not_available",
@@ -678,9 +675,7 @@ def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> di
         if not path.is_absolute():
             path = Path.cwd() / path
         projection_xyz = np.load(path, mmap_mode="r")
-        # 单应矩阵 + 平面参数 + PnP 位姿
-        homography = np.asarray(context.get("homography"), dtype=np.float64).reshape(3, 3)
-        plane_params = context.get("plane_params")
+        # PnP 位姿 + 内参
         rvec = np.asarray(context.get("rvec", []), dtype=np.float64).reshape(3, 1)
         tvec = np.asarray(context.get("tvec", []), dtype=np.float64).reshape(3, 1)
         K = np.asarray(context.get("K", []), dtype=np.float64).reshape(3, 3)
@@ -699,43 +694,44 @@ def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> di
     if not np.all(np.isfinite(npy_xyz)) or np.allclose(npy_xyz, 0.0):
         return {**base, "reason": "projection_npy_pixel_invalid"}
 
-    # === 1. H→SLAM 世界坐标（像素 → 平面坐标）===
-    mapped = homography @ np.array([pixel_x, pixel_y, 1.0])
-    if not np.all(np.isfinite(mapped)) or abs(mapped[2]) < 1e-12:
-        return {**base, "reason": "homography_projection_invalid"}
-    slam_x, slam_y = mapped[0] / mapped[2], mapped[1] / mapped[2]
-
-    # 如果有平面参数，将 NPY 点投影到同一平面框架后再比较
-    if plane_params is not None:
-        try:
-            from services.localizer.plane_detection import project_points_to_plane
-            npy_projected = project_points_to_plane(npy_xyz.reshape(1, 3), tuple(plane_params))
-            npy_plane_xy = npy_projected[0]
-        except Exception:
-            npy_plane_xy = npy_xyz[:2]
-    else:
-        npy_plane_xy = npy_xyz[:2]
-
-    # 误差（米）：H→SLAM XY vs NPY 平面坐标 XY
-    error_m = float(np.linalg.norm(np.array([slam_x, slam_y]) - npy_plane_xy))
-
-    # === 2. PnP 重投影误差（像素）辅助验证===
+    # === 用 PnP 位姿重投影 NPY 3D 点到像素 ===
     error_px = None
+    error_m = None
+    slam_xy = None
+
     try:
         proj_pts, _ = cv2.projectPoints(
             npy_xyz.reshape(1, 1, 3), rvec, tvec, K, None
         )
         proj_px = proj_pts.reshape(2)
+        # 像素误差
         error_px = float(np.sqrt((proj_px[0] - pixel_x)**2 + (proj_px[1] - pixel_y)**2))
+
+        # 用 PnP 位姿 + 像素反算世界坐标（假设点在地面平面 Z=0）
+        # 从相机中心穿过像素的射线与 Z=0 平面求交
+        R = cv2.Rodrigues(rvec)[0]
+        K_inv = np.linalg.inv(K)
+        # 射线方向（世界坐标系）
+        ray_dir = R.T @ (K_inv @ np.array([pixel_x, pixel_y, 1.0]))
+        # 相机中心（世界坐标系）
+        cam_center = -R.T @ tvec.flatten()
+        # 与 Z=0 平面求交: cam_center[2] + t * ray_dir[2] = 0
+        if abs(ray_dir[2]) > 1e-6:
+            t_param = -cam_center[2] / ray_dir[2]
+            intersection = cam_center + t_param * ray_dir
+            calculated_xy = intersection[:2]
+            slam_xy = [round(float(calculated_xy[0]), 3), round(float(calculated_xy[1]), 3)]
+            # 米制误差
+            error_m = float(np.linalg.norm(calculated_xy - npy_xyz[:2]))
     except Exception:
         pass
 
     return {
         **base,
-        "status": "available",
-        "slam_xy": [round(float(slam_x), 3), round(float(slam_y), 3)],
+        "status": "available" if error_px is not None else "not_available",
+        "slam_xy": slam_xy,
         "npy_xyz": [round(float(npy_xyz[0]), 3), round(float(npy_xyz[1]), 3), round(float(npy_xyz[2]), 3)],
-        "error_m": round(error_m, 3),
+        "error_m": round(error_m, 3) if error_m is not None else None,
         "error_px": round(error_px, 1) if error_px is not None else None,
-        "note": "H→SLAM XY vs NPY XY（地面平面框架）",
+        "note": "PnP位姿+射线平面求交 vs NPY XY" if slam_xy else "PnP重投影验证",
     }
