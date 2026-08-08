@@ -707,22 +707,34 @@ def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> di
         # 像素误差
         error_px = float(np.sqrt((proj_px[0] - pixel_x)**2 + (proj_px[1] - pixel_y)**2))
 
-        # 用 PnP 位姿 + 像素反算世界坐标（假设点在地面平面 Z=0）
-        # 从相机中心穿过像素的射线与 Z=0 平面求交
+        # 用 PnP 位姿 + 像素反算世界坐标
+        # 从相机中心穿过像素的射线与检测到的地面平面求交
         R = cv2.Rodrigues(rvec)[0]
         K_inv = np.linalg.inv(K)
         # 射线方向（世界坐标系）
         ray_dir = R.T @ (K_inv @ np.array([pixel_x, pixel_y, 1.0]))
         # 相机中心（世界坐标系）
         cam_center = -R.T @ tvec.flatten()
-        # 与 Z=0 平面求交: cam_center[2] + t * ray_dir[2] = 0
-        if abs(ray_dir[2]) > 1e-6:
-            t_param = -cam_center[2] / ray_dir[2]
-            intersection = cam_center + t_param * ray_dir
-            calculated_xy = intersection[:2]
-            slam_xy = [round(float(calculated_xy[0]), 3), round(float(calculated_xy[1]), 3)]
-            # 米制误差
-            error_m = float(np.linalg.norm(calculated_xy - npy_xyz[:2]))
+
+        # 与检测到的平面求交: a*X + b*Y + c*Z + d = 0
+        plane_params = context.get("plane_params")
+        if plane_params is not None:
+            a, b, c, d = (float(p) for p in plane_params)
+            denom = a * ray_dir[0] + b * ray_dir[1] + c * ray_dir[2]
+            if abs(denom) > 1e-6:
+                t_param = -(a * cam_center[0] + b * cam_center[1] + c * cam_center[2] + d) / denom
+                intersection = cam_center + t_param * ray_dir
+                calculated_xy = intersection[:2]
+                slam_xy = [round(float(calculated_xy[0]), 3), round(float(calculated_xy[1]), 3)]
+                error_m = float(np.linalg.norm(calculated_xy - npy_xyz[:2]))
+        else:
+            # 无平面参数：回退到 Z=0
+            if abs(ray_dir[2]) > 1e-6:
+                t_param = -cam_center[2] / ray_dir[2]
+                intersection = cam_center + t_param * ray_dir
+                calculated_xy = intersection[:2]
+                slam_xy = [round(float(calculated_xy[0]), 3), round(float(calculated_xy[1]), 3)]
+                error_m = float(np.linalg.norm(calculated_xy - npy_xyz[:2]))
     except Exception:
         pass
 
