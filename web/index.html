@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LAS 3D 坐标查询系统</title>
 <link rel="stylesheet" href="/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
 </head>
 <body>
 <div id="app">
@@ -140,9 +148,6 @@
     </section>
 
     <section id="tab-pointcloud" class="tab-content">
-      <!-- Three.js + OrbitControls（点云渲染需要）-->
-      <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-      <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
       <h3 style="margin-bottom:0.5rem">3D 点云可视化</h3>
       <div style="margin-bottom:0.5rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
         <label style="font-size:0.82rem">瓦片大小:
@@ -171,6 +176,6 @@
   </main>
   <footer style="text-align:center;padding:1rem;color:#aaa;font-size:0.8rem">v6</footer>
 </div>
-<script src="/app_v10.js?v=23"></script>
+<script type="module" src="/app_v10.js?v=26"></script>
 </body>
 </html>

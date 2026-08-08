@@ -1,3 +1,6 @@
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
 const API = '/api';
 let currentImageId = null;
 
@@ -1239,6 +1242,8 @@ async function generateVerifyReport(imageId) {
 // 3D 点云（简化版，全自动加载）
 // =====================================================================
 let pcScene, pcCamera, pcRenderer, pcControls, pcTileCache = {}, pcTileMeta = [], pcTileSize = 50, pcInitialized = false, pcLoading = false;
+let pcLoadingTiles = false;       // 防止并发加载瓦片
+let pcLoadTimer = null;           // 防抖定时器
 
 function initPointCloud() {
   console.log('[PC] initPointCloud called, pcInitialized=', pcInitialized);
@@ -1274,11 +1279,13 @@ function initPointCloud() {
     pcRenderer.setSize(c.clientWidth, c.clientHeight);
     pcRenderer.setPixelRatio(window.devicePixelRatio);
     c.appendChild(pcRenderer.domElement);
-    pcControls = new THREE.OrbitControls(pcCamera, pcRenderer.domElement);
+    pcControls = new OrbitControls(pcCamera, pcRenderer.domElement);
     pcControls.enableDamping = true;
     pcScene.add(new THREE.AxesHelper(30));
     pcScene.add(new THREE.GridHelper(300, 30, 0x444466, 0x333355));
     console.log('[PC] scene initialized');
+
+    loadPointCloud();
 
     addEventListener('resize', () => {
       if (!pcCamera) return;
@@ -1286,7 +1293,14 @@ function initPointCloud() {
       pcCamera.updateProjectionMatrix();
       pcRenderer.setSize(c.clientWidth, c.clientHeight);
     });
-    pcControls.addEventListener('change', loadNearbyTiles);
+    // 防抖：OrbitControls change 事件在高频触发时，延迟 300ms 才真正加载
+    pcControls.addEventListener('change', () => {
+      if (pcLoadTimer) clearTimeout(pcLoadTimer);
+      pcLoadTimer = setTimeout(() => {
+        pcLoadTimer = null;
+        loadNearbyTiles();
+      }, 300);
+    });
     (function animate(){ requestAnimationFrame(animate); if(pcControls) pcControls.update(); if(pcRenderer) pcRenderer.render(pcScene, pcCamera); })();
   }
 
@@ -1333,6 +1347,8 @@ async function loadPointCloud() {
 
 async function loadNearbyTiles() {
   if (!pcTileMeta.length || !pcControls || pcLoading) { console.log('[PC] loadNearbyTiles skip: meta=' + pcTileMeta.length + ' loading=' + pcLoading); return; }
+  if (pcLoadingTiles) { console.log('[PC] loadNearbyTiles already running, skip'); return; }
+  pcLoadingTiles = true;
   const camX = pcControls.target.x, camY = pcControls.target.y;
   const cix = Math.floor(camX / pcTileSize), ciy = Math.floor(camY / pcTileSize);
   console.log('[PC] loadNearbyTiles: cam=' + camX.toFixed(1) + ',' + camY.toFixed(1) + ' tile=' + cix + ',' + ciy);
@@ -1361,4 +1377,23 @@ async function loadNearbyTiles() {
   console.log('[PC] loadNearbyTiles done, loaded=' + loaded + ' total cached=' + Object.keys(pcTileCache).length);
   document.getElementById('pc-loaded-tiles').textContent = Object.keys(pcTileCache).length;
   document.getElementById('pc-loaded-pts').textContent = Object.values(pcTileCache).reduce((s,p)=>s+p.geometry.attributes.position.count,0).toLocaleString();
+  pcLoadingTiles = false;
 }
+
+// 暴露给 inline onclick 处理程序（模块作用域内全局不可见）
+window.showDetail = showDetail;
+window.startCompare = startCompare;
+window.startCompareFromList = startCompareFromList;
+window.toggleTaskDetail = toggleTaskDetail;
+window.selectLocalizeImage = selectLocalizeImage;
+window.startPreprocessBuild = startPreprocessBuild;
+window.startPreprocessRender = startPreprocessRender;
+window.startPreprocessFeature = startPreprocessFeature;
+window.startPreprocessAce = startPreprocessAce;
+window.startPreprocess = startPreprocess;
+window.refreshLocalizeImages = refreshLocalizeImages;
+window.startLocalize = startLocalize;
+window.runE2ETest = runE2ETest;
+window.verifyCoordinatePoint = verifyCoordinatePoint;
+window.refinePose = refinePose;
+window.generateVerifyReport = generateVerifyReport;
