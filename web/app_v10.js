@@ -1266,6 +1266,7 @@ function initPointCloud() {
   };
 
   function initScene(c) {
+    console.log('[PC] initScene, container size=' + c.clientWidth + 'x' + c.clientHeight);
     pcScene = new THREE.Scene();
     pcScene.background = new THREE.Color(0x1a1a2e);
     pcCamera = new THREE.PerspectiveCamera(60, c.clientWidth / c.clientHeight, 0.1, 10000);
@@ -1290,6 +1291,7 @@ function initPointCloud() {
 
   // 启动：延迟 50ms 后尝试初始化
   setTimeout(tryInit, 50);
+  console.log('[PC] initPointCloud done, waiting for tryInit');
 }
 
 async function loadPointCloud() {
