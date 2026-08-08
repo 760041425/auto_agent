@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>3D 点云可视化</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #eee; overflow: hidden; }
+    #container { width: 100vw; height: 100vh; }
+    #controls {
+      position: fixed; top: 16px; left: 16px; z-index: 10;
+      background: rgba(30, 30, 50, 0.9); padding: 16px; border-radius: 8px;
+      min-width: 220px; box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+    }
+    #controls h2 { font-size: 14px; margin-bottom: 12px; color: #fff; }
+    .control-row { margin-bottom: 10px; }
+    .control-row label { display: block; font-size: 12px; color: #aaa; margin-bottom: 4px; }
+    .control-row input[type="range"] { width: 100%; }
+    .control-row .value { font-size: 12px; color: #4fc3f7; }
+    button {
+      width: 100%; padding: 8px; margin-top: 8px; border: none; border-radius: 4px;
+      background: #1976d2; color: #fff; cursor: pointer; font-size: 13px;
+    }
+    button:hover { background: #1565c0; }
+    #stats {
+      position: fixed; bottom: 16px; left: 16px; z-index: 10;
+      background: rgba(30, 30, 50, 0.9); padding: 12px; border-radius: 6px;
+      font-size: 12px; line-height: 1.6;
+    }
+    #stats span { color: #4fc3f7; }
+    #loading {
+      position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      font-size: 18px; color: #4fc3f7;
+    }
+  </style>
+</head>
+<body>
+  <div id="container"></div>
+
+  <div id="controls">
+    <h2>3D 点云</h2>
+    <div class="control-row">
+      <label>最大点数: <span class="value" id="pointsValue">100000</span></label>
+      <input type="range" id="maxPoints" min="1000" max="500000" step="1000" value="100000">
+    </div>
+    <div class="control-row">
+      <label>点大小: <span class="value" id="sizeValue">1.0</span></label>
+      <input type="range" id="pointSize" min="0.1" max="5" step="0.1" value="1.0">
+    </div>
+    <button id="reloadBtn">重新加载</button>
+  </div>
+
+  <div id="stats" style="display:none">
+    总点数: <span id="totalPoints">-</span><br>
+    采样点数: <span id="sampledPoints">-</span><br>
+    范围 X: [<span id="minX">-</span>, <span id="maxX">-</span>]<br>
+    范围 Y: [<span id="minY">-</span>, <span id="maxY">-</span>]<br>
+    范围 Z: [<span id="minZ">-</span>, <span id="maxZ">-</span>]
+  </div>
+
+  <div id="loading">加载中...</div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    let scene, camera, renderer, controls, pointsObj;
+
+    function init() {
+      const container = document.getElementById('container');
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x1a1a2e);
+
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 10000);
+      camera.position.set(100, 100, 100);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(window.devicePixelRatio);
+      container.appendChild(renderer.domElement);
+
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+
+      // 坐标轴
+      const axes = new THREE.AxesHelper(50);
+      scene.add(axes);
+
+      // 网格
+      const grid = new THREE.GridHelper(200, 20, 0x444466, 0x333355);
+      scene.add(grid);
+
+      window.addEventListener('resize', onResize);
+      animate();
+    }
+
+    function onResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    async function loadPointCloud(maxPoints) {
+      document.getElementById('loading').style.display = 'block';
+      document.getElementById('stats').style.display = 'none';
+
+      // 移除旧点云
+      if (pointsObj) {
+        scene.remove(pointsObj);
+        pointsObj.geometry.dispose();
+        pointsObj.material.dispose();
+        pointsObj = null;
+      }
+
+      try {
+        const resp = await fetch(`/api/point-cloud/sampled?max_points=${maxPoints}`);
+        const data = await resp.json();
+
+        if (data.error) {
+          document.getElementById('loading').textContent = '错误: ' + data.error;
+          return;
+        }
+
+        const positions = new Float32Array(data.points.flat());
+        const colors = new Float32Array(data.colors.flat());
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const material = new THREE.PointsMaterial({
+          size: parseFloat(document.getElementById('pointSize').value),
+          vertexColors: true,
+          sizeAttenuation: true,
+        });
+
+        pointsObj = new THREE.Points(geometry, material);
+        scene.add(pointsObj);
+
+        // 更新统计
+        document.getElementById('totalPoints').textContent = data.total_points.toLocaleString();
+        document.getElementById('sampledPoints').textContent = data.sampled_points.toLocaleString();
+        if (data.bounds && data.bounds.min) {
+          document.getElementById('minX').textContent = data.bounds.min[0].toFixed(1);
+          document.getElementById('maxX').textContent = data.bounds.max[0].toFixed(1);
+          document.getElementById('minY').textContent = data.bounds.min[1].toFixed(1);
+          document.getElementById('maxY').textContent = data.bounds.max[1].toFixed(1);
+          document.getElementById('minZ').textContent = data.bounds.min[2].toFixed(1);
+          document.getElementById('maxZ').textContent = data.bounds.max[2].toFixed(1);
+        }
+        document.getElementById('stats').style.display = 'block';
+        document.getElementById('loading').style.display = 'none';
+
+        // 自动调整相机
+        if (data.bounds && data.bounds.min) {
+          const cx = (data.bounds.min[0] + data.bounds.max[0]) / 2;
+          const cy = (data.bounds.min[1] + data.bounds.max[1]) / 2;
+          const cz = (data.bounds.min[2] + data.bounds.max[2]) / 2;
+          const size = Math.max(
+            data.bounds.max[0] - data.bounds.min[0],
+            data.bounds.max[1] - data.bounds.min[1],
+            data.bounds.max[2] - data.bounds.min[2]
+          );
+          controls.target.set(cx, cy, cz);
+          camera.position.set(cx + size, cy + size, cz + size);
+          controls.update();
+        }
+
+      } catch (e) {
+        document.getElementById('loading').textContent = '加载失败: ' + e.message;
+      }
+    }
+
+    // 控件事件
+    document.getElementById('maxPoints').addEventListener('input', (e) => {
+      document.getElementById('pointsValue').textContent = e.target.value;
+    });
+    document.getElementById('reloadBtn').addEventListener('click', () => {
+      loadPointCloud(parseInt(document.getElementById('maxPoints').value));
+    });
+    document.getElementById('pointSize').addEventListener('input', (e) => {
+      document.getElementById('sizeValue').textContent = e.target.value;
+      if (pointsObj) pointsObj.material.size = parseFloat(e.target.value);
+    });
+
+    // 初始化
+    init();
+    loadPointCloud(100000);
+  </script>
+</body>
+</html>
