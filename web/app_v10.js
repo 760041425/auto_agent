@@ -699,17 +699,21 @@ async function verifyCoordinatePoint(event, taskId, resultIndex, targetId) {
     if (payload.status !== 'available') {
       throw new Error(payload.reason || '坐标源不完整');
     }
-    let html = '<div style="font-weight:bold;margin-bottom:0.25rem">坐标交叉验证（PnP重投影）</div>';
+    let html = '<div style="font-weight:bold;margin-bottom:0.25rem">坐标交叉验证（单应性 H→SLAM）</div>';
     html += '<div>选点: <b>(' + payload.u.toFixed(4) + ', ' + payload.v.toFixed(4) + ')</b></div>';
-    if (payload.npy_point) {
-      html += '<div>NPY XYZ: <b>(' + payload.npy_point.x.toFixed(2) + ', ' + payload.npy_point.y.toFixed(2) + ', ' + payload.npy_point.z.toFixed(2) + ')</b></div>';
+    if (payload.slam_xy) {
+      html += '<div>H→SLAM XY: <b>(' + payload.slam_xy[0].toFixed(2) + ', ' + payload.slam_xy[1].toFixed(2) + ') m</b></div>';
     }
-    if (payload.difference_px !== undefined && payload.difference_px !== null) {
-      html += '<div>重投影误差: <b>' + payload.difference_px.toFixed(1) + ' px</b></div>';
-    } else if (payload.difference_m !== undefined && payload.difference_m !== null) {
-      html += '<div>坐标差: <b>' + Number(payload.difference_m).toFixed(3) + ' m</b></div>';
+    if (payload.npy_xyz) {
+      html += '<div>NPY XYZ: <b>(' + payload.npy_xyz[0].toFixed(2) + ', ' + payload.npy_xyz[1].toFixed(2) + ', ' + payload.npy_xyz[2].toFixed(2) + ')</b></div>';
     }
-    html += '<div style="font-size:0.7rem;color:#666;margin-top:0.2rem">PnP位姿重投影NPY点到像素，与查询像素比较</div>';
+    if (payload.error_m !== undefined && payload.error_m !== null) {
+      html += '<div>坐标误差: <b>' + payload.error_m.toFixed(3) + ' m</b></div>';
+    }
+    if (payload.error_px !== undefined && payload.error_px !== null) {
+      html += '<div style="font-size:0.7rem;color:#666">PnP重投影误差: ' + payload.error_px.toFixed(1) + ' px</div>';
+    }
+    html += '<div style="font-size:0.7rem;color:#666;margin-top:0.2rem">（' + (payload.note || 'H→SLAM XY vs NPY XY') + '）</div>';
     target.innerHTML = html;
   } catch (error) {
     target.innerHTML = '<span style="color:#c62828">坐标交叉验证失败：' + escapeLocalizeHtml(error.message) + '</span>';

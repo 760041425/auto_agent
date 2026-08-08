@@ -321,12 +321,13 @@ def build_local_coordinate_transform_context(
     plane_segmentation_meta = {"status": "skipped"}
 
     if plane_distance_threshold is not None:
-        # 优先用密集点云检测平面（更准确），否则用稀疏特征点
-        plane_source = dense_points if dense_points is not None and len(dense_points) >= 4 else world
+        # 优先用密集点云检测平面（对齐 slam-map），否则用稀疏特征点
+        plane_source = dense_points if dense_points is not None and len(dense_points) >= 100 else world
         plane_params, _ = segment_plane(
             plane_source,
             distance_threshold=plane_distance_threshold,
             seed=plane_seed,
+            use_z_xy_fit=True,  # 对齐 slam-map 的 Z=f(X,Y) 约束
         )
         if plane_params is not None:
             # 用检测出的平面计算 world 中哪些点是地面点
@@ -648,10 +649,13 @@ def evaluate_local_coordinate_consistency(
 
 
 def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> dict:
-    """在本地任务产物上执行单点坐标交叉验证。
+    """单点坐标交叉验证：H→SLAM 世界坐标 vs NPY 世界坐标 + 误差（米）。
 
-    使用 PnP 位姿 + K 矩阵重投影 NPY 3D 点到像素，与查询像素比较。
-    这比 homography 更准确，因为 PnP 使用真 3D 点。
+    对齐 slam-map 的显示方式：
+    - 显示 H(pixel) 计算的世界坐标（SLAM XY）
+    - 显示 NPY 实际的世界坐标（XYZ）
+    - 显示两者误差（米）
+    - 同时保留 PnP 重投影像素误差作为辅助
     """
     base = {
         "status": "not_available",
@@ -659,10 +663,10 @@ def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> di
         "absolute_accuracy": False,
         "u": float(u),
         "v": float(v),
-        "pixel_to_slam": None,
-        "npy_point": None,
-        "difference_px": None,
-        "note": "PnP pose reprojection check; not independent pose accuracy",
+        "slam_xy": None,
+        "npy_xyz": None,
+        "error_m": None,
+        "error_px": None,
     }
     if not isinstance(context, dict) or context.get("status") != "ready":
         return {**base, "reason": "coordinate_transform_context_not_ready"}
@@ -674,7 +678,9 @@ def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> di
         if not path.is_absolute():
             path = Path.cwd() / path
         projection_xyz = np.load(path, mmap_mode="r")
-        # PnP 位姿
+        # 单应矩阵 + 平面参数 + PnP 位姿
+        homography = np.asarray(context.get("homography"), dtype=np.float64).reshape(3, 3)
+        plane_params = context.get("plane_params")
         rvec = np.asarray(context.get("rvec", []), dtype=np.float64).reshape(3, 1)
         tvec = np.asarray(context.get("tvec", []), dtype=np.float64).reshape(3, 1)
         K = np.asarray(context.get("K", []), dtype=np.float64).reshape(3, 3)
@@ -691,36 +697,45 @@ def query_local_coordinate_transform(context: dict, *, u: float, v: float) -> di
         projection_xyz[int(pixel_y), int(pixel_x)], dtype=np.float64
     )
     if not np.all(np.isfinite(npy_xyz)) or np.allclose(npy_xyz, 0.0):
-        return {
-            **base,
-            "reason": "projection_npy_pixel_invalid",
-        }
-    npy_point = {
-        "x": round(float(npy_xyz[0]), 3),
-        "y": round(float(npy_xyz[1]), 3),
-        "z": round(float(npy_xyz[2]), 3),
-    }
+        return {**base, "reason": "projection_npy_pixel_invalid"}
 
-    # 用 PnP 位姿重投影 NPY 3D 点到像素
+    # === 1. H→SLAM 世界坐标（像素 → 平面坐标）===
+    mapped = homography @ np.array([pixel_x, pixel_y, 1.0])
+    if not np.all(np.isfinite(mapped)) or abs(mapped[2]) < 1e-12:
+        return {**base, "reason": "homography_projection_invalid"}
+    slam_x, slam_y = mapped[0] / mapped[2], mapped[1] / mapped[2]
+
+    # 如果有平面参数，将 NPY 点投影到同一平面框架后再比较
+    if plane_params is not None:
+        try:
+            from services.localizer.plane_detection import project_points_to_plane
+            npy_projected = project_points_to_plane(npy_xyz.reshape(1, 3), tuple(plane_params))
+            npy_plane_xy = npy_projected[0]
+        except Exception:
+            npy_plane_xy = npy_xyz[:2]
+    else:
+        npy_plane_xy = npy_xyz[:2]
+
+    # 误差（米）：H→SLAM XY vs NPY 平面坐标 XY
+    error_m = float(np.linalg.norm(np.array([slam_x, slam_y]) - npy_plane_xy))
+
+    # === 2. PnP 重投影误差（像素）辅助验证===
+    error_px = None
     try:
         proj_pts, _ = cv2.projectPoints(
             npy_xyz.reshape(1, 1, 3), rvec, tvec, K, None
         )
         proj_px = proj_pts.reshape(2)
-        # 差异（像素）
-        diff_px = np.sqrt((proj_px[0] - pixel_x)**2 + (proj_px[1] - pixel_y)**2)
-        return {
-            **base,
-            "status": "available",
-            "npy_point": npy_point,
-            "projected_px": [round(float(proj_px[0]), 1), round(float(proj_px[1]), 1)],
-            "query_px": [round(float(pixel_x), 1), round(float(pixel_y), 1)],
-            "difference_px": round(float(diff_px), 1),
-            "reason": None,
-        }
+        error_px = float(np.sqrt((proj_px[0] - pixel_x)**2 + (proj_px[1] - pixel_y)**2))
     except Exception:
-        return {
-            **base,
-            "npy_point": npy_point,
-            "reason": "reprojection_failed",
-        }
+        pass
+
+    return {
+        **base,
+        "status": "available",
+        "slam_xy": [round(float(slam_x), 3), round(float(slam_y), 3)],
+        "npy_xyz": [round(float(npy_xyz[0]), 3), round(float(npy_xyz[1]), 3), round(float(npy_xyz[2]), 3)],
+        "error_m": round(error_m, 3),
+        "error_px": round(error_px, 1) if error_px is not None else None,
+        "note": "H→SLAM XY vs NPY XY（地面平面框架）",
+    }
