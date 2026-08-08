@@ -16,13 +16,16 @@ _TILE_SIZE = 50.0  # 网格大小（米）
 
 
 def _load_las_points(las_path: str):
-    """读取 LAS 文件，返回局部坐标 + 颜色。"""
+    """读取 LAS 文件，返回局部坐标 + 颜色。
+
+    注意：LAS 文件已经是局部坐标（octree 构建时已减 offset），无需再减。
+    """
     import laspy
 
     las = laspy.read(str(las_path))
-    xs = np.array(las.x) - _OFFSET_XYZ[0]
-    ys = np.array(las.y) - _OFFSET_XYZ[1]
-    zs = np.array(las.z) - _OFFSET_XYZ[2]
+    xs = np.array(las.x)
+    ys = np.array(las.y)
+    zs = np.array(las.z)
 
     if hasattr(las, 'red') and hasattr(las, 'green') and hasattr(las, 'blue'):
         r = np.array(las.red).astype(np.float64) / 65535.0
