@@ -1272,12 +1272,15 @@ function initPointCloud() {
     pcCamera = new THREE.PerspectiveCamera(60, c.clientWidth / c.clientHeight, 0.1, 10000);
     pcRenderer = new THREE.WebGLRenderer({ antialias: true });
     pcRenderer.setSize(c.clientWidth, c.clientHeight);
-    pcRenderer.setPixelRatio(devicePixelRatio);
+    pcRenderer.setPixelRatio(window.devicePixelRatio);
     c.appendChild(pcRenderer.domElement);
     pcControls = new THREE.OrbitControls(pcCamera, pcRenderer.domElement);
     pcControls.enableDamping = true;
     pcScene.add(new THREE.AxesHelper(30));
     pcScene.add(new THREE.GridHelper(300, 30, 0x444466, 0x333355));
+    console.log('[PC] scene initialized, calling loadPointCloud');
+    loadPointCloud();
+  }
     addEventListener('resize', () => {
       if (!pcCamera) return;
       pcCamera.aspect = c.clientWidth / c.clientHeight;
@@ -1295,14 +1298,18 @@ function initPointCloud() {
 }
 
 async function loadPointCloud() {
-  if (pcLoading) return;
+  console.log('[PC] loadPointCloud start');
+  if (pcLoading) { console.log('[PC] already loading, skip'); return; }
   pcLoading = true;
   document.getElementById('pc-loading').style.display = 'block';
   for (const k in pcTileCache) { pcScene.remove(pcTileCache[k]); pcTileCache[k].geometry.dispose(); pcTileCache[k].material.dispose(); }
   pcTileCache = {};
   pcTileMeta = [];
   try {
-    const d = await fetch(`/api/point-cloud/tiles?tile_size=${pcTileSize}`).then(r => r.json());
+    const url = `/api/point-cloud/tiles?tile_size=${pcTileSize}`;
+    console.log('[PC] fetching:', url);
+    const d = await fetch(url).then(r => r.json());
+    console.log('[PC] tiles response:', d.tiles ? d.tiles.length : 'no tiles', 'error:', d.error);
     if (d.error) { document.getElementById('pc-loading').textContent = '错误: ' + d.error; pcLoading = false; return; }
     pcTileMeta = d.tiles;
     document.getElementById('pc-total').textContent = d.total_points.toLocaleString();
@@ -1315,6 +1322,7 @@ async function loadPointCloud() {
     const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
     const cz = (Math.min(...pcTileMeta.flatMap(t=>[t.min[2],t.max[2]])) + Math.max(...pcTileMeta.flatMap(t=>[t.min[2],t.max[2]]))) / 2;
     const sz = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+    console.log('[PC] center:', cx.toFixed(1), cy.toFixed(1), cz.toFixed(1), 'size:', sz.toFixed(1));
     pcControls.target.set(cx, cy, cz);
     pcCamera.position.set(cx + sz * 0.8, cy + sz * 0.8, cz + sz * 0.8);
     pcControls.update();
@@ -1326,14 +1334,16 @@ async function loadPointCloud() {
 }
 
 async function loadNearbyTiles() {
-  if (!pcTileMeta.length || !pcControls || pcLoading) return;
+  if (!pcTileMeta.length || !pcControls || pcLoading) { console.log('[PC] loadNearbyTiles skip: meta=' + pcTileMeta.length + ' loading=' + pcLoading); return; }
   const camX = pcControls.target.x, camY = pcControls.target.y;
   const cix = Math.floor(camX / pcTileSize), ciy = Math.floor(camY / pcTileSize);
+  console.log('[PC] loadNearbyTiles: cam=' + camX.toFixed(1) + ',' + camY.toFixed(1) + ' tile=' + cix + ',' + ciy);
   const wanted = new Set();
   for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) wanted.add(`${cix+dx},${ciy+dy}`);
   for (const k of Object.keys(pcTileCache)) if (!wanted.has(k)) {
     pcScene.remove(pcTileCache[k]); pcTileCache[k].geometry.dispose(); pcTileCache[k].material.dispose(); delete pcTileCache[k];
   }
+  let loaded = 0;
   for (const k of wanted) {
     if (pcTileCache[k]) continue;
     const [ix, iy] = k.split(',').map(Number);
@@ -1347,8 +1357,10 @@ async function loadNearbyTiles() {
       const pts = new THREE.Points(g, new THREE.PointsMaterial({ size: 0.8, vertexColors: true, sizeAttenuation: true }));
       pcScene.add(pts);
       pcTileCache[k] = pts;
-    } catch(e) {}
+      loaded++;
+    } catch(e) { console.warn('[PC] tile ' + k + ' error:', e); }
   }
+  console.log('[PC] loadNearbyTiles done, loaded=' + loaded + ' total cached=' + Object.keys(pcTileCache).length);
   document.getElementById('pc-loaded-tiles').textContent = Object.keys(pcTileCache).length;
   document.getElementById('pc-loaded-pts').textContent = Object.values(pcTileCache).reduce((s,p)=>s+p.geometry.attributes.position.count,0).toLocaleString();
 }
