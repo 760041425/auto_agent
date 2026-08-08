@@ -1243,14 +1243,19 @@ let pcScene, pcCamera, pcRenderer, pcControls, pcTileCache = {}, pcTileMeta = []
 function initPointCloud() {
   if (pcInitialized) return;
   pcInitialized = true;
-  // 等待容器可见（tab 切换后 display: none → block）
+
+  // 等待容器可见后初始化（tab 切换后 display: none → block）
   let retries = 0;
   const tryInit = () => {
     const c = document.getElementById('pc-canvas-container');
     if (!c || c.clientWidth === 0) {
       if (++retries < 50) return setTimeout(tryInit, 100);
-      return; // 5s 后放弃
+      return;
     }
+    initScene(c);
+  };
+
+  function initScene(c) {
     pcScene = new THREE.Scene();
     pcScene.background = new THREE.Color(0x1a1a2e);
     pcCamera = new THREE.PerspectiveCamera(60, c.clientWidth / c.clientHeight, 0.1, 10000);
@@ -1269,9 +1274,12 @@ function initPointCloud() {
       pcRenderer.setSize(c.clientWidth, c.clientHeight);
     });
     pcControls.addEventListener('change', loadNearbyTiles);
-    (function a(){ requestAnimationFrame(a); if(pcControls) pcControls.update(); if(pcRenderer) pcRenderer.render(pcScene, pcCamera); })();
+    (function animate(){ requestAnimationFrame(animate); if(pcControls) pcControls.update(); if(pcRenderer) pcRenderer.render(pcScene, pcCamera); })();
     loadPointCloud();
-  }, 100);
+  }
+
+  // 启动：延迟 50ms 后尝试初始化
+  setTimeout(tryInit, 50);
 }
 
 async function loadPointCloud() {
