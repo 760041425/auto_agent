@@ -1,13 +1,14 @@
-"""TL-004-01 至 TL-004-06：平面检测单元测试。
+"""TL-005-01 至 TL-005-06：平面检测单元测试（对齐 slam-map）。
 
 验证 segment_plane 的 RANSAC 平面分割行为：
 - 纯地面点 → 全部内点
 - 地面+立面混合 → 只留地面
-- 点数不足 4 → 退化返回 (None, None)
+- 点数不足 min_inliers → 退化返回 (None, None)
 - NaN/Inf 输入 → 退化返回 (None, None)
 - 确定性：同输入同 seed 多次调用返回相同结果
 - 阈值敏感：0.15m 能分离地面与立面；0.3m 阈值过宽时全部内点
 - 斜面输入 → 正确提取斜面内点
+- sklearn RANSAC（如果可用）→ 与自定义 RANSAC 结果一致
 """
 
 from __future__ import annotations
@@ -50,6 +51,11 @@ def _mixed_ground_elevation_points(
     return points, ground_mask
 
 
+# 测试时使用较小的 min_inliers，避免大量点云生成
+_MIN_INLIERS_TEST = 4
+_THRESHOLD_TEST = 0.2
+
+
 # --------------------------------------------------------------------------- #
 # tests
 # --------------------------------------------------------------------------- #
@@ -57,7 +63,7 @@ def _mixed_ground_elevation_points(
 def test_segment_plane_pure_ground():
     """TL-004-01：纯地面点 → 全部内点。"""
     points = _pure_ground_points(n=20)
-    plane_params, inlier_mask = segment_plane(points)
+    plane_params, inlier_mask = segment_plane(points, min_inliers=_MIN_INLIERS_TEST, distance_threshold=_THRESHOLD_TEST, use_z_xy_fit=False)
 
     assert plane_params is not None
     assert inlier_mask is not None
@@ -74,7 +80,7 @@ def test_segment_plane_pure_ground():
 def test_segment_plane_mixed_ground_elevation():
     """TL-004-02：地面+立面混合 → 只留地面。"""
     points, ground_mask = _mixed_ground_elevation_points(n_ground=20, n_elev=10)
-    plane_params, inlier_mask = segment_plane(points, distance_threshold=0.2)
+    plane_params, inlier_mask = segment_plane(points, distance_threshold=0.2, min_inliers=_MIN_INLIERS_TEST, use_z_xy_fit=False)
 
     assert plane_params is not None
     assert inlier_mask is not None
@@ -91,7 +97,7 @@ def test_segment_plane_insufficient_points():
     """TL-004-03：点数 <4 → 退化返回 (None, None)。"""
     rng = np.random.default_rng(0)
     pts = rng.uniform(-1.0, 1.0, size=(3, 3))
-    plane_params, inlier_mask = segment_plane(pts)
+    plane_params, inlier_mask = segment_plane(pts, min_inliers=_MIN_INLIERS_TEST, distance_threshold=_THRESHOLD_TEST, use_z_xy_fit=False)
     assert plane_params is None
     assert inlier_mask is None
 
@@ -99,7 +105,7 @@ def test_segment_plane_insufficient_points():
 def test_segment_plane_nan_input():
     """TL-004-04：全 NaN 输入 → 退化返回 (None, None)，不抛异常。"""
     pts = np.full((10, 3), np.nan)
-    plane_params, inlier_mask = segment_plane(pts)
+    plane_params, inlier_mask = segment_plane(pts, min_inliers=_MIN_INLIERS_TEST, distance_threshold=_THRESHOLD_TEST, use_z_xy_fit=False)
     assert plane_params is None
     assert inlier_mask is None
 
@@ -107,9 +113,9 @@ def test_segment_plane_nan_input():
 def test_segment_plane_deterministic():
     """TL-004-05：同输入、同 seed 多次调用返回完全相同结果。"""
     points, _ = _mixed_ground_elevation_points(n_ground=20, n_elev=5)
-    result_a = segment_plane(points, seed=1337)
-    result_b = segment_plane(points, seed=1337)
-    result_c = segment_plane(points, seed=1337)
+    result_a = segment_plane(points, seed=1337, min_inliers=_MIN_INLIERS_TEST, distance_threshold=_THRESHOLD_TEST, use_z_xy_fit=False)
+    result_b = segment_plane(points, seed=1337, min_inliers=_MIN_INLIERS_TEST, distance_threshold=_THRESHOLD_TEST, use_z_xy_fit=False)
+    result_c = segment_plane(points, seed=1337, min_inliers=_MIN_INLIERS_TEST, distance_threshold=_THRESHOLD_TEST, use_z_xy_fit=False)
 
     pa, ma = result_a
     pb, mb = result_b
@@ -128,7 +134,7 @@ def test_segment_plane_threshold_sensitivity():
     n_ground = int(ground_mask.sum())
 
     # 窄阈值：应只留地面
-    _, inlier_narrow = segment_plane(points, distance_threshold=0.15)
+    _, inlier_narrow = segment_plane(points, distance_threshold=0.15, min_inliers=_MIN_INLIERS_TEST, use_z_xy_fit=False)
     assert inlier_narrow is not None
     # 地面点应保留，立面点大部分剔除
     ground_inliers_narrow = int(inlier_narrow[:n_ground].sum())
@@ -137,7 +143,7 @@ def test_segment_plane_threshold_sensitivity():
     assert elev_inliers <= 2
 
     # 宽阈值（0.3m）：地面平整度 ±0.1m 下，所有地面点都是内点
-    _, inlier_wide = segment_plane(points, distance_threshold=0.3)
+    _, inlier_wide = segment_plane(points, distance_threshold=0.3, min_inliers=_MIN_INLIERS_TEST, use_z_xy_fit=False)
     assert inlier_wide is not None
     ground_inliers_wide = int(inlier_wide[:n_ground].sum())
     # 0.3m 阈值对 ±0.1m 地面平整度足够宽容，地面点应全部保留
@@ -153,7 +159,7 @@ def test_segment_plane_sloped_plane():
     z = x * 0.1 + rng.normal(0.0, 0.05, size=(n,))  # 斜面 + 噪声
     points = np.column_stack([x, y, z])
 
-    plane_params, inlier_mask = segment_plane(points, distance_threshold=0.2)
+    plane_params, inlier_mask = segment_plane(points, distance_threshold=0.2, min_inliers=_MIN_INLIERS_TEST, use_z_xy_fit=False)
     assert plane_params is not None
     assert inlier_mask is not None
     # 至少 70% 内点

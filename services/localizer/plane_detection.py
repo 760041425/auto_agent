@@ -25,20 +25,27 @@ _logger = logging.getLogger("localizer.plane_detection")
 def segment_plane(
     points_3d: np.ndarray,
     *,
-    distance_threshold: float = 0.2,
-    min_inliers: int = 4,
-    max_iterations: int = 1000,
+    distance_threshold: float = 0.1,
+    min_inliers: int = 100,
+    max_iterations: int = 2000,
     seed: int = 1337,
+    use_z_xy_fit: bool = True,
 ) -> Tuple[Optional[Tuple[float, float, float, float]], Optional[np.ndarray]]:
     """RANSAC 拟合最佳平面，返回 (plane_params, inlier_mask)。
+
+    对齐 slam-map 的 detect_ground_plane_ransac 方法：
+    - 默认阈值 0.1m（严格）
+    - 最少 100 个内点
+    - 可选 Z=f(X,Y) 约束（适合地面平面）
 
     参数
     ----------
     points_3d : (N, 3) 世界坐标点
-    distance_threshold : 点到平面距离阈值（米），默认 0.2
-    min_inliers : 最少内点数，默认 4
-    max_iterations : RANSAC 最大迭代次数，默认 1000
+    distance_threshold : 点到平面距离阈值（米），默认 0.1
+    min_inliers : 最少内点数，默认 100
+    max_iterations : RANSAC 最大迭代次数，默认 2000
     seed : 随机种子，保证可复现
+    use_z_xy_fit : 是否使用 Z=f(X,Y) 约束（推荐地面检测）
 
     返回
     -------
@@ -60,6 +67,13 @@ def segment_plane(
     best_plane: Optional[np.ndarray] = None
 
     # 2. RANSAC 循环
+    # 优先尝试 sklearn RANSAC（更稳定，与 slam-map 一致）
+    if use_z_xy_fit:
+        result = _segment_plane_sklearn(pts, distance_threshold, min_inliers, max_iterations, seed)
+        if result[0] is not None:
+            return result
+
+    # 回退：自定义 RANSAC
     for _ in range(max_iterations):
         # 随机采 3 点
         sample_idx = rng.choice(n, size=3, replace=False)
@@ -136,6 +150,60 @@ def segment_plane(
         float(refined_d),
     )
     return plane_params, refined_inlier_mask
+
+
+def _segment_plane_sklearn(
+    pts: np.ndarray,
+    distance_threshold: float,
+    min_inliers: int,
+    max_iterations: int,
+    seed: int,
+) -> Tuple[Optional[Tuple[float, float, float, float]], Optional[np.ndarray]]:
+    """sklearn RANSAC 拟合地面平面（对齐 slam-map 方法）。
+
+    使用 Z=f(X,Y) 约束，适合地面平面检测。
+    """
+    try:
+        from sklearn.linear_model import RANSACRegressor, LinearRegression
+    except ImportError:
+        return None, None
+
+    if len(pts) < min_inliers:
+        return None, None
+
+    # Z = f(X,Y) 约束
+    X = pts[:, :2]  # Nx2
+    z = pts[:, 2]   # N
+
+    ransac = RANSACRegressor(
+        LinearRegression(),
+        min_samples=3,
+        residual_threshold=distance_threshold,
+        max_trials=max_iterations,
+        random_state=seed,
+    )
+
+    try:
+        ransac.fit(X, z)
+        inlier_mask = ransac.inlier_mask_
+        n_ground = int(inlier_mask.sum())
+
+        if n_ground < min_inliers:
+            return None, None
+
+        coef = ransac.estimator_.coef_
+        intercept = ransac.estimator_.intercept_
+
+        # 平面方程: z = coef[0]*x + coef[1]*y + intercept
+        # 标准形式: coef[0]*x + coef[1]*y - z + intercept = 0
+        plane_eq = np.array([coef[0], coef[1], -1.0, intercept])
+        norm = np.linalg.norm(plane_eq[:3])
+        if norm > 0:
+            plane_eq = plane_eq / norm
+
+        return tuple(float(p) for p in plane_eq), inlier_mask
+    except Exception:
+        return None, None
 
 
 def build_plane_coordinate_frame(
