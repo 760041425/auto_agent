@@ -15,6 +15,7 @@
       <button class="tab" data-tab="list">图像列表</button>
       <button class="tab" data-tab="tasks">任务记录</button>
       <button class="tab" data-tab="localize">视觉定位</button>
+      <button class="tab" data-tab="pointcloud">3D 点云</button>
     </nav>
   </header>
 
@@ -134,6 +135,33 @@
             <h4>匹配结果</h4>
             <div id="result-content"></div>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-pointcloud" class="tab-content">
+      <h3 style="margin-bottom:0.5rem">3D 点云可视化</h3>
+      <div style="margin-bottom:0.5rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+        <label style="font-size:0.82rem">瓦片大小:
+          <input id="pc-tile-size" type="number" value="50" min="10" max="100" step="10" style="width:60px;padding:2px 4px;border:1px solid #ccc;border-radius:4px;">
+          m
+        </label>
+        <label style="font-size:0.82rem">每瓦片点数:
+          <input id="pc-max-pts" type="number" value="50000" min="5000" max="200000" step="5000" style="width:80px;padding:2px 4px;border:1px solid #ccc;border-radius:4px;">
+        </label>
+        <label style="font-size:0.82rem">点大小:
+          <input id="pc-point-size" type="range" min="0.1" max="5" step="0.1" value="1.0" style="width:80px;vertical-align:middle;">
+          <span id="pc-point-size-val" style="color:#4fc3f7">1.0</span>
+        </label>
+        <button class="btn-primary" onclick="loadPointCloudTiles()" style="white-space:nowrap;padding:0.4rem 0.8rem;font-size:0.82rem">加载瓦片</button>
+      </div>
+      <div id="pc-loading" style="display:none;padding:1rem;text-align:center;color:#4fc3f7">加载中...</div>
+      <div id="pc-container" style="width:100%;height:calc(100vh - 220px);border:1px solid #333;border-radius:4px;overflow:hidden;position:relative;">
+        <div id="pc-canvas-container" style="width:100%;height:100%;"></div>
+        <div id="pc-stats" style="position:absolute;bottom:8px;left:8px;background:rgba(30,30,50,0.9);padding:8px;border-radius:4px;font-size:0.75rem;line-height:1.5;display:none;">
+          总点数: <span id="pc-total">-</span><br>
+          瓦片数: <span id="pc-tiles">-</span><br>
+          已加载: <span id="pc-loaded-tiles">-</span> 瓦片 / <span id="pc-loaded-pts">-</span> 点
         </div>
       </div>
     </section>
