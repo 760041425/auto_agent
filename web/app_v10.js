@@ -1278,9 +1278,8 @@ function initPointCloud() {
     pcControls.enableDamping = true;
     pcScene.add(new THREE.AxesHelper(30));
     pcScene.add(new THREE.GridHelper(300, 30, 0x444466, 0x333355));
-    console.log('[PC] scene initialized, calling loadPointCloud');
-    loadPointCloud();
-  }
+    console.log('[PC] scene initialized');
+
     addEventListener('resize', () => {
       if (!pcCamera) return;
       pcCamera.aspect = c.clientWidth / c.clientHeight;
@@ -1289,7 +1288,6 @@ function initPointCloud() {
     });
     pcControls.addEventListener('change', loadNearbyTiles);
     (function animate(){ requestAnimationFrame(animate); if(pcControls) pcControls.update(); if(pcRenderer) pcRenderer.render(pcScene, pcCamera); })();
-    loadPointCloud();
   }
 
   // 启动：延迟 50ms 后尝试初始化
