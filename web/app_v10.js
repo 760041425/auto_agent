@@ -19,7 +19,11 @@ document.addEventListener('DOMContentLoaded', () => {
       if (tab === 'list') loadImages();
       if (tab === 'tasks') loadTasks();
       if (tab === 'localize') loadLocalizeImages();
-      if (tab === 'pointcloud') initPointCloud();
+      if (tab === 'pointcloud') {
+        initPointCloud();
+        // 自动加载点云（数据在本地，无需上传）
+        setTimeout(() => loadPointCloudTiles(), 200);
+      }
     });
   });
 
