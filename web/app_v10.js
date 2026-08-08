@@ -699,13 +699,18 @@ async function verifyCoordinatePoint(event, taskId, resultIndex, targetId) {
     if (payload.status !== 'available') {
       throw new Error(payload.reason || '坐标源不完整');
     }
-    target.innerHTML =
-      '<div style="font-weight:bold;margin-bottom:0.25rem">坐标交叉验证（非绝对精度）</div>' +
-      '<div>选点: <b>(' + payload.u.toFixed(4) + ', ' + payload.v.toFixed(4) + ')</b></div>' +
-      '<div>H→SLAM XYZ: <b>' + formatCoordinateXYZ(payload.pixel_to_slam, ['slam_x', 'slam_y', 'slam_z']) + '</b></div>' +
-      '<div>NPY XYZ: <b>' + formatCoordinateXYZ(payload.npy_point, ['x', 'y', 'z']) + '</b></div>' +
-      '<div>坐标差: <b>' + Number(payload.difference_m).toFixed(3) + ' m</b></div>' +
-      '<div style="font-size:0.7rem;color:#666;margin-top:0.2rem">使用当前定位任务自产的单应矩阵与最终位姿投影 NPY；不依赖外部服务，也不替代独立位姿真值 Benchmark。</div>';
+    let html = '<div style="font-weight:bold;margin-bottom:0.25rem">坐标交叉验证（PnP重投影）</div>';
+    html += '<div>选点: <b>(' + payload.u.toFixed(4) + ', ' + payload.v.toFixed(4) + ')</b></div>';
+    if (payload.npy_point) {
+      html += '<div>NPY XYZ: <b>(' + payload.npy_point.x.toFixed(2) + ', ' + payload.npy_point.y.toFixed(2) + ', ' + payload.npy_point.z.toFixed(2) + ')</b></div>';
+    }
+    if (payload.difference_px !== undefined && payload.difference_px !== null) {
+      html += '<div>重投影误差: <b>' + payload.difference_px.toFixed(1) + ' px</b></div>';
+    } else if (payload.difference_m !== undefined && payload.difference_m !== null) {
+      html += '<div>坐标差: <b>' + Number(payload.difference_m).toFixed(3) + ' m</b></div>';
+    }
+    html += '<div style="font-size:0.7rem;color:#666;margin-top:0.2rem">PnP位姿重投影NPY点到像素，与查询像素比较</div>';
+    target.innerHTML = html;
   } catch (error) {
     target.innerHTML = '<span style="color:#c62828">坐标交叉验证失败：' + escapeLocalizeHtml(error.message) + '</span>';
   }
