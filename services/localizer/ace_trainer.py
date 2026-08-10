@@ -353,13 +353,28 @@ def train_ace_rgb(tile_index_path="projections/tile_index.json",
     model.train()
     for epoch in range(epochs):
         total_loss = 0
-        for img6ch, target in loader:
-            img_rgb = img6ch[:, :3, :, :]  # 仅用 RGB
-            pred = model(img_rgb)
-            target_ds = target[:, ::8, ::8]
-            mask = (target_ds.abs().sum(dim=1, keepdim=True) > 1e-6).float()
-            loss = (pred - target_ds).abs() * mask
-            loss = loss.sum() / max(mask.sum(), 1)
+        for batch in loader:
+            # 数据集返回 (six_ch, xyz_t, valid_t)
+            if len(batch) == 3:
+                img6ch, xyz_t, valid_t = batch
+                img6ch = img6ch.to(DEVICE)
+                xyz_t = xyz_t.to(DEVICE)
+                valid_t = valid_t.to(DEVICE)
+                img_rgb = img6ch[:, :3, :, :]  # 仅用 RGB
+                pred = model(img_rgb)
+                mask = valid_t.unsqueeze(1)  # (1, H/8, W/8)
+                loss = (pred - xyz_t).abs() * mask
+                loss = loss.sum() / max(mask.sum(), 1)
+            else:
+                img6ch, target = batch
+                img6ch = img6ch.to(DEVICE)
+                target = target.to(DEVICE)
+                img_rgb = img6ch[:, :3, :, :]
+                pred = model(img_rgb)
+                target_ds = target[:, ::8, ::8]
+                mask = (target_ds.abs().sum(dim=1, keepdim=True) > 1e-6).float()
+                loss = (pred - target_ds).abs() * mask
+                loss = loss.sum() / max(mask.sum(), 1)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
