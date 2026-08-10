@@ -59,6 +59,7 @@ query_image
 | E | 继承所选策略的验证 | 必须保留原指标类型和来源 |
 | 全部 | PnP 综合评分 + 质量门控 | `score = inlier_count / (reproj_error + 1e-6)`；`quality_passed` 表示是否通过三维门控 |
 | 前端人工选点 | 空间定位任务自产 H + 最终位姿 XYZ NPY | 本地展示 H→SLAM XYZ、NPY XYZ 及其米制差值；无需外部服务，只表示内部坐标一致性 |
+| 全部算法结果展示 | 契约归一化（`normalize_localization_result`）统一补齐结果字段 | 无坐标差判据产物时呈现「⚠ 无法判定」独立状态（徽章与判定卡均不显示 ✓），内点数/相似度/LAS 验证率仅作辅助诊断 |
 | 全部 | 独立 holdout 位姿（可选） | 平移误差（米）和旋转误差（度） |
 
 ### 日志分离
