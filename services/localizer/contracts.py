@@ -91,7 +91,17 @@ def normalize_localization_result(
     else:
         validations.setdefault(
             "coordinate_crosscheck",
-            _unavailable("local coordinate transform artifacts were not generated"),
+            {
+                **_unavailable(
+                    "local coordinate transform artifacts were not generated"
+                ),
+                "consistency": {
+                    **_unavailable(
+                        "multi-point coordinate difference was not evaluated "
+                        "without coordinate transform artifacts"
+                    ),
+                },
+            },
         )
 
     artifacts = dict(raw.get("artifacts") or {})
