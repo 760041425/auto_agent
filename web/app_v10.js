@@ -618,14 +618,23 @@ function localizeStatusBadge(result) {
   }
   var coordinate = result.coordinate_transform || (result.validations || {}).coordinate_crosscheck;
   var consistency = coordinate && coordinate.consistency;
-  var reliable = coordinate && coordinate.status === 'ready'
-    ? !!(consistency && consistency.status === 'available' && consistency.passed)
-    : result.reliable;
-  if (!reliable) {
+  var reliable = !!(coordinate && coordinate.status === 'ready'
+    && consistency && consistency.status === 'available' && consistency.passed);
+  if (reliable) {
+    return '<span class="status-badge completed">✓ 可信</span>';
+  }
+  if (consistency && consistency.status === 'available') {
     return '<span class="status-badge" style="background:#fff3e0;color:#e65100">⚠ 低可信</span>';
   }
-  return '<span class="status-badge completed">✓ 可信</span>';
+  return '<span class="status-badge" style="background:#fce4ec;color:#c62828">⚠ 无法判定</span>';
 }
+
+const LOCALIZE_REASON_MESSAGES = {
+  'coordinate_transform_context_not_ready': '坐标变换上下文未就绪',
+  'coordinate_transform_artifact_unavailable': '坐标变换产物不可用',
+  'insufficient_valid_projection_pixels': '有效投影像素不足',
+  'insufficient_valid_homography_samples': '有效单应样本不足'
+};
 
 function renderCoordinateReliabilityDecision(result) {
   var coordinate = result.coordinate_transform || (result.validations || {}).coordinate_crosscheck || {};
@@ -641,10 +650,25 @@ function renderCoordinateReliabilityDecision(result) {
     html += '<p style="font-size:0.78rem;margin:0.2rem 0">P95: <b>' + Number(consistency.p95_m).toFixed(3) + ' m</b>；样本: <b>' + consistency.sample_count + '</b></p>';
     html += '<p style="font-size:0.78rem;margin:0.2rem 0">判定门槛: <b>&lt; ' + Number(consistency.threshold_m).toFixed(3) + ' m</b>；结论: <b>' + (passed ? '通过 / 可信' : '未通过 / 不准') + '</b></p>';
   } else {
-    html += '<p style="font-size:0.78rem;margin:0.2rem 0">未生成可用的多点坐标差，按最终标准判定为低可信；请重新定位。</p>';
+    var reason = consistency.reason || coordinate.reason;
+    var causeText = (reason && LOCALIZE_REASON_MESSAGES[reason])
+      ? '：' + LOCALIZE_REASON_MESSAGES[reason]
+      : '：该算法未生成多点坐标差产物，需重新定位';
+    html += '<p style="font-size:0.78rem;margin:0.2rem 0">未生成可用的多点坐标差' + causeText + '，按最终标准判定为低可信；请重新定位。</p>';
   }
   html += '<p style="font-size:0.7rem;color:#666;margin:0.3rem 0 0">最终可信状态只由本地 H→SLAM 与最终位姿 NPY 的多点中位坐标差决定；内点数和相似度仅作辅助诊断。</p></div>';
   return html;
+}
+
+function localizeDiagnosticLine(r) {
+  var quality = r.quality || {};
+  var inliers = r.inliers != null
+    ? r.inliers
+    : (quality.inlier_count != null ? quality.inlier_count : '—');
+  var total3d = r.total_3d_points != null
+    ? r.total_3d_points
+    : (quality.match_count != null ? quality.match_count : '—');
+  return '<p style="font-size:0.78rem;color:#777;margin:0.3rem 0">辅助诊断：内点 ' + inliers + ' | 3D点数 ' + total3d;
 }
 
 function renderProjectionConsistency(result) {
@@ -899,7 +923,7 @@ async function loadLocalizeImages() {
         html += localizeStatusBadge(r);
         html += '</div>';
         if (r.success) {
-          html += '<p style="font-size:0.78rem;color:#777;margin:0.3rem 0">辅助诊断：内点 ' + r.inliers;
+          html += localizeDiagnosticLine(r);
           if (r.timings && r.timings.total_s != null) {
             html += ' &nbsp;·&nbsp; ⏱ ' + r.timings.total_s.toFixed(2) + 's';
           }
@@ -1085,7 +1109,7 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
       html += '</div>';
 
       if (r.success) {
-        html += '<p style="font-size:0.78rem;color:#777;margin:0.3rem 0">辅助诊断：内点 ' + r.inliers + ' | 3D点数 ' + (r.total_3d_points || 0);
+        html += localizeDiagnosticLine(r);
         if (r.timings && r.timings.total_s != null) {
           html += ' &nbsp;·&nbsp; ⏱ ' + r.timings.total_s.toFixed(2) + 's';
         }
