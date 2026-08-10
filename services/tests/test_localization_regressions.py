@@ -151,7 +151,7 @@ def test_local_projection_xyz_map_uses_final_pose_and_nearest_depth():
 
 
 def test_local_coordinate_context_and_query_return_npy_and_reprojection(tmp_path):
-    """TL-005-05: 单点查询返回 NPY 点和重投影误差（像素）。"""
+    """TL-005-05: 单点查询返回 NPY XYZ 与重投影误差。"""
     npy_path = tmp_path / "proj.npy"
     xyz = np.zeros((10, 10, 3), dtype=np.float32)
     xyz[5, 5] = [15, 25, 3]
@@ -171,8 +171,9 @@ def test_local_coordinate_context_and_query_return_npy_and_reprojection(tmp_path
 
     assert result["status"] == "available"
     assert result["validation_type"] == "local_coordinate_crosscheck"
-    assert result["npy_point"] is not None
-    assert "difference_px" in result or "difference_m" in result
+    assert result["npy_xyz"] is not None
+    assert [round(v, 3) for v in result["npy_xyz"]] == [15.0, 25.0, 3.0]
+    assert result["error_px"] is not None
 
 
 def test_local_coordinate_query_rejects_zero_npy_pixel(tmp_path):

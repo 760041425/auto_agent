@@ -4,7 +4,7 @@
 
 - 状态：待实施
 - 背景：API 返回格式已变更，前端需要适配
-- 决定：优先显示 `difference_px`（新字段），回退到 `difference_m`（旧字段）
+- 决定：优先显示 `error_px`（重投影像素误差），坐标误差 `error_m`（米）仅在有平面/射线求交结果时显示（对应实现 query_local_coordinate_transform 返回的 error_px/error_m）
 - 理由：
   1. 新字段是主要验证方式
   2. 旧字段作为回退兼容历史任务

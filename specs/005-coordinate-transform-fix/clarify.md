@@ -2,21 +2,22 @@
 
 ## CL-005-01：旧格式兼容性
 
-**问题**：是否需要兼容旧格式（`difference_m`）？
+**问题**：是否需要兼容旧格式（`difference_m`/`pixel_to_slam`/`npy_point`）？
 
-**决定**：需要。作为回退，如果 API 返回旧格式（`difference_m` 非 null），前端应能正确显示。
+**决定**：已实现为真源契约字段：`error_m`（米）、`error_px`（像素）、`slam_xy`（数组）、`npy_xyz`（数组），`pixel_to_slam` 不再提供（null）。
 
 **理由**：
-- 历史任务可能仍使用旧格式
-- 回退机制增加鲁棒性
+- 后端 `query_local_coordinate_transform` 只输出 `error_m`/`error_px`/`slam_xy`/`npy_xyz`
+- 前端 `verifyCoordinatePoint` 只读取这些新字段
+
 
 ## CL-005-02：备注文本
 
 **问题**：备注文本应该是什么？
 
-**决定**：`PnP位姿重投影NPY点到像素，与查询像素比较`
+**决定**：`PnP位姿+射线平面求交 vs NPY`
 
-**理由**：准确描述当前验证方式。
+**理由**：与后端返回的 `note` 字段一致，准确描述当前验证方式。
 
 ## CL-005-03：测试层级
 
