@@ -671,6 +671,24 @@ function localizeDiagnosticLine(r) {
   return '<p style="font-size:0.78rem;color:#777;margin:0.3rem 0">辅助诊断：内点 ' + inliers + ' | 3D点数 ' + total3d;
 }
 
+function localizeFailureDiagLine(r) {
+  // TL-007-06 (specs/007 AC-007-06)：失败结果含 diagnostics 时展示
+  // 「内点 X | 重投影误差 Y px | 预测Z [a, b]」（保留 2 位小数）；
+  // 字段缺失/为 None 时对应段渲染 "—"；不含 diagnostics（旧结构兜底）
+  // 时沿用原失败文案 localizeErrorText(r.error)，不崩溃。
+  if (!r.diagnostics) return localizeErrorText(r.error);
+  var pnp = r.diagnostics.pnp || {};
+  var pred = r.diagnostics.pred_xyz || {};
+  var inliers = pnp.best_inliers != null ? pnp.best_inliers : '—';
+  var reproj = pnp.best_reproj_error_px != null
+    ? Number(pnp.best_reproj_error_px).toFixed(2) + ' px'
+    : '—';
+  var z = (pred.z_min != null && pred.z_max != null)
+    ? '[' + Number(pred.z_min).toFixed(2) + ', ' + Number(pred.z_max).toFixed(2) + ']'
+    : '—';
+  return '内点 ' + inliers + ' | 重投影误差 ' + reproj + ' | 预测Z ' + z;
+}
+
 function renderProjectionConsistency(result) {
   var validations = result.validations || {};
   var value = validations.projection_consistency || result.projection_verification;
@@ -980,7 +998,7 @@ async function loadLocalizeImages() {
           html += '<button class="btn-refine" style="margin-top:0.5rem;padding:4px 12px;font-size:0.8rem;background:#ff9800;color:#fff;border:none;border-radius:4px;cursor:pointer" onclick="refinePose(this, ' + latest.id + ', ' + idx + ')">🔄 RoMa 优化</button>';
           html += ' <button style="margin-top:0.5rem;padding:4px 12px;font-size:0.8rem;background:#1976d2;color:#fff;border:none;border-radius:4px;cursor:pointer" onclick="generateVerifyReport(' + latest.image_id + ')">📐 生成 2D 拟合报告</button>';
         } else {
-          html += '<p style="font-size:0.85rem;color:#f44336">' + escapeLocalizeHtml(localizeErrorText(r.error)) + '</p>';
+          html += '<p style="font-size:0.85rem;color:#f44336">' + escapeLocalizeHtml(localizeFailureDiagLine(r)) + '</p>';
         }
         html += '</div>';
       });
@@ -1167,7 +1185,7 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
         // 优化按钮（所有成功结果都显示）
         html += '<button class="btn-refine" data-task="' + taskId + '" data-idx="' + idx + '" style="margin-top:0.5rem;padding:4px 12px;font-size:0.8rem;background:#ff9800;color:#fff;border:none;border-radius:4px;cursor:pointer" onclick="refinePose(this, ' + taskId + ', ' + idx + ')">🔄 RoMa 优化</button>';
       } else {
-        html += '<p style="font-size:0.85rem;color:#f44336">' + escapeLocalizeHtml(localizeErrorText(r.error)) + '</p>';
+        html += '<p style="font-size:0.85rem;color:#f44336">' + escapeLocalizeHtml(localizeFailureDiagLine(r)) + '</p>';
       }
 
       html += '</div>';
