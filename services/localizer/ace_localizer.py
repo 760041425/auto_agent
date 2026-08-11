@@ -18,6 +18,7 @@ from services.localizer.pose_utils import (
     annotate_pnp_quality, rotation_matrix_to_quaternion,
     verify_with_las_points,
 )
+from services.localizer.enhanced_ace import build_ace_failure_diagnostics
 
 _logger = get_backend_logger("ace_localizer")
 
@@ -26,12 +27,35 @@ def log(msg: str):
     _logger.info(msg)
 
 
+def _las_pts_from_index():
+    """当前进程 LAS 点云数组（未就绪时 None，不强制触发加载）。"""
+    from services.localizer import _POINT_INDEX
+    return _POINT_INDEX.get("pts") if _POINT_INDEX is not None else None
+
+
+def _ace_failure_result(error: str, tag: str, t0: float, model_info: dict,
+                        pts_3d, pnp_out: dict = None, las_pts=None) -> dict:
+    """ACE 系失败返回结构：保留 error/tag/elapsed 顶层键，新增 input_mode/normal_source/diagnostics。"""
+    return {
+        "success": False,
+        "error": error,
+        "tag": tag,
+        "elapsed": round(time.time() - t0, 2),
+        "input_mode": model_info.get("input_mode"),
+        "normal_source": model_info.get("normal_source"),
+        "diagnostics": build_ace_failure_diagnostics(pts_3d, model_info, pnp_out=pnp_out, las_pts=las_pts),
+    }
+
+
 # ────────────────────────────────────────────────────────────────────
 # 1. ACE + 法线估计（6ch 输入）
 # ────────────────────────────────────────────────────────────────────
 
 def _estimate_normal_simple(rgb_image):
-    """简单法线估计：从 RGB 梯度近似（快速但粗糙）"""
+    """简单法线估计（Sobel 梯度近似）——debug-only，与训练真法线分布不符。
+
+    仅作对比诊断保留；默认推理走 resolve_ace_model 的常量 0.5 占位 / 3ch 自洽路径。
+    """
     gray = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
 
     # Sobel 梯度
@@ -49,42 +73,53 @@ def _estimate_normal_simple(rgb_image):
 
 
 def ace_with_normal(image_path: str, output_dir: str = "projections/localize_ace",
-                    fov_deg: float = 75.0, **kwargs) -> dict:
-    """ACE 定位 — 估计法线 + 6ch 输入"""
+                    fov_deg: float = 75.0, debug_normal: bool = False, **kwargs) -> dict:
+    """ACE 定位 — 法线与训练对齐（3ch 场景模型优先 / 6ch 常量占位回退）"""
     tag = "ace_normal"
     t0 = time.time()
     log(f"{'=' * 60}")
     log(f"🚀 ACE（法线估计）定位: {os.path.basename(image_path)}")
 
-    from services.localizer.coord_regression import load_coord_regression, predict_dense
+    from services.localizer.coord_regression import predict_dense
+    from services.localizer.enhanced_ace import (
+        build_constant_normal_map, resolve_ace_model, INPUT_MODE_6CH_CONSTANT,
+    )
+    from services.localizer import _POINT_INDEX as _pi_now
 
-    model = load_coord_regression()
+    model, model_info = resolve_ace_model()
+    input_mode = model_info["input_mode"]
+    normal_source = model_info["normal_source"]
 
     query_img = cv2.imread(image_path)
     if query_img is None:
         return {"success": False, "error": "Cannot read query image", "tag": tag}
 
-    # 估计法线图
-    normal_map = _estimate_normal_simple(query_img)
+    # 法线构造：3ch 路径不产生法线；6ch 路径用常量 0.5 占位（debug_normal 时用梯度近似对比）
     h, w = query_img.shape[:2]
-    normal_map = cv2.resize(normal_map, (w, h), interpolation=cv2.INTER_LINEAR)
+    normal_map = None
+    if input_mode == INPUT_MODE_6CH_CONSTANT:
+        if debug_normal:
+            normal_map = _estimate_normal_simple(query_img)
+            normal_map = cv2.resize(normal_map, (w, h), interpolation=cv2.INTER_LINEAR)
+            normal_source = "gradient_debug"
+        else:
+            normal_map = build_constant_normal_map(h, w)
 
     # ACE 预测（返回 tuple: pts_2d, pts_3d, confidence）
     with torch.no_grad():
         pts_2d, pts_3d, confidence = predict_dense(model, query_img, normal_map=normal_map)
 
     if len(pts_3d) < 6:
-        return {"success": False, "error": "ACE 预测点不足", "tag": tag, "elapsed": round(time.time() - t0, 2)}
-
-    if len(pts_3d) < 6:
-        return {"success": False, "error": "ACE 预测点不足", "tag": tag, "elapsed": round(time.time() - t0, 2)}
+        return _ace_failure_result("ACE 预测点不足", tag, t0, model_info, pts_3d,
+                                   las_pts=(_pi_now.get("pts") if _pi_now is not None else None))
 
     # 过滤低置信度
     mask = confidence > 0.3
     pts_3d, pts_2d = pts_3d[mask], pts_2d[mask]
 
     if len(pts_3d) < 6:
-        pts_3d, pts_2d = result['coords_3d'], result['points_2d']
+        return _ace_failure_result("ACE 预测点不足", tag, t0, model_info, pts_3d,
+                                   las_pts=(_pi_now.get("pts") if _pi_now is not None else None))
 
     # PnP 求解
     h_q, w_q = query_img.shape[:2]
@@ -99,7 +134,8 @@ def ace_with_normal(image_path: str, output_dir: str = "projections/localize_ace
     pnp_out = annotate_pnp_quality(pnp_out, min_score=4.0, min_inliers=6)
 
     if not pnp_out.get("success"):
-        return {"success": False, "error": "ACE PnP 失败", "tag": tag, "elapsed": round(time.time() - t0, 2)}
+        return _ace_failure_result("ACE PnP 失败", tag, t0, model_info, pts_3d,
+                                   pnp_out=pnp_out, las_pts=_las_pts_from_index())
 
     inliers_idx = pnp_out.get("inliers")
     if inliers_idx is not None and len(inliers_idx) > 0:
@@ -139,6 +175,8 @@ def ace_with_normal(image_path: str, output_dir: str = "projections/localize_ace
         "validations": {"las_nearest": las_result},
         "elapsed": elapsed,
         "spatial_config": {"method": "ace_6ch_normal_estimated"},
+        "input_mode": input_mode,
+        "normal_source": normal_source,
     }
 
 
@@ -190,13 +228,10 @@ def ace_rgb_only(image_path: str, output_dir: str = "projections/localize_ace",
     if len(pts_3d) < 6:
         return {"success": False, "error": "ACE 预测点不足", "tag": tag, "elapsed": round(time.time() - t0, 2)}
 
-    if len(pts_3d) < 6:
-        return {"success": False, "error": "ACE 预测点不足", "tag": tag, "elapsed": round(time.time() - t0, 2)}
-
     mask = confidence > 0.3
     pts_3d, pts_2d = pts_3d[mask], pts_2d[mask]
     if len(pts_3d) < 6:
-        pts_3d, pts_2d = result['coords_3d'], result['points_2d']
+        return {"success": False, "error": "ACE 预测点不足", "tag": tag, "elapsed": round(time.time() - t0, 2)}
 
     h_q, w_q = query_img.shape[:2]
     K = get_camera_matrix(w_q, h_q, fov_deg=fov_deg)

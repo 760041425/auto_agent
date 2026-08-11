@@ -442,11 +442,12 @@ def solve_pnp_with_focal_search(
     f_norm_max = f_norm_center * (1 + search_range)
 
     best: Optional[dict] = None
+    best_partial: Optional[dict] = None  # 全局最优（含未达 min_inliers 的候选）——供 attempts_summary
     total_attempts = 0
     total_success = 0
 
     def _try_focal(f_norm: float, seed_offset: int) -> Optional[dict]:
-        nonlocal total_attempts, total_success
+        nonlocal total_attempts, total_success, best_partial
         total_attempts += 1
         K_i = normalized_focal_to_K(f_norm, img_w, img_h)
         rvec, tvec, inliers = solve_pnp_ransac(
@@ -459,10 +460,14 @@ def solve_pnp_with_focal_search(
         if rvec is None:
             return None
         ic = len(inliers) if inliers is not None else len(object_pts)
+        err = compute_reprojection_error(rvec, tvec, K_i, object_pts, image_pts)
+        if best_partial is None or ic > best_partial["inliers"] or (
+            ic == best_partial["inliers"] and err < best_partial["err"]
+        ):
+            best_partial = {"inliers": int(ic), "err": float(err)}
         if ic < min_inliers:
             return None
         total_success += 1
-        err = compute_reprojection_error(rvec, tvec, K_i, object_pts, image_pts)
         score = compute_pnp_score(ic, err)
         return {
             "rvec": rvec, "tvec": tvec, "inliers": inliers,
@@ -514,7 +519,17 @@ def solve_pnp_with_focal_search(
             best = round_best
 
     if best is None:
-        return {"success": False, "error": f"所有焦距候选 PnP 失败（尝试 {total_attempts} 次）"}
+        best_partial_rec = best_partial or {"inliers": 0, "err": 0.0}
+        attempts_summary = {
+            "tried_candidates": total_attempts,
+            "best_inliers": best_partial_rec["inliers"],
+            "best_reproj_error_px": round(best_partial_rec["err"], 2),
+        }
+        return {
+            "success": False,
+            "error": f"所有焦距候选 PnP 失败（尝试 {total_attempts} 次）",
+            "attempts_summary": attempts_summary,
+        }
 
     summary = {
         "attempts": total_attempts,
@@ -523,6 +538,12 @@ def solve_pnp_with_focal_search(
         "best_score": best["score"],
     }
     solve_pnp_with_focal_search.last_summary = summary
+    best_partial_rec = best_partial or {"inliers": 0, "err": 0.0}
+    attempts_summary = {
+        "tried_candidates": total_attempts,
+        "best_inliers": best_partial_rec["inliers"],
+        "best_reproj_error_px": round(best_partial_rec["err"], 2),
+    }
     return {
         "success": True,
         "rvec": best["rvec"],
@@ -534,6 +555,7 @@ def solve_pnp_with_focal_search(
         "reproj_error_px": best["reproj_error_px"],
         "score": best["score"],
         "focal_search_summary": summary,
+        "attempts_summary": attempts_summary,
     }
 
 
