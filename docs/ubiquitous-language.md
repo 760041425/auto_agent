@@ -21,6 +21,13 @@
 | 本地坐标交叉验证 | 定位任务保存 query→SLAM XY 单应矩阵和最终位姿 XYZ NPY；前端取归一化点后同时返回 H→SLAM XYZ 与 NPY XYZ 并报告差值 | 外部服务联调、独立位姿真值、绝对定位精度 |
 | 坐标差最终判定 | 对最终 NPY 多个有效像素计算 H→SLAM XYZ 与 NPY XYZ 三维差，以中位差和配置门槛决定 V2 与 SALAD+RoMa 原版结果是否可信 | 内点门槛、相似度排序、单点差、独立真值精度 |
 | 无法判定 | 结果未生成坐标差判据产物（无 H→SLAM/NPY 多点差）时展示的独立状态：既不可信也不伪造数值，附明确 reason；徽章与「坐标差最终判定」卡片在此状态下均不显示 ✓ | Java 旧 `reliable`（LAS 验证率、内点数等辅助判据）单独产生可信徽章 |
+| 真实法线 | 训练与真验中作为 ACE 6ch 输入的可靠法线来源：训练期来自 LAS 点云投影（`normal_path`，[-1,1] 映射 `(n+1)*0.5`→[0,1]）；推理期目标来自 DSINE/MiDaS 等图像法线估计 | Sobel 梯度伪法线、常量占位 |
+| 梯度伪法线 | 由图像 Sobel 梯度近似的伪法线（非 DSINE），与训练期真实法线分布不符，默认推理不再使用，仅作 debug 对比 | 真实法线、常量占位 |
+| 常量法线占位 | 6ch 回退路径的无信息法线占位（常量 0.5，≈训练真法线映射后分布均值），用于无法提供真实/可靠法线时避免注入高频错误信息；`normal_source="constant_fallback"` | 把占位冒充真实法线 |
+| 法线来源（normal_source） | 本次推理实际使用的法线来源标签：`dsine`/`mi_das`（图像法线估计）、`constant_fallback`（常量占位）、`none_rgb3ch`（3ch RGB-only 无需法线）、`gradient_debug`（仅 debug） | 无标注的歧义输入 |
+| 输入模式（input_mode） | ACE 系推理的实际输入构造标签：`ace_scene_rgb3ch`（场景 3ch RGB-only 自洽推理）/ `ace_6ch_constant_normal`（6ch 回退 + 常量法线占位），供路由与诊断识别 | 仅凭模型文件名猜测 |
+| 场景 3ch 模型 | 在当前场景用 `train_ace_rgb`（RGB-only）重训的 3ch ACE 模型（`ace_model_scene.pth`），推理输入与训练完全一致（无法线通道） | 旧 6ch 模型 + 伪法线 |
+| PnP 失败诊断（diagnostics） | ACE 系失败结果中的结构化诊断：PnP 尝试统计、预测 3D 分布（Z 范围/中心/点数）、LAS bbox 重叠率、模型信息与输入模式——让「空间感」问题可量化 | 仅报「ACE PnP 失败」字符串 |
 | 多阶段焦距搜索 | PnP 前在归一化焦距空间做粗→细搜索，找到最优相机内参估计（参考 slam-map） | 固定内参、单次 PnP |
 | 独立真值 Benchmark | 在与地图和算法输入解耦的 holdout 位姿真值上计算平移/旋转误差的可复现评估 | 同源 NPY 自比较、单图拟合诊断 |
 | 报告 | 比较任务的持久化结果及其置信度、坐标和验证证据 | 运行日志 |

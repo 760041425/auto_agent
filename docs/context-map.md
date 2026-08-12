@@ -50,6 +50,20 @@ query_image
 - **质量门控**：`pose_utils.annotate_pnp_quality`，三维门控（`score ≥ 4.0`、
   `inliers ≥ 6`、`reproj_error ≤ 8px`），输出 `quality_passed` 与 `quality_reasons`。
 
+### ACE 系法线对齐与诊断（2026-08-11，specs/007）
+
+ACE 系（`ace_better_normal`/`ace_normal`）推理输入与训练分布对齐：
+- **模型路由**：`resolve_ace_model()`——场景 3ch RGB-only 模型（`projections/ace_model_scene.pth`）
+  存在时优先（输入与训练完全一致，无 skew）；否则回退默认 6ch 模型 + 常量 0.5 法线占位
+  （≈训练真实 LAS 法线映射后分布均值，不再喂 Sobel 梯度伪法线）；
+- **输入标注**：结果携带 `input_mode`（`ace_scene_rgb3ch` / `ace_6ch_constant_normal`）与
+  `normal_source`（`none_rgb3ch`/`constant_fallback`/`gradient_debug`/`dsine`/`mi_das`）；
+- **PnP 失败诊断**：`solve_pnp_with_focal_search` 返回 `attempts_summary`；ACE 系失败结果含
+  `diagnostics`（PnP 统计、预测 3D Z 范围、LAS bbox 重叠率、模型信息），前端失败诊断行
+  `localizeFailureDiagLine` 展示「内点 X | 重投影误差 Y px | 预测Z [a,b]」；
+- **治本（specs/008，实施中）**：推理期图像法线估计（DSINE/MiDaS）经 `normal_mode` 接入 6ch 路径，
+  ≥20 张四路径精度基准以数据决策默认路由。
+
 ### 验证方式
 
 | 方案 | 验证方法 | 指标语义 |

@@ -19,7 +19,12 @@
 | --- | --- | --- | --- |
 | 001 | LAS 影像 3D 查询 | 基线补录，待补自动化验收 | [规格](001-las-image-3d-query/spec.md) |
 | 002 | 移动场景实时定位优化 | 迭代中，性能目标待基准证明 | [规格](002-realtime-localization-optimization/spec.md) |
-| 003 | 多方案定位与可信验证修复 | 草案，Phase A 可实施，精度结论待真值 | [规格](003-multi-algo-verification/spec.md) |
+| 003 | 多方案定位与可信验证修复 | Phase A 已实施并通过快速门禁；Phase B（独立真值）遗留 TODO | [规格](003-multi-algo-verification/spec.md) |
+| 004 | 平面感知单应投影 | 已实施（2026-08-04） | [规格](004-plane-aware-homography/spec.md) |
+| 005 | 坐标变换修复 | 已实施（006 交付时对齐守卫） | [规格](005-coordinate-transform-fix/spec.md) |
+| 006 | ACE 坐标差最终判定链路对齐 | 已实施（降级「无法判定」独立状态） | [规格](006-ace-coordinate-consistency/spec.md) |
+| 007 | ACE 系法线 train/serve skew 修复 + PnP 失败诊断 | 已实施（法线对齐 + 3ch 模型路由 + diagnostics） | [规格](007-ace-better-fix/spec.md) |
+| 008 | ACE 推理期真法线估计 + 6ch 精度基准（D 治本） | 实施中（P0+P1 法线模块与 normal_mode 接入已交付，P2/P3 待办） | [规格](008-ace-true-normal/spec.md) |
 
 ## 质量命令
 
