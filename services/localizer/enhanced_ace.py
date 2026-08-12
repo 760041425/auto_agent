@@ -213,8 +213,15 @@ def _estimate_gradient_normal(rgb_image):
 
 
 def ace_with_better_normal(image_path: str, output_dir: str = "projections/localize_ace",
-                            fov_deg: float = 75.0, debug_normal: bool = False, **kwargs) -> dict:
-    """ACE 定位 — 法线与训练对齐（3ch 场景模型优先 / 6ch 常量占位回退）"""
+                            fov_deg: float = 75.0, debug_normal: bool = False,
+                            normal_mode: str = "constant", **kwargs) -> dict:
+    """ACE 定位 — 法线与训练对齐（3ch 场景模型优先 / 6ch 按 normal_mode 选择法线）
+
+    ``normal_mode``（D-008-02，默认 "constant" 不变）：
+    - ``"constant"``：常量 0.5 占位（007 行为不变）
+    - ``"dsine"``：调用 ``estimate_normal`` 喂真实法线；模型不可用自动回退常量
+      并标注 ``normal_source="constant_fallback"``
+    """
     tag = "ace_better_normal"
     t0 = time.time()
     log(f"{'=' * 60}")
@@ -232,11 +239,16 @@ def ace_with_better_normal(image_path: str, output_dir: str = "projections/local
     if query_img is None:
         return {"success": False, "error": "Cannot read query image", "tag": tag}
 
-    # 法线构造：3ch 路径不产生法线；6ch 路径用常量 0.5 占位（debug_normal 时用梯度近似对比）
+    # 法线构造：3ch 路径不产生法线；6ch 路径按 normal_mode 选择来源
+    # （dsine 真法线 > debug 梯度对比 > 常量 0.5 占位，008 只改动 dsine 分支）
     h, w = query_img.shape[:2]
     normal_map = None
     if input_mode == INPUT_MODE_6CH_CONSTANT:
-        if debug_normal:
+        if normal_mode == "dsine":
+            from services.localizer.normal_estimator import estimate_normal, normal_source_from_estimate
+            normal_map = estimate_normal(query_img)
+            normal_source = normal_source_from_estimate()
+        elif debug_normal:
             normal_map = _estimate_gradient_normal(query_img)
             normal_map = cv2.resize(normal_map, (w, h), interpolation=cv2.INTER_LINEAR)
             normal_source = "gradient_debug"

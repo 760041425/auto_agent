@@ -34,7 +34,8 @@ def _las_pts_from_index():
 
 
 def _ace_failure_result(error: str, tag: str, t0: float, model_info: dict,
-                        pts_3d, pnp_out: dict = None, las_pts=None) -> dict:
+                        pts_3d, pnp_out: dict = None, las_pts=None,
+                        normal_source: str = None) -> dict:
     """ACE 系失败返回结构：保留 error/tag/elapsed 顶层键，新增 input_mode/normal_source/diagnostics。"""
     return {
         "success": False,
@@ -42,7 +43,7 @@ def _ace_failure_result(error: str, tag: str, t0: float, model_info: dict,
         "tag": tag,
         "elapsed": round(time.time() - t0, 2),
         "input_mode": model_info.get("input_mode"),
-        "normal_source": model_info.get("normal_source"),
+        "normal_source": normal_source or model_info.get("normal_source"),
         "diagnostics": build_ace_failure_diagnostics(pts_3d, model_info, pnp_out=pnp_out, las_pts=las_pts),
     }
 
@@ -73,8 +74,15 @@ def _estimate_normal_simple(rgb_image):
 
 
 def ace_with_normal(image_path: str, output_dir: str = "projections/localize_ace",
-                    fov_deg: float = 75.0, debug_normal: bool = False, **kwargs) -> dict:
-    """ACE 定位 — 法线与训练对齐（3ch 场景模型优先 / 6ch 常量占位回退）"""
+                    fov_deg: float = 75.0, debug_normal: bool = False,
+                    normal_mode: str = "constant", **kwargs) -> dict:
+    """ACE 定位 — 法线与训练对齐（3ch 场景模型优先 / 6ch 按 normal_mode 选择法线）
+
+    ``normal_mode``（D-008-02，默认 "constant" 不变）：
+    - ``"constant"``：常量 0.5 占位（007 行为不变）
+    - ``"dsine"``：调用 ``estimate_normal`` 喂真实法线；模型不可用自动回退常量
+      并标注 ``normal_source="constant_fallback"``
+    """
     tag = "ace_normal"
     t0 = time.time()
     log(f"{'=' * 60}")
@@ -94,11 +102,16 @@ def ace_with_normal(image_path: str, output_dir: str = "projections/localize_ace
     if query_img is None:
         return {"success": False, "error": "Cannot read query image", "tag": tag}
 
-    # 法线构造：3ch 路径不产生法线；6ch 路径用常量 0.5 占位（debug_normal 时用梯度近似对比）
+    # 法线构造：3ch 路径不产生法线；6ch 路径按 normal_mode 选择来源
+    # （dsine 真法线 > debug 梯度对比 > 常量 0.5 占位，008 只改动 dsine 分支）
     h, w = query_img.shape[:2]
     normal_map = None
     if input_mode == INPUT_MODE_6CH_CONSTANT:
-        if debug_normal:
+        if normal_mode == "dsine":
+            from services.localizer.normal_estimator import estimate_normal, normal_source_from_estimate
+            normal_map = estimate_normal(query_img)
+            normal_source = normal_source_from_estimate()
+        elif debug_normal:
             normal_map = _estimate_normal_simple(query_img)
             normal_map = cv2.resize(normal_map, (w, h), interpolation=cv2.INTER_LINEAR)
             normal_source = "gradient_debug"
@@ -111,7 +124,8 @@ def ace_with_normal(image_path: str, output_dir: str = "projections/localize_ace
 
     if len(pts_3d) < 6:
         return _ace_failure_result("ACE 预测点不足", tag, t0, model_info, pts_3d,
-                                   las_pts=(_pi_now.get("pts") if _pi_now is not None else None))
+                                   las_pts=(_pi_now.get("pts") if _pi_now is not None else None),
+                                   normal_source=normal_source)
 
     # 过滤低置信度
     mask = confidence > 0.3
@@ -119,7 +133,8 @@ def ace_with_normal(image_path: str, output_dir: str = "projections/localize_ace
 
     if len(pts_3d) < 6:
         return _ace_failure_result("ACE 预测点不足", tag, t0, model_info, pts_3d,
-                                   las_pts=(_pi_now.get("pts") if _pi_now is not None else None))
+                                   las_pts=(_pi_now.get("pts") if _pi_now is not None else None),
+                                   normal_source=normal_source)
 
     # PnP 求解
     h_q, w_q = query_img.shape[:2]
@@ -135,7 +150,8 @@ def ace_with_normal(image_path: str, output_dir: str = "projections/localize_ace
 
     if not pnp_out.get("success"):
         return _ace_failure_result("ACE PnP 失败", tag, t0, model_info, pts_3d,
-                                   pnp_out=pnp_out, las_pts=_las_pts_from_index())
+                                   pnp_out=pnp_out, las_pts=_las_pts_from_index(),
+                                   normal_source=normal_source)
 
     inliers_idx = pnp_out.get("inliers")
     if inliers_idx is not None and len(inliers_idx) > 0:
