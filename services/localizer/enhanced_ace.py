@@ -214,13 +214,19 @@ def _estimate_gradient_normal(rgb_image):
 
 def ace_with_better_normal(image_path: str, output_dir: str = "projections/localize_ace",
                             fov_deg: float = 75.0, debug_normal: bool = False,
-                            normal_mode: str = "constant", **kwargs) -> dict:
+                            normal_mode: str = "constant",
+                            _scene_model_path: Optional[str] = None,
+                            **kwargs) -> dict:
     """ACE 定位 — 法线与训练对齐（3ch 场景模型优先 / 6ch 按 normal_mode 选择法线）
 
     ``normal_mode``（D-008-02，默认 "constant" 不变）：
     - ``"constant"``：常量 0.5 占位（007 行为不变）
     - ``"dsine"``：调用 ``estimate_normal`` 喂真实法线；模型不可用自动回退常量
       并标注 ``normal_source="constant_fallback"``
+
+    ``_scene_model_path``（内部/基准用，默认 None）：传入非 None 时覆盖
+    ``resolve_ace_model`` 的场景模型路径——传不存在的路径可强制走 6ch 回退路由，
+    用于 008 P3 基准的四路径对比。日常调用不传。
     """
     tag = "ace_better_normal"
     t0 = time.time()
@@ -231,7 +237,7 @@ def ace_with_better_normal(image_path: str, output_dir: str = "projections/local
     from services.localizer.pose_utils import get_camera_matrix, solve_pnp_with_focal_search, annotate_pnp_quality, rotation_matrix_to_quaternion, verify_with_las_points
     from services.localizer import _POINT_INDEX, load_colmap
 
-    model, model_info = resolve_ace_model()
+    model, model_info = resolve_ace_model(scene_model_path=_scene_model_path)
     input_mode = model_info["input_mode"]
     normal_source = model_info["normal_source"]
 

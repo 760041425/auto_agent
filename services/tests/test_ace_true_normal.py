@@ -14,6 +14,12 @@ import services.localizer.ace_localizer as ace_localizer
 import services.localizer.normal_estimator as normal_estimator
 
 
+def _reset_model_cache():
+    """清除 normal_estimator 的懒加载缓存，避免测试间互相污染。"""
+    normal_estimator._model = None
+    normal_estimator._transform = None
+
+
 @pytest.fixture
 def fake_query_image(tmp_path):
     img = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
@@ -67,14 +73,23 @@ def test_estimate_normal_shape_dtype_and_mapping_to_unit_interval(monkeypatch):
     expected = (fake_dsine + 1.0) * 0.5
     assert np.allclose(result, expected), "[-1,1] 真法线应按训练映射 (n+1)*0.5 转到 [0,1]"
     assert float(result.min()) >= 0.0 and float(result.max()) <= 1.0, "值域应为 [0,1]"
-    assert normal_estimator.normal_source_from_estimate() == normal_estimator.NORMAL_SOURCE_DSINE
+    # P2 定案后端为 MiDaS（D-008-01）：_raw_infer 成功即标注 mi_das。
+    assert normal_estimator.normal_source_from_estimate() == normal_estimator.NORMAL_SOURCE_MIDAS
 
 
 # ────────────────────────────────────────────────────────────────────
 # TL-008-02 (AC-008-01)：权重缺失/加载失败 → 回退常量 0.5
 # ────────────────────────────────────────────────────────────────────
-def test_estimate_normal_weight_unavailable_falls_back_constant():
-    """TL-008-02: 不注入任何模型（真实桩抛错）→ 优雅回退常量 0.5、normal_source=constant_fallback、不抛异常。"""
+def test_estimate_normal_weight_unavailable_falls_back_constant(monkeypatch):
+    """TL-008-02: 模拟真实模型加载失败（monkeypatch _load_model 抛 NormalModelNotReadyError）
+    → 优雅回退常量 0.5、normal_source=constant_fallback、不抛异常。"""
+    _reset_model_cache()
+
+    def _boom():
+        raise normal_estimator.NormalModelNotReadyError("模拟：权重不可达")
+
+    monkeypatch.setattr(normal_estimator, "_load_model", _boom)
+
     h, w = 32, 48
     image = np.random.randint(0, 255, (h, w, 3), dtype=np.uint8)
 
@@ -163,3 +178,41 @@ def test_ace_with_normal_dsine_mode_passes_estimated_normal(monkeypatch, fake_qu
     assert np.allclose(nm, 0.25), f"ace_normal dsine 应收到 mock 真法线 0.25，实际 min={nm.min():.3f} max={nm.max():.3f}"
     assert not np.allclose(nm, 0.5), "不应回退为常量 0.5"
     assert result["normal_source"] == "dsine"
+
+
+# ────────────────────────────────────────────────────────────────────
+# TL-008-04 (AC-008-01)：真实 MiDaS 端到端可达性（需外网/缓存，默认跳过）
+# ────────────────────────────────────────────────────────────────────
+@pytest.mark.integration
+def test_estimate_normal_real_midas_end_to_end():
+    """TL-008-04: 不注入、不走 monkeypatch — 真实加载 MiDaS_small 并对随机图推理。
+
+    验收：
+    - 返回 (H,W,3) float32、值域 [0,1]；
+    - 法线经 depth_to_normals 归一化（|n| 均值 ≈ 1.0）；
+    - 分布与训练真法线对齐（[0,1] mean ≈ 0.4-0.6，训练 mean 0.5）；
+    - normal_source == mi_das（非 fallback）。
+
+    首次运行会触发 torch.hub 下载（~170s，缓存到 TORCH_HOME）；后续 ~5s。
+    需要外网或已缓存权重；无缓存且离线时跳过。
+    """
+    _reset_model_cache()
+    h, w = 64, 64
+    image = np.random.randint(0, 255, (h, w, 3), dtype=np.uint8)
+
+    result = normal_estimator.estimate_normal(image)
+
+    assert result.shape == (h, w, 3), f"尺寸应为 {(h, w, 3)}，实际 {result.shape}"
+    assert result.dtype == np.float32
+    assert 0.0 <= float(result.min()) and float(result.max()) <= 1.0, "值域应落入 [0,1]"
+
+    # 反推 [-1,1] 法线，检查归一化（|n| ≈ 1）。
+    n_xyz = result * 2.0 - 1.0
+    mag = np.linalg.norm(n_xyz, axis=-1)
+    assert float(mag.mean()) > 0.8, f"法线应近似归一化，|n| 均值={mag.mean():.3f}"
+
+    # 分布对齐训练真法线（[0,1] mean ≈ 0.5，容差宽松因随机图）。
+    assert 0.3 <= float(result.mean()) <= 0.7, f"[0,1] mean={result.mean():.3f}，应接近训练 0.5"
+
+    assert normal_estimator.normal_source_from_estimate() == normal_estimator.NORMAL_SOURCE_MIDAS, \
+        "真实 MiDaS 加载后 source 应为 mi_das"

@@ -8,6 +8,8 @@ ACE 场景坐标回归定位 — 三种实现
 
 import os
 import time
+from typing import Optional
+
 import cv2
 import numpy as np
 import torch
@@ -75,13 +77,18 @@ def _estimate_normal_simple(rgb_image):
 
 def ace_with_normal(image_path: str, output_dir: str = "projections/localize_ace",
                     fov_deg: float = 75.0, debug_normal: bool = False,
-                    normal_mode: str = "constant", **kwargs) -> dict:
+                    normal_mode: str = "constant",
+                    _scene_model_path: Optional[str] = None,
+                    **kwargs) -> dict:
     """ACE 定位 — 法线与训练对齐（3ch 场景模型优先 / 6ch 按 normal_mode 选择法线）
 
     ``normal_mode``（D-008-02，默认 "constant" 不变）：
     - ``"constant"``：常量 0.5 占位（007 行为不变）
     - ``"dsine"``：调用 ``estimate_normal`` 喂真实法线；模型不可用自动回退常量
       并标注 ``normal_source="constant_fallback"``
+
+    ``_scene_model_path``（内部/基准用，默认 None）：传不存在的路径强制 6ch 回退路由
+    （008 P3 基准四路径对比）。日常调用不传。
     """
     tag = "ace_normal"
     t0 = time.time()
@@ -94,7 +101,7 @@ def ace_with_normal(image_path: str, output_dir: str = "projections/localize_ace
     )
     from services.localizer import _POINT_INDEX as _pi_now
 
-    model, model_info = resolve_ace_model()
+    model, model_info = resolve_ace_model(scene_model_path=_scene_model_path)
     input_mode = model_info["input_mode"]
     normal_source = model_info["normal_source"]
 
