@@ -356,8 +356,11 @@ def depth_anything_icp(image_path: str, output_dir: str = "projections/localize_
 
     h_q, w_q = query_img.shape[:2]
 
+    # 依赖 ace_with_better_normal 已使用的同一相机矩阵构造函数。
+    from services.localizer.pose_utils import get_camera_matrix
+
     # 1. 尝试加载 DepthAnything 或类似模型
-    depth_model = _load_depth_model()
+    depth_model, depth_transform = _load_depth_model()
 
     if depth_model is None:
         return {
@@ -368,17 +371,28 @@ def depth_anything_icp(image_path: str, output_dir: str = "projections/localize_
             "note": "安装后需要下载预训练权重",
         }
 
-    # 2. 估计深度
+    # 2. 估计深度（MiDaS 必须经 transform 预处理；DepthAnything 为恒等 transform）
+    device = next(depth_model.parameters()).device
+    inp = depth_transform(query_img).to(device)
+    if inp.ndim == 3:
+        inp = inp.unsqueeze(0)
     with torch.no_grad():
-        depth = depth_model(query_img)
+        depth = depth_model(inp)
+    depth = torch.nn.functional.interpolate(
+        depth.unsqueeze(1) if depth.ndim == 3 else depth,
+        size=(h_q, w_q), mode="bicubic", align_corners=False,
+    ).squeeze()  # (H, W)
 
     # 3. 提升为 3D 点云
     K = get_camera_matrix(w_q, h_q, fov_deg=fov_deg)
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
 
+    # depth 可能落在 MPS/CUDA 上，点云投影用 numpy → 先同步回 CPU。
+    if hasattr(depth, "cpu"):
+        depth = depth.cpu().numpy()
     u, v = np.meshgrid(np.arange(w_q), np.arange(h_q))
-    z = depth
+    z = depth.astype(np.float64)
     x = (u - cx) * z / fx
     y = (v - cy) * z / fy
 
@@ -444,22 +458,33 @@ def depth_anything_icp(image_path: str, output_dir: str = "projections/localize_
 
 
 def _load_depth_model():
-    """尝试加载深度估计模型"""
+    """尝试加载深度估计模型，返回 ``(model, transform)``。
+
+    ``transform`` 将 BGR uint8 ``(H,W,3)`` 转为模型期望的输入张量：
+    - MiDaS：经 ``midas_transforms.small_transform``（resize 到 384 + ImageNet 归一化 + 加 batch 维）。
+      MiDaS **不能**直接吃原始 uint8 图——跳过 transform 会在 efficientnet 的
+      ``Conv2dSameExport`` 触发 ``'int' object is not callable``（输入尺寸/类型错误）。
+    - DepthAnything：模型自带预处理，返回恒等 transform（直接传图）。
+
+    两个后端都不可用时返回 ``(None, None)``。
+    """
     try:
         # 尝试 DepthAnything
         from depth_anything.dpt import DepthAnything
         model = DepthAnything.from_pretrained("LiheYoung/depth_anything_vitb14")
         model.eval()
-        return model
+        return model, (lambda img: img)
     except ImportError:
         pass
 
     try:
-        # 尝试 MiDaS
+        # 尝试 MiDaS：必须配合 small_transform，否则输入类型/尺寸错误会触发 TypeError。
         model = torch.hub.load("intel-isl/MiDaS", "MiDaS_small")
         model.eval()
-        return model
-    except Exception:
+        midas_transforms = torch.hub.load("intel-isl/MiDaS", "transforms")
+        return model, midas_transforms.small_transform
+    except Exception as exc:  # noqa: BLE001
+        log(f"MiDaS 回退加载失败: {exc}")
         pass
 
-    return None
+    return None, None
