@@ -8,5 +8,5 @@
 - [x] 路由决策：显式「切/不切」，数据与实现一致（AC-008-04）— 维持 007 现状（P3 数据）
 - [x] 007 默认路由回归绿 + 新增测试全绿（AC-008-05）
 - [x] 门禁 validate-specs / run-all fast / drift-check / 全量 pytest 全绿（AC-008-06）
-- [ ] docs/contexts 术语同步（如法线估计条目）
-- [ ] 人工复核基准报告与前端诊断行一致（「空间感」可量化）
+- [x] docs/contexts 术语同步（`docs/ubiquitous-language.md` 第 10/24–29 行：真实法线 / 梯度伪法线 / 常量法线占位 / normal_source / input_mode / 场景 3ch 模型，提交 `2eaf5a2`）
+- [ ] 人工复核基准报告与前端诊断行一致（「空间感」可量化，属人工验收 follow-up）
