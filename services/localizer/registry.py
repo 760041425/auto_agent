@@ -72,13 +72,27 @@ def _run_salad_v2_xfeat(localization_input: LocalizationInput) -> dict[str, Any]
 
 
 def _run_salad_v2_loftr_fast(localization_input: LocalizationInput) -> dict[str, Any]:
-    """009 首选: LoFTR + fast_mode（FAISS + FP16 + 跳过迭代）。"""
-    return _run_salad_v2(localization_input, matcher_mode="loftr", fast_mode=True)
+    """009 首选: LoFTR + fast_mode（FAISS + FP16 + 跳过迭代）。
+
+    自适应回退：fast 失败时回退到原版参数（top_k=3 + 迭代精化），
+    以少量延迟代价换取成功率提升。
+    """
+    fast = _run_salad_v2(localization_input, matcher_mode="loftr", fast_mode=True)
+    if fast.get("success"):
+        return fast
+    # fast 失败 → 回退原版（top_k=3 + 迭代精化）
+    return _run_salad_v2(localization_input, matcher_mode="loftr", fast_mode=False)
 
 
 def _run_salad_v2_hybrid_fast(localization_input: LocalizationInput) -> dict[str, Any]:
-    """009 备选 B: Hybrid + fast_mode。"""
-    return _run_salad_v2(localization_input, matcher_mode="hybrid", fast_mode=True)
+    """009 备选 B: Hybrid + fast_mode。
+
+    自适应回退：fast 失败时回退到原版参数，修复 top_k=1 漏检。
+    """
+    fast = _run_salad_v2(localization_input, matcher_mode="hybrid", fast_mode=True)
+    if fast.get("success"):
+        return fast
+    return _run_salad_v2(localization_input, matcher_mode="hybrid", fast_mode=False)
 
 
 def _run_salad_v2(localization_input: LocalizationInput, matcher_mode: str,

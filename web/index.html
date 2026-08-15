@@ -104,7 +104,7 @@
           <div style="font-size:0.78rem;color:#999;margin-bottom:0.2rem">── 原有方案 ──</div>
           <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma"> SALAD+RoMa (原版)</label>
           <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma_v2" checked> SALAD v2 (DISK+LG)</label>
-          <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma_v2_loftr"> SALAD v2 + LoFTR</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma_v2_loftr"> SALAD v2 + LoFTR <span style="font-size:0.7rem;color:#999">（高精度对照）</span></label>
           <label style="margin-right:0.8rem"><input type="checkbox" value="hybrid"> Hybrid (联合)</label>
           <label style="margin-right:0.8rem"><input type="checkbox" value="ace_las"> ACE + LAS</label>
           <label style="margin-right:0.8rem"><input type="checkbox" value="multi_strategy"> Multi-Strategy</label>
@@ -134,6 +134,11 @@
           <label style="margin-right:0.8rem"><input type="checkbox" value="ace_better"> J. ACE+更好法线 (~3s)</label>
           <label style="margin-right:0.8rem"><input type="checkbox" value="depth_anything"> K. DepthAnything+ICP</label>
           <label style="margin-right:0.8rem"><input type="checkbox" value="train_ace"> L. 训练ACE+定位</label>
+        </div>
+        <div style="margin-bottom:0.2rem">
+          <div style="font-size:0.78rem;color:#00695c;margin-bottom:0.2rem">── 009 加速方案（默认推荐） ──</div>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="salad_v2_loftr_fast" checked> LoFTR <b>[加速]</b> (~12s)</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="salad_v2_hybrid_fast"> Hybrid <b>[加速]</b> (~12s)</label>
         </div>
         <label style="display:block;margin-top:0.5rem;font-size:0.82rem;color:#666"><input id="localize-debug" type="checkbox"> 生成候选轮次调试图（较慢）</label>
       </fieldset>

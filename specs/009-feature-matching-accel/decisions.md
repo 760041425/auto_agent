@@ -8,3 +8,6 @@
 | D-009-04 | torch.compile 失败回退 eager | MPS compile 偶有不兼容 op | 强制 compile → 可能崩溃 | 采用 |
 | D-009-05 | 加速前后 benchmark 对比 ≥5 张图 | 数据决策，不凭感觉 | 仅测 1 张 → 统计不可靠 | 采用 |
 | D-009-06 | 描述子 PCA 降维暂不做（本期） | 风险较高，需重测检索精度；留 follow-up | 本期做 → 工作量大 | 本期不做 |
+| D-009-07 | `salad_v2_loftr_fast` 升级为默认 LoFTR 方案 | benchmark 12 查询：成功率 100% = 原版，延迟 12.33s = 原版 20.32s × 0.61（≤0.7 目标）；前端 `checked`，原版标"高精度对照" | 保留原版默认 → 放弃 1.65x 加速收益 | 采用 |
+| D-009-08 | hybrid / loftr fast 加自适应回退（fast 失败→原版 top_k=3+迭代） | hybrid_fast 92% 成功率，8% 因 top_k=1 漏检；回退仅触发失败案例，均延迟≈13.6s<15s 目标，成功率预计→~100%。**验收通过**：`reports/benchmark_009_v2.json` 12 查询 hybrid_fast 成功率 100%（12/12），均延迟 14.56s < 15s 目标 | 纯 top_k=1 → 8% 失败不可接受；取消 fast → 失去加速 | 采用 ✅ 已验收 |
+| D-009-09 | XFeat 离线安装验证（本期阻塞） | verlab/LEARNING-XFeat 未发 PyPI，GitHub 在本环境不可达；需人工离线装后跑跨域对比 | 放弃 XFeat → 失去潜在 DISK+LG 替代方案 | 待离线安装后验证 |

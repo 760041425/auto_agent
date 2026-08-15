@@ -592,7 +592,7 @@ var localizeAlgorithmNames = {
   'flann': 'SIFT + FLANN kd-tree',
   'salad_roma': 'SALAD+RoMa (原版)',
   'salad_roma_v2': 'SALAD v2 (DISK+LightGlue)',
-  'salad_roma_v2_loftr': 'SALAD v2 + LoFTR',
+  'salad_roma_v2_loftr': 'SALAD v2 + LoFTR（高精度对照）',
   'hybrid': 'Hybrid (DISK+LightGlue + LoFTR)',
   'ace_las': 'ACE + LAS 验证',
   'multi_strategy': 'Multi-Strategy 融合',

@@ -74,11 +74,15 @@ def test_has_xfeat_detects_without_crashing():
     assert isinstance(result, bool)
 
 
-def test_faiss_search_fallback_when_no_index():
-    """无 FAISS 索引时 _faiss_search 返回 []。"""
+def test_faiss_search_fallback_when_no_index(monkeypatch):
+    """无 FAISS 索引时 _faiss_search 返回 []（mock 构建失败路径）。"""
     v2._FAISS_INDEX = None
     v2._FAISS_KEYS = []
-    q = np.random.randn(728).astype(np.float32)
+
+    # mock: 模拟构建失败（无 tile 数据 / 磁盘不可用）
+    monkeypatch.setattr(v2, "_build_faiss_index", lambda: None)
+
+    q = np.random.randn(384).astype(np.float32)
     result = v2._faiss_search(q, k=5)
     assert result == []
 
