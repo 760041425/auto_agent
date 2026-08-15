@@ -1,6 +1,6 @@
 ---
 name: research
-description: 算法 / 论文 / 工程实现研究技能（本项目适配：LAS 视觉定位、ACE 场景坐标回归、深度/法线估计、相机-LiDAR 融合）。当用户说「研究一下」「调研」「找论文」「有没有开源实现」「最新的方法是什么」「对比几种方案」「research」「survey」「find papers」「state of the art」时触发。固定流程：联网搜 → 论文 → GitHub 源码 → 对比 → 推荐 → 落地实现。严格区分「论文能做 / 开源代码能做 / 实际工程可靠」，禁仅凭摘要判断可用性；有 GitHub 实现必须读 README 与关键源码。收尾必用表格汇报 + 下一步建议。
+description: 算法 / 论文 / 工程实现研究技能（本项目适配：LAS 视觉定位、ACE 场景坐标回归、深度/法线估计、相机-LiDAR 融合）。当用户说「研究一下」「调研」「找论文」「有没有开源实现」「最新的方法是什么」「对比几种方案」「research」「survey」「find papers」「state of the art」时触发。固定流程：联网搜 → 论文 → GitHub 源码 → 对比 → 推荐 → 保存研究结果为项目资产 → 落地实现。严格区分「论文能做 / 开源代码能做 / 实际工程可靠」，禁仅凭摘要判断可用性；有 GitHub 实现必须读 README 与关键源码；研究结论必须保存到 research/ 目录。收尾必用表格汇报 + 下一步建议。
 ---
 
 # Research Skill — 算法 / 论文 / 工程实现研究（本项目适配）
@@ -99,7 +99,30 @@ description: 算法 / 论文 / 工程实现研究技能（本项目适配：LAS 
 - 主要风险与缓解
 - 落地工作量估计（人天）
 
-### ⑧ 收尾汇报（**强制**）
+### ⑧ 保存研究结果为项目资产（**强制**）
+
+研究结论必须持久保存到 `research/` 目录，作为项目资产复用。
+
+**保存流程**：
+1. 按 `research/TEMPLATE.md` 模板生成研究结论 Markdown
+2. 文件名：`research/<YYYY-MM-DD>-<topic-slug>.md`（日期为研究完成日，slug 为主题短横线英文或拼音）
+3. 代码片段 / 图表放 `research/assets/<同名>/`；**大文件（权重/数据）只记链接不入库**（写入 `research/assets/<同名>/links.md`）
+4. 更新 `research/README.md` 索引表格（日期、主题、文件、状态、关键结论）
+5. 提交到 git：`git add research/ && git commit -m "research(<slug>): <主题简述>"`
+
+**目录结构**：
+```
+research/
+├── README.md              # 索引（每次研究后更新）
+├── TEMPLATE.md            # 本研究的记录模板
+├── 2026-08-15-topic-a.md  # 研究结论
+└── assets/
+    └── topic-a/
+        ├── snippet.py     # 代码片段
+        └── links.md       # 权重 / 数据链接（不入库大文件）
+```
+
+### ⑨ 收尾汇报（**强制**）
 
 用 Markdown 表格汇报（列：步骤 / 事项、状态、产物或证据链接、备注），表格后另起「**下一步建议**」1–3 条可执行动作（可复制命令或 `/wiki-*` 串联）。
 

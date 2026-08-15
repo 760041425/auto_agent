@@ -1,6 +1,6 @@
 ---
 name: cv-research
-description: 计算机视觉 / 多传感器融合研究技能（本项目深度适配：LAS 视觉定位、相机-LiDAR 融合、深度/法线估计、点云配准、位姿图优化）。当用户说「研究视觉定位」「相机雷达融合」「LiDAR 标定」「点云配准」「位姿优化」「camera-LiDAR」「extrinsic calibration」「cross-modal」「视觉 + 雷达」「CV 研究」「找视觉算法」时触发。继承 research 技能全部流程，叠加 CV 专用关键词扩展表 + 领域数据源（OpenCV/PCL/PDAL/Open3D/Ceres/g2o）+ MCP 集成。收尾必用表格汇报 + 下一步建议。
+description: 计算机视觉 / 多传感器融合研究技能（本项目深度适配：LAS 视觉定位、相机-LiDAR 融合、深度/法线估计、点云配准、位姿图优化）。当用户说「研究视觉定位」「相机雷达融合」「LiDAR 标定」「点云配准」「位姿优化」「camera-LiDAR」「extrinsic calibration」「cross-modal」「视觉 + 雷达」「CV 研究」「找视觉算法」时触发。继承 research 技能全部流程（含保存研究结果为项目资产），叠加 CV 专用关键词扩展表 + 领域数据源（OpenCV/PCL/PDAL/Open3D/Ceres/g2o）+ MCP 集成。收尾必用表格汇报 + 下一步建议。
 ---
 
 # CV Research Skill — 计算机视觉 / 多传感器融合研究（本项目深度适配）
@@ -62,12 +62,13 @@ description: 计算机视觉 / 多传感器融合研究技能（本项目深度�
 | 位姿优化 | pose graph optimization, bundle adjustment, Ceres Solver, g2o, GTSAM, factor graph |
 | 语义分割 | semantic segmentation, panoptic segmentation, LiDAR segmentation, point cloud segmentation |
 
-### ③–⑧ 同 research §1（三重区分 / GitHub 读源码 / 对比矩阵 / 推荐方案 / 收尾汇报）
+### ③–⑨ 同 research §1（含保存研究结果步骤）
 
-完全复用，**额外强调**：
+完全复用 `skills/research/SKILL.md` §1③–⑨，**额外强调**：
 - CV 方法对**标定参数**敏感 → §③ 记录表 `Required calibration` 字段必须明确（内参 / 外参 / 联合标定 / 免标定）
 - CV 方法对**传感器配置**敏感 → §③ 记录表 `Required sensors` 字段必须明确（单目 / 双目 / RGB-D / LiDAR / IMU / 组合）
 - 深度 / 法线估计关注**尺度**（度量 / 相对）→ ACE 6ch 通道对尺度敏感性需在推荐方案中说明
+- §⑧ **保存研究结果为项目资产**：CV 研究结论同样保存到 `research/<YYYY-MM-DD>-<slug>.md` 并更新索引，复用项目资产避免重复调研
 
 ## 2. MCP 集成（CV 增强）
 
