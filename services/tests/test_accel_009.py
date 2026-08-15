@@ -74,6 +74,19 @@ def test_has_xfeat_detects_without_crashing():
     assert isinstance(result, bool)
 
 
+def test_xfeat_matcher_loads_when_available():
+    """vismatch.xFeatMatcher 可用时能加载并返回匹配点对。"""
+    try:
+        from vismatch.im_models.xfeat import xFeatMatcher
+    except ImportError:
+        pytest.skip("vismatch 未安装，跳过 XFeat 加载测试")
+    import torch
+    dev = "mps" if torch.backends.mps.is_available() else "cpu"
+    matcher = xFeatMatcher(device=dev, mode="sparse")
+    assert matcher is not None
+    assert hasattr(matcher, "_forward")
+
+
 def test_faiss_search_fallback_when_no_index(monkeypatch):
     """无 FAISS 索引时 _faiss_search 返回 []（mock 构建失败路径）。"""
     v2._FAISS_INDEX = None

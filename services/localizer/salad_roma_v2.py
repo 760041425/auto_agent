@@ -1899,11 +1899,11 @@ def _match_tile_with_loftr(img1, img2):
 # --------------------------------------------------------------------------- #
 
 def _has_xfeat() -> bool:
-    """检测环境是否有 XFeat（延迟检测）。"""
+    """检测环境是否有 XFeat（vismatch 的 xFeatMatcher）。"""
     global _HAS_XFEAT
     if _HAS_XFEAT is None:
         try:
-            import xfeat  # noqa: F401
+            from vismatch.im_models.xfeat import xFeatMatcher  # noqa: F401
             _HAS_XFEAT = True
         except ImportError:
             _HAS_XFEAT = False
@@ -1914,17 +1914,16 @@ _XFEAT_MODEL = None
 
 
 def _get_xfeat_model():
-    """加载 XFeat 模型（可选）。"""
+    """加载 XFeat 模型（vismatch.xFeatMatcher，可选）。"""
     global _XFEAT_MODEL
     if _XFEAT_MODEL is not None:
         return _XFEAT_MODEL
     if not _has_xfeat():
         return None
     try:
-        import xfeat
-        _XFEAT_MODEL = xfeat.InterNet(pretrained='outdoor').to(DEVICE).eval()
-        # 注：XFeat 实际接口可能不同，需按实际包调整
-        log("  XFeat 模型加载完成")
+        from vismatch.im_models.xfeat import xFeatMatcher
+        _XFEAT_MODEL = xFeatMatcher(device=DEVICE, mode="sparse")
+        log("  XFeat 模型加载完成 (vismatch.xFeatMatcher)")
     except Exception as e:
         log(f"  XFeat 加载失败: {e}")
         _XFEAT_MODEL = False
@@ -1934,6 +1933,7 @@ def _get_xfeat_model():
 def _match_tile_with_xfeat(img1, img2):
     """XFeat 匹配 — 轻量级稀疏匹配（备选 DISK+LightGlue）。
 
+    使用 vismatch.xFeatMatcher（verlab/accelerated_features）。
     返回 (kpts_q, kpts_t, cert)，格式与 _match_tile_with_lightglue_v2 一致。
     """
     model = _get_xfeat_model()
@@ -1944,23 +1944,32 @@ def _match_tile_with_xfeat(img1, img2):
     import cv2
     import numpy as np
 
-    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY) if img1.ndim == 3 else img1
-    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY) if img2.ndim == 3 else img2
+    def _to_tensor(img):
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+        return torch.from_numpy(g).float()[None, None] / 255.0
 
-    t1 = torch.from_numpy(gray1).float()[None, None].to(DEVICE) / 255.0
-    t2 = torch.from_numpy(gray2).float()[None, None].to(DEVICE) / 255.0
+    t1 = _to_tensor(img1).to(DEVICE)
+    t2 = _to_tensor(img2).to(DEVICE)
 
     with torch.no_grad():
-        # XFeat 接口（按实际包调整）
-        corr = model.match_xfeat(t1, t2)
+        # xFeatMatcher._forward 返回 (mkpts0, mkpts1, kpts0, kpts1, desc0, desc1)
+        out = model._forward(t1, t2)
 
-    mkpts0 = corr['keypoints0'].cpu().numpy() if hasattr(corr['keypoints0'], 'cpu') else corr['keypoints0']
-    mkpts1 = corr['keypoints1'].cpu().numpy() if hasattr(corr['keypoints1'], 'cpu') else corr['keypoints1']
-    confidence = (corr['confidence'].cpu().numpy().astype(np.float32)
-                  if hasattr(corr['confidence'], 'cpu') else corr['confidence'].astype(np.float32))
+    mkpts0, mkpts1 = out[0], out[1]
+    # 置信度：vismatch sparse 模式不直接给 confidence，用匹配距离估计
+    if len(mkpts0) > 0:
+        # 用匹配点对距离的倒数作为伪置信度（越小越可靠）
+        with torch.no_grad():
+            dist = torch.norm(mkpts0 - mkpts1, dim=-1)
+            confidence = (1.0 / (1.0 + dist / 100.0)).cpu().numpy().astype(np.float32)
+    else:
+        confidence = np.array([], dtype=np.float32)
 
-    log(f"  XFeat: {len(mkpts0)} matches, conf_mean={confidence.mean():.3f}")
-    return mkpts0, mkpts1, confidence
+    mkpts0_np = mkpts0.cpu().numpy() if hasattr(mkpts0, "cpu") else np.asarray(mkpts0)
+    mkpts1_np = mkpts1.cpu().numpy() if hasattr(mkpts1, "cpu") else np.asarray(mkpts1)
+
+    log(f"  XFeat: {len(mkpts0_np)} matches, conf_mean={confidence.mean():.3f}")
+    return mkpts0_np, mkpts1_np, confidence
 
 
 # --------------------------------------------------------------------------- #

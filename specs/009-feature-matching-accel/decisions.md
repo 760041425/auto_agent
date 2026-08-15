@@ -10,4 +10,4 @@
 | D-009-06 | 描述子 PCA 降维暂不做（本期） | 风险较高，需重测检索精度；留 follow-up | 本期做 → 工作量大 | 本期不做 |
 | D-009-07 | `salad_v2_loftr_fast` 升级为默认 LoFTR 方案 | benchmark 12 查询：成功率 100% = 原版，延迟 12.33s = 原版 20.32s × 0.61（≤0.7 目标）；前端 `checked`，原版标"高精度对照" | 保留原版默认 → 放弃 1.65x 加速收益 | 采用 |
 | D-009-08 | hybrid / loftr fast 加自适应回退（fast 失败→原版 top_k=3+迭代） | hybrid_fast 92% 成功率，8% 因 top_k=1 漏检；回退仅触发失败案例，均延迟≈13.6s<15s 目标，成功率预计→~100%。**验收通过**：`reports/benchmark_009_v2.json` 12 查询 hybrid_fast 成功率 100%（12/12），均延迟 14.56s < 15s 目标 | 纯 top_k=1 → 8% 失败不可接受；取消 fast → 失去加速 | 采用 ✅ 已验收 |
-| D-009-09 | XFeat 离线安装验证（本期阻塞） | verlab/LEARNING-XFeat 未发 PyPI，GitHub 在本环境不可达；需人工离线装后跑跨域对比 | 放弃 XFeat → 失去潜在 DISK+LG 替代方案 | 待离线安装后验证 |
+| D-009-09 | XFeat 验证完成（vismatch.xFeatMatcher） | 通过 `gmberton/image-matching-models` (vismatch) + `verlab/accelerated_features` 子模块安装。跨域匹配数 646 vs DISK+LG 143（4.5×），置信度 0.186 vs 0.005（37×）。benchmark 12 查询成功率 **100%**，均延迟 16.14s。接口更新为 `xFeatMatcher(device, mode="sparse")._forward()` | 放弃 XFeat → 失去潜在 DISK+LG 替代方案 | **已验证 ✅**：跨域显著优于 DISK+LG，成功率与 LoFTR 持平；延迟无优势，定位为 domain-gap 敏感场景的稀疏匹配前端 |
