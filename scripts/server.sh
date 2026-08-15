@@ -9,6 +9,9 @@ PID_FILE="$ROOT_DIR/.uvicorn.pid"
 LOG_FILE="$ROOT_DIR/logs/uvicorn.log"
 APP_MODULE="api.main:app"
 
+# macOS OpenMP 兼容：torch+faiss+scipy+PIL 共存时 libomp.dylib 重复初始化 → SIGABRT
+export KMP_DUPLICATE_LIB_OK="${KMP_DUPLICATE_LIB_OK:-TRUE}"
+
 mkdir -p "$ROOT_DIR/logs"
 
 start_server() {

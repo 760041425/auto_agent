@@ -12,6 +12,9 @@ fi
 
 cd "$ROOT_DIR"
 
+# macOS OpenMP 兼容：torch+faiss+scipy+PIL 共存时 libomp.dylib 重复初始化 → SIGABRT
+export KMP_DUPLICATE_LIB_OK="${KMP_DUPLICATE_LIB_OK:-TRUE}"
+
 case "$MODE" in
   fast)
     "$PYTHON_BIN" -m pytest -q \
