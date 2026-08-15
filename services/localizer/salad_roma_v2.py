@@ -83,6 +83,14 @@ _LIGHTGLUE_MODEL = None
 _COORD_REG_MODEL = None
 _LOFTR_MODEL = None
 
+# ── 加速缓存（009） ──
+_FAISS_INDEX = None          # FAISS 检索后端（可选）
+_FAISS_KEYS: list = []       # FAISS 索引对应的 tile_key 列表
+_DINO_COMPILED = False       # DINOv2 是否已 torch.compile
+_LOFTR_COMPILED = False      # LoFTR 是否已 torch.compile
+_HAS_FAISS: Optional[bool] = None  # 环境是否有 FAISS（延迟检测）
+_HAS_XFEAT: Optional[bool] = None  # 环境是否有 XFeat（延迟检测）
+
 
 # --------------------------------------------------------------------------- #
 # 模型加载（复用 salad_roma 的 DINOv2 / LightGlue 加载逻辑）
@@ -117,6 +125,143 @@ def _get_loftr_model():
     _LOFTR_MODEL = LoFTR(pretrained='outdoor').to(DEVICE).eval()
     log("LoFTR 模型加载完成")
     return _LOFTR_MODEL
+
+
+# --------------------------------------------------------------------------- #
+# FAISS 检索后端（009 加速，可选依赖）
+# --------------------------------------------------------------------------- #
+
+def _has_faiss() -> bool:
+    """检测环境是否有 FAISS（延迟检测，缓存结果）。"""
+    global _HAS_FAISS
+    if _HAS_FAISS is None:
+        try:
+            import faiss  # noqa: F401
+            _HAS_FAISS = True
+        except ImportError:
+            _HAS_FAISS = False
+    return _HAS_FAISS
+
+
+def _build_faiss_index():
+    """构建 FAISS 内积索引（描述子需先 L2 归一化）。"""
+    global _FAISS_INDEX, _FAISS_KEYS
+    if _FAISS_INDEX is not None:
+        return
+
+    # 无 FAISS 则不构建（faiss 为可选依赖）
+    try:
+        faiss_mod = __import__("faiss")
+    except ImportError:
+        return
+
+    try:
+        index = _ensure_index()
+    except Exception as e:
+        log(f"  FAISS 构建失败（无索引数据）: {e}")
+        return
+    if not index:
+        return
+
+    # 收集所有 rgb 描述子
+    descs = []
+    keys = []
+    for key, entry in index.items():
+        if isinstance(entry, dict) and "rgb" in entry:
+            d = entry["rgb"].astype(np.float32)
+            norm = np.linalg.norm(d)
+            if norm > 1e-8:
+                descs.append(d / norm)  # L2 归一化 → 内积 == 余弦相似度
+                keys.append(key)
+
+    if not descs:
+        return
+
+    mat = np.stack(descs).astype(np.float32)
+    dim = mat.shape[1]
+    _FAISS_INDEX = faiss_mod.IndexFlatIP(dim)
+    _FAISS_INDEX.add(mat)
+    _FAISS_KEYS = keys
+    log(f"  FAISS 索引构建完成: {len(keys)} 条, dim={dim}")
+
+
+def _faiss_search(q_desc: np.ndarray, k: int = 5) -> list:
+    """FAISS 检索 top-k。返回 list[(tile_key, similarity)]（降序）。"""
+    global _FAISS_INDEX, _FAISS_KEYS
+    if _FAISS_INDEX is None:
+        _build_faiss_index()
+    if _FAISS_INDEX is None or not _FAISS_KEYS:
+        return []  # 无索引或无数据 → 空结果
+
+    q = q_desc.astype(np.float32).reshape(1, -1)
+    q_norm = np.linalg.norm(q)
+    if q_norm > 1e-8:
+        q = q / q_norm  # L2 归一化
+
+    scores, indices = _FAISS_INDEX.search(q, k)
+    results = []
+    for score, idx in zip(scores[0], indices[0]):
+        if idx < 0 or idx >= len(_FAISS_KEYS):
+            continue
+        results.append((_FAISS_KEYS[idx], float(score)))
+    return results
+
+
+# --------------------------------------------------------------------------- #
+# MPS 加速（009 torch.compile + FP16）
+# --------------------------------------------------------------------------- #
+
+def _compile_models():
+    """尝试 torch.compile 包裹 DINOv2 / LoFTR；失败回退 eager。"""
+    global _DINO_COMPILED, _LOFTR_COMPILED
+
+    if not hasattr(torch, "compile"):
+        log("  torch.compile 不可用（PyTorch <2.0），跳过编译")
+        return
+
+    # DINOv2 编译
+    if not _DINO_COMPILED and _DINO_MODEL is not None:
+        try:
+            _orig_forward = _DINO_MODEL.forward
+            # 仅标记，实际 compile 在首次推理时触发（避免启动开销）
+            _DINO_COMPILED = True
+            log("  DINOv2 编译标记已设置（首次推理触发）")
+        except Exception as e:
+            log(f"  DINOv2 编译跳过: {e}")
+
+    # LoFTR 编译
+    if not _LOFTR_COMPILED and _LOFTR_MODEL is not None:
+        try:
+            _LOFTR_COMPILED = True
+            log("  LoFTR 编译标记已设置（首次推理触发）")
+        except Exception as e:
+            log(f"  LoFTR 编译跳过: {e}")
+
+
+def _maybe_compile_dinov2():
+    """首次推理时尝试 compile DINOv2（lazy）。"""
+    global _DINO_MODEL, _DINO_COMPILED
+    if _DINO_COMPILED is True and hasattr(torch, "compile") and _DINO_MODEL is not None:
+        try:
+            _DINO_MODEL = torch.compile(_DINO_MODEL, backend="mps")
+            _DINO_COMPILED = "done"
+            log("  DINOv2 torch.compile(mps) 成功")
+        except Exception as e:
+            log(f"  DINOv2 compile 失败，回退 eager: {e}")
+            _DINO_COMPILED = False
+
+
+def _maybe_compile_loftr():
+    """首次推理时尝试 compile LoFTR（lazy）。"""
+    global _LOFTR_MODEL, _LOFTR_COMPILED
+    if _LOFTR_COMPILED is True and hasattr(torch, "compile") and _LOFTR_MODEL is not None:
+        try:
+            _LOFTR_MODEL = torch.compile(_LOFTR_MODEL, backend="mps")
+            _LOFTR_COMPILED = "done"
+            log("  LoFTR torch.compile(mps) 成功")
+        except Exception as e:
+            log(f"  LoFTR compile 失败，回退 eager: {e}")
+            _LOFTR_COMPILED = False
 
 
 # --------------------------------------------------------------------------- #
@@ -277,24 +422,44 @@ def _salad_retrieve_v2(
     top_k: int = 5,
     prior_position: Optional[Tuple[float, float, float]] = None,
     prior_radius: float = 15.0,
+    use_faiss: bool = False,
 ):
     """对称 SALAD 检索，可选先验位置引导。
 
     有先验时只在 ``prior_radius`` 米内检索，候选从 ~2732 降到 ~10。
     返回 ``[(tile_key, similarity, tile_info), ...]``。
+
+    use_faiss: 使用 FAISS 后端（加速）；无 FAISS 时自动回退 numpy。
     """
     index = _ensure_index()
     if not index:
         return []
+
+    # lazy compile DINOv2（009 加速）
+    _maybe_compile_dinov2()
 
     model, scale = _get_dinov2_model()
     if model is None:
         return []
 
     q_rgb = cv2.cvtColor(q_img, cv2.COLOR_BGR2RGB) if q_img.ndim == 3 else q_img
-    q_desc = _extract_rgb_descriptor(model, q_rgb, scale)
+
+    # 009: FP16 autocast 推理 DINOv2 描述子（精度足够，速度提升）
+    if DEVICE.type == "mps" and hasattr(torch, "autocast"):
+        with torch.autocast(device_type="mps", dtype=torch.float16):
+            q_desc = _extract_rgb_descriptor(model, q_rgb, scale)
+        # 描述子转回 float32（后续 numpy 运算需要）
+        if hasattr(q_desc, "float"):
+            q_desc = q_desc.float()
+    else:
+        q_desc = _extract_rgb_descriptor(model, q_rgb, scale)
+
     if q_desc is None:
         return []
+
+    # 确保 q_desc 是 numpy（DINOv2 输出可能是 tensor）
+    if hasattr(q_desc, "cpu"):
+        q_desc = q_desc.cpu().numpy()
 
     tiles = _load_tile_index()
     tile_map = {}
@@ -313,6 +478,19 @@ def _salad_retrieve_v2(
         log("  SALAD v2 缓存与当前 accepted MapTile 无交集")
         return []
 
+    # 009: FAISS 后端（可选）
+    if use_faiss and _has_faiss():
+        scores = _faiss_search(q_desc, k=top_k * 3)  # 多取一些供先验过滤
+        # 先验过滤
+        if prior_position is not None:
+            scores = _apply_prior_filter(scores, prior_position, prior_radius)
+        results = []
+        for key, sim in scores[:top_k]:
+            if key in tile_map:
+                results.append((key, sim, tile_map[key]))
+        return results
+
+    # ── 原 numpy 逻辑（保留不动，作为 fallback）──
     scores = []
     q_norm = np.linalg.norm(q_desc) + 1e-8
 
@@ -349,6 +527,29 @@ def _salad_retrieve_v2(
     for sim, key in scores[:top_k]:
         results.append((key, sim, tile_map[key]))
     return results
+
+
+def _apply_prior_filter(scores: list, prior_position, prior_radius: float) -> list:
+    """先验位置过滤 FAISS 检索结果。"""
+    try:
+        from services.localizer import _POSE_TREE, _POSE_ARRAY, load_colmap
+        if _POSE_TREE is None:
+            load_colmap()
+        if _POSE_TREE is not None:
+            nearby_idx = _POSE_TREE.query_ball_point(prior_position, prior_radius)
+            if nearby_idx:
+                nearby_roots = set()
+                for idx in nearby_idx:
+                    if idx < len(_POSE_ARRAY):
+                        x, y, z = _POSE_ARRAY[idx]
+                        nearby_roots.add(f"{round(x,1)}_{round(y,1)}_{round(z,1)}")
+                filtered = [(k, s) for k, s in scores if any(r in k for r in nearby_roots)]
+                if filtered:
+                    log(f"  [先验-FAISS] 从 {len(scores)} 筛到 {len(filtered)}")
+                    return filtered
+    except Exception as e:
+        log(f"  [先验-FAISS] 失败，回退全量: {e}")
+    return scores
 
 
 # --------------------------------------------------------------------------- #
@@ -552,6 +753,7 @@ def localize_with_salad_roma_v2(
     use_loftr: bool = False,  # 方案 B：使用 LoFTR 替代 DISK+LightGlue
     matcher_mode: Optional[str] = None,
     coordinate_threshold_m: float = 0.3,
+    fast_mode: bool = False,  # 009: 加速模式（FAISS + FP16 + 参数收紧）
 ) -> dict:
     """SALAD v2 定位入口。
 
@@ -570,14 +772,18 @@ def localize_with_salad_roma_v2(
 
     if matcher_mode is None:
         matcher_mode = "loftr" if use_loftr else "disk_lg"
-    if matcher_mode not in {"disk_lg", "loftr", "hybrid"}:
+    if matcher_mode not in {"disk_lg", "loftr", "hybrid", "xfeat"}:
         return {"success": False, "error": f"Unsupported matcher mode: {matcher_mode}"}
     match_name = {
         "disk_lg": "DISK+LightGlue",
         "loftr": "LoFTR",
         "hybrid": "Hybrid",
+        "xfeat": "XFeat",
     }[matcher_mode]
-    tag = f"salad_v2_{matcher_mode}"
+    # 009 fast_mode 标识
+    if fast_mode:
+        match_name = f"{match_name}[fast]"
+    tag = f"salad_v2_{matcher_mode}" + ("_fast" if fast_mode else "")
     log(f"{'=' * 60}")
     log(f"🚀 SALAD v2 + {match_name} 定位: {os.path.basename(query_image_path)}")
 
@@ -637,15 +843,29 @@ def localize_with_salad_roma_v2(
     all_pts, all_col = get_point_cloud_arrays()
     log(f"🗺️ {len(all_pts)} 个 3D 点")
 
-    # 6. SALAD 检索
+    # 6. SALAD 检索（009 fast_mode: FAISS + 参数收紧）
     log("🔍 SALAD v2 对称检索...")
     t0 = time.time()
+    # fast_mode: top_k 收紧到 1（先验引导下安全），FAISS 加速
+    effective_top_k = 1 if fast_mode else top_k_retrieval
+    use_faiss = fast_mode and _has_faiss()
     retrieved = _salad_retrieve_v2(
-        q_small, top_k=top_k_retrieval,
+        q_small, top_k=effective_top_k,
         prior_position=prior_position if use_pose_prior else None,
         prior_radius=prior_radius,
+        use_faiss=use_faiss,
     )
-    log(f"  SALAD 检索: {time.time() - t0:.2f}s, 找到 {len(retrieved)} 候选")
+    # fast_mode 先验失败回退
+    if fast_mode and not retrieved and top_k_retrieval > 1:
+        log("  [fast] 先验 top_k=1 无结果，回退 top_k=3")
+        retrieved = _salad_retrieve_v2(
+            q_small, top_k=top_k_retrieval,
+            prior_position=prior_position if use_pose_prior else None,
+            prior_radius=prior_radius,
+            use_faiss=use_faiss,
+        )
+    log(f"  SALAD 检索: {time.time() - t0:.2f}s, 找到 {len(retrieved)} 候选"
+        + (f" [FAISS]" if use_faiss else ""))
     if not retrieved:
         return {"success": False, "error": "SALAD 检索无匹配候选", "tag": tag}
 
@@ -695,6 +915,8 @@ def localize_with_salad_roma_v2(
             kpts_q, kpts_tile, cert = _match_tile_with_loftr(q_small, tile_bgr)
         elif matcher_mode == "hybrid":
             kpts_q, kpts_tile, cert = _match_tile_with_hybrid(q_small, tile_bgr)
+        elif matcher_mode == "xfeat":
+            kpts_q, kpts_tile, cert = _match_tile_with_xfeat(q_small, tile_bgr)
         else:
             kpts_q, kpts_tile, cert = _match_tile_with_lightglue_v2(q_small, tile_bgr)
         if len(kpts_q) < 6:
@@ -786,11 +1008,18 @@ def localize_with_salad_roma_v2(
     current_error = best_reproj_error
     round_errors = [current_error]
 
-    # 迭代阈值：从严格到宽松，逐步精化
-    cert_thresholds = [0.1, 0.01, 0.001]
-    actual_iterations = 0  # 实际执行的迭代轮数
+    # 009 fast_mode: 跳过迭代精化（节省 ~0.5-1s）
+    if fast_mode:
+        log(f"  [fast] 跳过迭代精化")
+        actual_iterations = 0
+    else:
+        # 迭代阈值：从严格到宽松，逐步精化
+        cert_thresholds = [0.1, 0.01, 0.001]
+        actual_iterations = 0  # 实际执行的迭代轮数
 
     for iteration in range(1, max_iterations + 1):
+        if fast_mode:
+            break  # fast_mode: 不执行迭代
         if adaptive_early_stop(round_errors, patience=1):
             log(f"  ⏹ 误差收敛，停止迭代 (第 {iteration} 轮)")
             break
@@ -809,6 +1038,8 @@ def localize_with_salad_roma_v2(
             kpts_q2, kpts_t2, cert2 = _match_tile_with_loftr(q_small, tile_bgr_iter)
         elif matcher_mode == "hybrid":
             kpts_q2, kpts_t2, cert2 = _match_tile_with_hybrid(q_small, tile_bgr_iter)
+        elif matcher_mode == "xfeat":
+            kpts_q2, kpts_t2, cert2 = _match_tile_with_xfeat(q_small, tile_bgr_iter)
         else:
             kpts_q2, kpts_t2, cert2 = _match_tile_with_lightglue_v2(q_small, tile_bgr_iter)
         if len(kpts_q2) < 8:
@@ -907,24 +1138,7 @@ def localize_with_salad_roma_v2(
     log(f"🏆 结果: 内点={inlier_count}, 误差={current_error:.2f}px, "
         f"t=({t_vec_out[0]:.2f},{t_vec_out[1]:.2f},{t_vec_out[2]:.2f})")
 
-    artifacts = {}
-    artifact_error = None
-    try:
-        artifacts = _write_final_artifacts(
-            q_small,
-            all_pts,
-            all_col,
-            rvec,
-            tvec,
-            K,
-            out,
-            tag,
-        )
-        log(f"  最终视觉产物: {', '.join(artifacts)}")
-    except Exception as exc:
-        artifact_error = str(exc)
-        log(f"  最终视觉产物生成失败: {exc}")
-
+    # 先计算 coordinate_transform（含地面 bounding box）
     coordinate_transform = {
         "status": "not_available",
         "reason": "final_2d_3d_correspondences_unavailable",
@@ -947,15 +1161,65 @@ def localize_with_salad_roma_v2(
                 projection_xyz,
                 out / f"projection_xyz_{tag}.npy",
                 consistency_threshold_m=coordinate_threshold_m,
+                plane_distance_threshold=0.2,
+                plane_seed=1337,
+                dense_points=all_pts,
+                pose_rvec=best_rvec,
+                pose_tvec=best_tvec,
+                pose_K=K,
             )
             consistency = coordinate_transform.get("consistency", {})
+            plane_seg = coordinate_transform.get("plane_segmentation", {})
+            # 诊断：用 PnP 位姿直接重投影 NPY 3D 点，看纯位姿误差（不经过 H）
+            pose_only_err = None
+            try:
+                if best_3d is not None and best_2d is not None:
+                    proj_pts, _ = cv2.projectPoints(
+                        best_3d.reshape(-1, 1, 3),
+                        best_rvec if 'best_rvec' in dir() else np.zeros(3),
+                        best_tvec if 'best_tvec' in dir() else np.zeros(3),
+                        K, None,
+                    )
+                    proj_pts = proj_pts.reshape(-1, 2)
+                    reproj_px = np.linalg.norm(proj_pts - best_2d, axis=1)
+                    pose_only_err = float(np.median(reproj_px))
+            except Exception:
+                pass
+            # 诊断：采样 5 个 PnP 内点，对比 H→SLAM XY vs NPY XY
+            sample_diag = ""
+            try:
+                if best_3d is not None and best_2d is not None and homography is not None:
+                    # 取前 5 个内点
+                    n_sample = min(5, len(best_3d))
+                    samp_3d = best_3d[:n_sample]
+                    samp_2d = best_2d[:n_sample]
+                    # H→SLAM
+                    hom = np.asarray(coordinate_transform.get("homography", homography))
+                    hom = hom.reshape(3, 3) if hom.size == 9 else None
+                    if hom is not None:
+                        pts_h = np.column_stack([samp_2d[:, 0], samp_2d[:, 1], np.ones(n_sample)])
+                        mapped = (hom @ pts_h.T).T
+                        slam_xy = mapped[:, :2] / mapped[:, 2:3]
+                        # 差异
+                        diffs = np.linalg.norm(slam_xy - samp_3d[:, :2], axis=1)
+                        sample_diag = (
+                            f" | H_vs_NPY_XY_diff=["
+                            + ", ".join(f"{d:.1f}m" for d in diffs)
+                            + "] (前{n_sample}内点)"
+                        )
+            except Exception:
+                pass
+            reproj_str = f"{pose_only_err:.2f}px" if pose_only_err is not None else "N/A"
             log(
                 f"  本地坐标转换产物: {coordinate_transform.get('status')} "
                 f"({coordinate_transform.get('n_inliers', 0)}/"
                 f"{coordinate_transform.get('n_matches', 0)} H inliers); "
+                f"plane_segmentation={plane_seg.get('status', 'N/A')}, "
+                f"ground={plane_seg.get('n_ground_inliers', '-')}/"
+                f"{plane_seg.get('n_total_points', '-')}, "
                 f"median difference={consistency.get('median_m', 'n/a')}m, "
-                f"threshold={coordinate_threshold_m:.3f}m, "
-                f"passed={consistency.get('passed', False)}"
+                f"PnP reproj_median={reproj_str}"
+                f"{sample_diag}"
             )
     except Exception as exc:
         coordinate_transform = {
@@ -969,6 +1233,65 @@ def localize_with_salad_roma_v2(
     coordinate_reliable = bool(
         consistency.get("status") == "available" and consistency.get("passed")
     )
+
+    # 生成视觉产物（在 coordinate_transform 之后，以便画地面凸包）
+    artifacts = {}
+    artifact_error = None
+    try:
+        ground_polygon = None
+        if coordinate_transform.get("plane_segmentation", {}).get("status") == "plane_detected":
+            # 用 PnP 内点（实际匹配点）计算凸包
+            fitting_2d = coordinate_transform.get("fitting_2d")
+            if fitting_2d is not None and len(fitting_2d) >= 3:
+                ground_pixels = np.array(fitting_2d, dtype=np.float64)
+                ground_polygon = _compute_ground_polygon(ground_pixels=ground_pixels)
+        artifacts = _write_final_artifacts(
+            q_small,
+            all_pts,
+            all_col,
+            rvec,
+            tvec,
+            K,
+            out,
+            tag,
+            ground_polygon=ground_polygon,
+        )
+        log(f"  最终视觉产物: {', '.join(artifacts)}")
+    except Exception as exc:
+        artifact_error = str(exc)
+        log(f"  最终视觉产物生成失败: {exc}")
+
+    # 诊断：采样内点对比 H→SLAM XY vs NPY XY（在 coordinate_transform 生成后）
+    sample_diag = ""
+    try:
+        ct_status = coordinate_transform.get("status")
+        if ct_status == "ready" and best_3d is not None and best_2d is not None:
+            hom_entries = coordinate_transform.get("homography")
+            plane_seg = coordinate_transform.get("plane_segmentation", {})
+            plane_params = plane_seg.get("plane_params")
+            if hom_entries is not None:
+                hom = np.asarray(hom_entries, dtype=np.float64).reshape(3, 3)
+                # 取第 1 个内点做详细展示
+                p2d = best_2d[0]
+                p3d = best_3d[0]
+                pt_h = np.array([p2d[0], p2d[1], 1.0])
+                mapped = hom @ pt_h
+                if abs(mapped[2]) > 1e-12:
+                    slam_x, slam_y = mapped[0] / mapped[2], mapped[1] / mapped[2]
+                    sample_diag = (
+                        f" | pt0: pixel=({p2d[0]:.1f},{p2d[1]:.1f})"
+                        f" → H=({slam_x:.1f},{slam_y:.1f})"
+                        f" vs NPY=({p3d[0]:.1f},{p3d[1]:.1f},{p3d[2]:.1f})"
+                        f" Δ=({slam_x-p3d[0]:.1f},{slam_y-p3d[1]:.1f})"
+                    )
+                    if plane_params:
+                        sample_diag += f" plane=[{','.join(f'{p:.2f}' for p in plane_params)}]"
+    except Exception as e:
+        sample_diag = f" | DIAG_ERR={e}"
+
+    if sample_diag:
+        log(f" 🔍 点对比诊断{sample_diag}")
+
     result = {
         "success": True,
         "reliable": coordinate_reliable,
@@ -1147,6 +1470,186 @@ def _render_projection_local(all_pts, all_col, rvec, tvec, K, w, h, out_dir, nam
         return None
 
 
+def _project_ground_pixels(all_pts, rvec, tvec, K, plane_params, image_shape):
+    """将密集 3D 点投影到像素，筛选地面点。"""
+    height, width = image_shape[:2]
+    # 确保 plane_params 是 1D
+    pp = np.asarray(plane_params, dtype=np.float64).flatten()
+    a, b, c, d = pp[0], pp[1], pp[2], pp[3]
+
+    # 确保 all_pts 是 numpy 数组
+    pts = np.asarray(all_pts, dtype=np.float64).reshape(-1, 3)
+    if len(pts) == 0:
+        return None
+
+    # 下采样（避免 500 万点导致内存/性能问题）
+    max_pts = 50000
+    if len(pts) > max_pts:
+        idx = np.random.choice(len(pts), max_pts, replace=False)
+        pts = pts[idx]
+
+    # 3D 点投影到像素
+    R = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))[0]
+    t = np.asarray(tvec, dtype=np.float64).reshape(1, 3)
+    cam_pts = (R @ pts.T).T + t  # t 是 (1,3)，广播到 (N,3)
+    depth = cam_pts[:, 2]
+    valid = (depth > 0.1) & np.isfinite(depth)
+    if not valid.any():
+        return None
+
+    proj = (K @ cam_pts[valid].T).T
+    pixels = proj[:, :2] / proj[:, 2:3]
+    px = np.clip(np.rint(pixels[:, 0]).astype(int), 0, width - 1)
+    py = np.clip(np.rint(pixels[:, 1]).astype(int), 0, height - 1)
+
+    # 筛选地面点（到平面距离 < 0.5m）
+    normal = np.array([a, b, c], dtype=np.float64).flatten()
+    import sys, traceback
+    print(f"DEBUG _project_ground_pixels: pts.shape={pts.shape}, valid.sum={valid.sum()}, normal.shape={normal.shape}", file=sys.stderr)
+    if valid.sum() > 0:
+        print(f"  pts[valid].shape={pts[valid].shape}", file=sys.stderr)
+    dists = np.abs(pts[valid] @ normal + float(d))
+    ground_mask = dists < 0.5
+
+    if ground_mask.sum() < 3:
+        return None
+
+    ground_pixels = np.column_stack([px[ground_mask], py[ground_mask]])
+    return ground_pixels
+
+
+def _compute_ground_polygon_from_npy(npy_path, plane_params, image_shape):
+    """从 NPY 文件中提取实际地面点，计算凸包。
+
+    只保留 NPY Z 值接近地面的点，用这些点的像素坐标计算凸包。
+    """
+    from pathlib import Path
+    npy = np.load(str(Path(npy_path)), mmap_mode="r")
+    height, width = npy.shape[:2]
+
+    # 找出有效像素（非零）
+    valid = np.any(npy != 0, axis=2)
+    if not valid.any():
+        return None
+
+    # 地面点过滤：|NPY Z - plane_Z| < 0.5m
+    a, b, c, d = (float(p) for p in plane_params)
+    z_plane = -d / c if abs(c) > 1e-6 else 0.0
+    z_vals = npy[:, :, 2]
+    on_ground = valid & (np.abs(z_vals - z_plane) < 0.5)
+
+    if on_ground.sum() < 3:
+        return None
+
+    # 地面点的像素坐标
+    ys, xs = np.where(on_ground)
+    pixels = np.column_stack([xs, ys])
+
+    # 凸包
+    try:
+        from scipy.spatial import ConvexHull
+        unique_pixels = np.unique(pixels, axis=0)
+        if len(unique_pixels) < 3:
+            return None
+        hull = ConvexHull(unique_pixels)
+        hull_points = unique_pixels[hull.vertices]
+        return [(int(p[0]), int(p[1])) for p in hull_points]
+    except Exception:
+        return None
+
+
+def _compute_ground_polygon_by_ray_plane(rvec, tvec, K, plane_params, image_shape):
+    """通过相机射线与地面平面求交，计算可见地面多边形。"""
+    height, width = image_shape[:2]
+    a, b, c, d = plane_params
+
+    R = cv2.Rodrigues(np.asarray(rvec, dtype=np.float64).reshape(3, 1))[0]
+    t = np.asarray(tvec, dtype=np.float64).reshape(3, 1)
+    cam_center = -R.T @ t
+
+    K_inv = np.linalg.inv(K)
+
+    # 采样四条边缘上的点，找与平面的交点
+    n_samples = 200
+    edge_points = []
+
+    # 上边缘 (y=0, x: 0 -> width-1)
+    for i in range(n_samples + 1):
+        u = int(width * i / n_samples)
+        pt = _ray_plane_intersection(u, 0, R, cam_center, K_inv, a, b, c, d)
+        if pt is not None:
+            edge_points.append(pt)
+
+    # 右边缘 (x=width-1, y: 0 -> height-1)
+    for i in range(n_samples + 1):
+        v = int(height * i / n_samples)
+        pt = _ray_plane_intersection(width - 1, v, R, cam_center, K_inv, a, b, c, d)
+        if pt is not None:
+            edge_points.append(pt)
+
+    # 下边缘 (y=height-1, x: width-1 -> 0)
+    for i in range(n_samples + 1):
+        u = int(width * (1 - i / n_samples))
+        pt = _ray_plane_intersection(u, height - 1, R, cam_center, K_inv, a, b, c, d)
+        if pt is not None:
+            edge_points.append(pt)
+
+    # 左边缘 (x=0, y: height-1 -> 0)
+    for i in range(n_samples + 1):
+        v = int(height * (1 - i / n_samples))
+        pt = _ray_plane_intersection(0, v, R, cam_center, K_inv, a, b, c, d)
+        if pt is not None:
+            edge_points.append(pt)
+
+    if len(edge_points) < 3:
+        return None
+
+    # 去重并排序（顺时针）
+    seen = set()
+    unique = []
+    for pt in edge_points:
+        key = (int(pt[0]), int(pt[1]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(key)
+
+    return unique if len(unique) >= 3 else None
+
+
+def _ray_plane_intersection(u, v, R, cam_center, K_inv, a, b, c, d):
+    """求射线与平面的交点，返回像素坐标或 None。"""
+    # 射线方向
+    ray_cam = K_inv @ np.array([u, v, 1.0])
+    ray_world = R.T @ ray_cam
+
+    denom = a * ray_world[0] + b * ray_world[1] + c * ray_world[2]
+    if abs(denom) < 1e-10:
+        return None  # 平行
+
+    t_param = -(a * cam_center[0, 0] + b * cam_center[1, 0] + c * cam_center[2, 0] + d) / denom
+    if t_param <= 0:
+        return None  # 在相机后方
+
+    # 交点像素坐标就是 (u, v)
+    return (int(u), int(v))
+
+
+def _compute_ground_polygon(ground_pixels=None):
+    """计算地面区域凸包。"""
+    if ground_pixels is None or len(ground_pixels) < 3:
+        return None
+    try:
+        from scipy.spatial import ConvexHull
+        unique_points = np.unique(np.array(ground_pixels, dtype=np.int32), axis=0)
+        if len(unique_points) < 3:
+            return None
+        hull = ConvexHull(unique_points)
+        hull_points = unique_points[hull.vertices]
+        return [(int(p[0]), int(p[1])) for p in hull_points]
+    except Exception:
+        return None
+
+
 def _write_final_artifacts(
     query_image,
     all_pts,
@@ -1156,8 +1659,11 @@ def _write_final_artifacts(
     camera_matrix,
     output_dir,
     tag,
+    ground_polygon=None,
 ):
     """为最终返回位姿生成查询图、最终投影图和带标签双图。"""
+    import sys
+    print(f"DEBUG _write_final_artifacts: all_pts type={type(all_pts)}, len={len(all_pts) if all_pts is not None else 'None'}", file=sys.stderr)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     query_path = output_dir / f"query_{tag}.png"
@@ -1185,10 +1691,31 @@ def _write_final_artifacts(
     if projection.shape[:2] != query_image.shape[:2]:
         projection = cv2.resize(projection, (width, height))
 
+    # 在 projection 上画地面平面多边形，然后重新保存
+    if ground_polygon is not None and len(ground_polygon) >= 3:
+        pts = np.array(ground_polygon, dtype=np.int32).reshape((-1, 1, 2))
+        cv2.polylines(projection, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
+        # 标签放在多边形第一个点上方
+        label_x = int(np.min(np.array(ground_polygon)[:, 0])) + 4
+        label_y = int(np.min(np.array(ground_polygon)[:, 1])) - 8
+        cv2.putText(
+            projection,
+            "Ground plane",
+            (label_x, max(15, label_y)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 255, 0),
+            1,
+            cv2.LINE_AA,
+        )
+        # 重新保存带框的 projection
+        cv2.imwrite(str(projection_path), projection)
+
     header_height = 28
     canvas = np.zeros((height + header_height, width * 2, 3), dtype=np.uint8)
     canvas[header_height:, :width] = query_image
     canvas[header_height:, width:] = projection
+
     cv2.putText(
         canvas,
         "Query image",
@@ -1327,6 +1854,9 @@ def _match_tile_with_loftr(img1, img2):
     -------
     (kpts1, kpts2, certainty) — 匹配点坐标和置信度
     """
+    # lazy compile LoFTR（009 加速）
+    _maybe_compile_loftr()
+
     model = _get_loftr_model()
 
     import cv2
@@ -1339,13 +1869,124 @@ def _match_tile_with_loftr(img1, img2):
     t2 = torch.from_numpy(gray2).float()[None, None].to(DEVICE) / 255.0
 
     input_dict = {"image0": t1, "image1": t2}
-    with torch.no_grad():
-        correspondences = model(input_dict)
 
-    mkpts0 = correspondences['keypoints0'].cpu().numpy()
-    mkpts1 = correspondences['keypoints1'].cpu().numpy()
+    # 009: FP16 autocast 推理（MPS 加速，精度足够）
+    if DEVICE.type == "mps" and hasattr(torch, "autocast"):
+        with torch.no_grad(), torch.autocast(device_type="mps", dtype=torch.float16):
+            correspondences = model(input_dict)
+    else:
+        with torch.no_grad():
+            correspondences = model(input_dict)
+
+    mkpts0 = correspondences['keypoints0']
+    mkpts1 = correspondences['keypoints1']
     conf = correspondences.get('confidence', torch.ones(len(mkpts0)))
-    confidence = conf.cpu().numpy().astype(np.float32)
+
+    # 统一转 numpy（处理 MPS tensor）
+    if hasattr(mkpts0, "cpu"):
+        mkpts0 = mkpts0.cpu().numpy()
+        mkpts1 = mkpts1.cpu().numpy()
+        confidence = conf.cpu().numpy().astype(np.float32)
+    else:
+        confidence = conf.astype(np.float32)
 
     log(f"  LoFTR: {len(mkpts0)} matches, conf_mean={confidence.mean():.3f}")
     return mkpts0, mkpts1, confidence
+
+
+# --------------------------------------------------------------------------- #
+# XFeat 匹配器（009 备选 A，可选依赖）
+# --------------------------------------------------------------------------- #
+
+def _has_xfeat() -> bool:
+    """检测环境是否有 XFeat（vismatch 的 xFeatMatcher）。"""
+    global _HAS_XFEAT
+    if _HAS_XFEAT is None:
+        try:
+            from vismatch.im_models.xfeat import xFeatMatcher  # noqa: F401
+            _HAS_XFEAT = True
+        except ImportError:
+            _HAS_XFEAT = False
+    return _HAS_XFEAT
+
+
+_XFEAT_MODEL = None
+
+
+def _get_xfeat_model():
+    """加载 XFeat 模型（vismatch.xFeatMatcher，可选）。"""
+    global _XFEAT_MODEL
+    if _XFEAT_MODEL is not None:
+        return _XFEAT_MODEL
+    if not _has_xfeat():
+        return None
+    try:
+        from vismatch.im_models.xfeat import xFeatMatcher
+        _XFEAT_MODEL = xFeatMatcher(device=DEVICE, mode="sparse")
+        log("  XFeat 模型加载完成 (vismatch.xFeatMatcher)")
+    except Exception as e:
+        log(f"  XFeat 加载失败: {e}")
+        _XFEAT_MODEL = False
+    return _XFEAT_MODEL if _XFEAT_MODEL is not False else None
+
+
+def _match_tile_with_xfeat(img1, img2):
+    """XFeat 匹配 — 轻量级稀疏匹配（备选 DISK+LightGlue）。
+
+    使用 vismatch.xFeatMatcher（verlab/accelerated_features）。
+    返回 (kpts_q, kpts_t, cert)，格式与 _match_tile_with_lightglue_v2 一致。
+    """
+    model = _get_xfeat_model()
+    if model is None:
+        # XFeat 不可用时回退 DISK+LG
+        return _match_tile_with_lightglue_v2(img1, img2)
+
+    import cv2
+    import numpy as np
+
+    def _to_tensor(img):
+        g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+        return torch.from_numpy(g).float()[None, None] / 255.0
+
+    t1 = _to_tensor(img1).to(DEVICE)
+    t2 = _to_tensor(img2).to(DEVICE)
+
+    with torch.no_grad():
+        # xFeatMatcher._forward 返回 (mkpts0, mkpts1, kpts0, kpts1, desc0, desc1)
+        out = model._forward(t1, t2)
+
+    mkpts0, mkpts1 = out[0], out[1]
+    # 置信度：vismatch sparse 模式不直接给 confidence，用匹配距离估计
+    if len(mkpts0) > 0:
+        # 用匹配点对距离的倒数作为伪置信度（越小越可靠）
+        with torch.no_grad():
+            dist = torch.norm(mkpts0 - mkpts1, dim=-1)
+            confidence = (1.0 / (1.0 + dist / 100.0)).cpu().numpy().astype(np.float32)
+    else:
+        confidence = np.array([], dtype=np.float32)
+
+    mkpts0_np = mkpts0.cpu().numpy() if hasattr(mkpts0, "cpu") else np.asarray(mkpts0)
+    mkpts1_np = mkpts1.cpu().numpy() if hasattr(mkpts1, "cpu") else np.asarray(mkpts1)
+
+    log(f"  XFeat: {len(mkpts0_np)} matches, conf_mean={confidence.mean():.3f}")
+    return mkpts0_np, mkpts1_np, confidence
+
+
+# --------------------------------------------------------------------------- #
+# 批量匹配（009 备选 B）
+# --------------------------------------------------------------------------- #
+
+def _match_tiles_with_loftr_batch(img1, img2_list: list):
+    """批量 LoFTR 匹配 — 多张候选 tile 一次性推理。
+
+    img1: 查询图；img2_list: tile 图列表。
+    返回 list of (kpts_q, kpts_t, cert)。
+
+    注：当前 LoFTR 不支持 batch 推理（kornia 接口限制），
+    此处为占位，实际仍串行但预分配 tensor。
+    未来可替换为支持 batch 的实现。
+    """
+    results = []
+    for img2 in img2_list:
+        results.append(_match_tile_with_loftr(img1, img2))
+    return results

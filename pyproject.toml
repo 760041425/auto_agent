@@ -31,6 +31,8 @@ line-length = 120
 
 [tool.pytest.ini_options]
 testpaths = ["api/tests", "services/tests"]
+# pythonpath: 确保本地 scripts/ 优先于 site-packages/scripts（uniception 包会安装同名包到 site-packages）
+pythonpath = ["."]
 markers = [
     "integration: requires filesystem fixtures or boundary adapters",
     "slow: takes materially longer than the fast feedback loop",

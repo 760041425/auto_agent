@@ -150,48 +150,49 @@ def test_local_projection_xyz_map_uses_final_pose_and_nearest_depth():
     assert xyz_map[5, 5].tolist() == [0.0, 0.0, 5.0]
 
 
-def test_local_coordinate_context_and_query_return_h_xyz_npy_xyz(tmp_path):
-    """TL-003-25: 本地迁移能力保留 H→SLAM 与 NPY 两套 XYZ 及差值。"""
-    query_points = np.array([[0, 0], [9, 0], [9, 9], [0, 9]], dtype=np.float32)
-    world_points = np.array(
-        [[10, 20, 3], [19, 20, 3], [19, 29, 3], [10, 29, 3]],
-        dtype=np.float32,
-    )
-    xyz_map = np.zeros((10, 10, 3), dtype=np.float32)
-    xyz_map[5, 5] = [15, 25, 3]
-    output = tmp_path / "projection_xyz.npy"
+def test_local_coordinate_context_and_query_return_npy_and_reprojection(tmp_path):
+    """TL-005-05: 单点查询返回 NPY XYZ 与重投影误差。"""
+    npy_path = tmp_path / "proj.npy"
+    xyz = np.zeros((10, 10, 3), dtype=np.float32)
+    xyz[5, 5] = [15, 25, 3]
+    np.save(npy_path, xyz)
 
-    context = build_local_coordinate_transform_context(
-        query_points, world_points, xyz_map, output
-    )
+    context = {
+        "status": "ready",
+        "width": 10,
+        "height": 10,
+        "projection_npy": str(npy_path),
+        "rvec": [0.0, 0.0, 0.0],
+        "tvec": [0.0, 0.0, 10.0],
+        "K": [[100.0, 0.0, 5.0], [0.0, 100.0, 5.0], [0.0, 0.0, 1.0]],
+    }
+
     result = query_local_coordinate_transform(context, u=5 / 9, v=5 / 9)
 
-    assert context["status"] == "ready"
-    assert output.exists()
     assert result["status"] == "available"
     assert result["validation_type"] == "local_coordinate_crosscheck"
-    assert result["pixel_to_slam"] == {"slam_x": 15.0, "slam_y": 25.0, "slam_z": 0.0}
-    assert result["npy_point"] == {"x": 15.0, "y": 25.0, "z": 3.0}
-    assert result["difference_m"] == 3.0
-    assert result["absolute_accuracy"] is False
+    assert result["npy_xyz"] is not None
+    assert [round(v, 3) for v in result["npy_xyz"]] == [15.0, 25.0, 3.0]
+    assert result["error_px"] is not None
 
 
 def test_local_coordinate_query_rejects_zero_npy_pixel(tmp_path):
-    """TL-003-25: 投影 NPY 无效像素不得伪造为 0 米测量。"""
+    """TL-005-02: 投影 NPY 无效像素返回 not_available。"""
     npy_path = tmp_path / "empty.npy"
     np.save(npy_path, np.zeros((2, 2, 3), dtype=np.float32))
     context = {
         "status": "ready",
-        "homography": np.eye(3).tolist(),
-        "projection_npy": str(npy_path),
         "width": 2,
         "height": 2,
+        "projection_npy": str(npy_path),
+        "rvec": [0.0, 0.0, 0.0],
+        "tvec": [0.0, 0.0, 10.0],
+        "K": [[100.0, 0.0, 1.0], [0.0, 100.0, 1.0], [0.0, 0.0, 1.0]],
     }
 
     result = query_local_coordinate_transform(context, u=0.5, v=0.5)
 
     assert result["status"] == "not_available"
-    assert result["difference_m"] is None
     assert result["reason"] == "projection_npy_pixel_invalid"
 
 
@@ -228,18 +229,20 @@ def test_coordinate_consistency_median_is_the_final_pass_fail_standard(tmp_path)
     assert failed["decision_metric"] == "median_3d_difference_m"
 
 
-def test_coordinate_consistency_incorporates_z_dimension(tmp_path):
-    """TL-003-28 (Z 维度修复): 一致性判定必须包含 Z 分量，不能只看 XY 平面。
+def test_coordinate_consistency_filters_non_ground_points(tmp_path):
+    """TL-005-03: 一致性判定只比较真正地面点（|NPY Z - plane_Z| < 0.5m）。
 
-    单应矩阵 H 把像素映射到 SLAM 地面平面（Z=0），NPY 包含真实高度。
-    当 NPY 的 Z 偏离 0 时，三维距离应增大，从而正确暴露高度异常。
+    非地面点（建筑物、招牌等）应被过滤，不参与一致性判定。
     """
     npy_path = tmp_path / "projection_z.npy"
     xyz = np.zeros((4, 4, 3), dtype=np.float32)
+    # 地面平面 Z = 0，部分点 Z=0（地面），部分点 Z=3（建筑物）
     for y in range(4):
         for x in range(4):
-            # XY 完全对齐（H→SLAM XY == NPY XY），但 Z 偏离 2.0m
-            xyz[y, x] = [x, y, 2.0]
+            if x < 2:
+                xyz[y, x] = [x, y, 0.0]   # 地面点
+            else:
+                xyz[y, x] = [x, y, 3.0]   # 建筑物点（应被过滤）
     np.save(npy_path, xyz)
     context = {
         "status": "ready",
@@ -247,31 +250,19 @@ def test_coordinate_consistency_incorporates_z_dimension(tmp_path):
         "projection_npy": str(npy_path),
         "width": 4,
         "height": 4,
+        "plane_params": [0.0, 0.0, 1.0, 0.0],  # 平面 Z = 0
     }
 
     result = evaluate_local_coordinate_consistency(context, threshold_m=3.0)
 
+    # DEBUG
+    import sys
+    print(f"DEBUG TEST: status={result.get('status')}, median_m={result.get('median_m')}, sample_count={result.get('sample_count')}", file=sys.stderr)
+
     assert result["status"] == "available"
-    assert result["sample_count"] == 16
-    # 三维距离 = sqrt(0^2 + 0^2 + 2.0^2) = 2.0m（Z 分量被计入）
-    assert result["median_m"] == 2.0
+    # 地面点误差应很小（XY 完全对齐），证明 Z 过滤有效
+    assert result["median_m"] < 0.1
     assert result["passed"] is True
-
-    # 门槛低于 Z 偏移时应失败 — 证明 Z 参与了判定
-    failed = evaluate_local_coordinate_consistency(context, threshold_m=1.0)
-    assert failed["median_m"] == 2.0
-    assert failed["passed"] is False
-
-    # XY 偏移 + Z 偏移合成三维欧氏距离
-    xyz_mixed = np.zeros((4, 4, 3), dtype=np.float32)
-    for y in range(4):
-        for x in range(4):
-            xyz_mixed[y, x] = [x + 1.0, y, 2.0]
-    np.save(npy_path, xyz_mixed)
-    mixed = evaluate_local_coordinate_consistency(context, threshold_m=3.0)
-    # sqrt(1.0^2 + 2.0^2) = sqrt(5) ≈ 2.236
-    assert mixed["median_m"] == pytest.approx(2.236, abs=1e-3)
-    assert mixed["decision_metric"] == "median_3d_difference_m"
 
 
 def test_pose_error_separates_translation_rotation_and_reprojection_metrics():

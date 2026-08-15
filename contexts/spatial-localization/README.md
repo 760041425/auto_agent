@@ -19,6 +19,7 @@
 - `GeometricFitDiagnostic`（单应内点与像素残差，不是 Benchmark）
 - `LocalCoordinateCrosscheck`（查询图选点后，比较任务自产的 H→SLAM XYZ 与最终位姿投影 NPY XYZ；不是绝对精度）
 - `CoordinateConsistencyDecision`（多点三维坐标差的中位数与门槛，作为 V2 与 SALAD+RoMa 原版的最终可信标准）
+- `ReliabilityUnavailable`（未生成坐标差判据产物时的独立状态：徽章与判定卡均不显示 ✓，展示「⚠ 无法判定」与 reason；ACE 系列等未接 H→SLAM/NPY 判据的算法归入此类）
 - `GroundTruthEvaluation`（相对独立 holdout 位姿真值的平移/旋转误差）
 - `LocalizationArtifacts`（查询图、最终位姿投影图、双图对比图及生成状态）
 

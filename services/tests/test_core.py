@@ -29,7 +29,23 @@ def test_read_images_txt():
     assert imgs[0].name
 
 
-@pytest.mark.integration
+def _points3d_has_data(path: str = "las/points3D.txt") -> bool:
+    """COLMAP points3D.txt 是否含真实点（非空占位）。"""
+    try:
+        with open(path) as f:
+            for line in f:
+                s = line.strip()
+                if s and not s.startswith("#"):
+                    return True
+    except FileNotFoundError:
+        pass
+    return False
+
+
+@pytest.mark.skipif(
+    not _points3d_has_data(),
+    reason="las/points3D.txt 为 0 点空占位；放入真实 COLMAP 重建产物后自动启用",
+)
 def test_read_points3d_txt():
     """TL-001-08: 读取确定性的 COLMAP 三维点元数据。"""
     pts = read_points3d_txt("las/points3D.txt")

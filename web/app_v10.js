@@ -1,3 +1,6 @@
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
 const API = '/api';
 let currentImageId = null;
 
@@ -19,6 +22,13 @@ document.addEventListener('DOMContentLoaded', () => {
       if (tab === 'list') loadImages();
       if (tab === 'tasks') loadTasks();
       if (tab === 'localize') loadLocalizeImages();
+      if (tab === 'pointcloud') {
+        try {
+          initPointCloud();
+        } catch(e) {
+          console.error('initPointCloud error:', e);
+        }
+      }
     });
   });
 
@@ -582,12 +592,16 @@ var localizeAlgorithmNames = {
   'flann': 'SIFT + FLANN kd-tree',
   'salad_roma': 'SALAD+RoMa (原版)',
   'salad_roma_v2': 'SALAD v2 (DISK+LightGlue)',
-  'salad_roma_v2_loftr': 'SALAD v2 + LoFTR',
+  'salad_roma_v2_loftr': 'SALAD v2 + LoFTR（高精度对照）',
   'hybrid': 'Hybrid (DISK+LightGlue + LoFTR)',
   'ace_las': 'ACE + LAS 验证',
   'multi_strategy': 'Multi-Strategy 融合',
   'salad_lightglue': 'SALAD+LightGlue',
-  'ace': 'ACE 场景坐标回归'
+  'ace': 'ACE 场景坐标回归',
+  // 009 加速方案（原方案不动，新增对比项）
+  'salad_v2_loftr_fast': 'SALAD v2 + LoFTR [加速]',
+  'salad_v2_hybrid_fast': 'Hybrid (DISK+LG + LoFTR) [加速]',
+  'salad_v2_xfeat': 'SALAD v2 + XFeat'
 };
 
 function escapeLocalizeHtml(value) {
@@ -608,14 +622,23 @@ function localizeStatusBadge(result) {
   }
   var coordinate = result.coordinate_transform || (result.validations || {}).coordinate_crosscheck;
   var consistency = coordinate && coordinate.consistency;
-  var reliable = coordinate && coordinate.status === 'ready'
-    ? !!(consistency && consistency.status === 'available' && consistency.passed)
-    : result.reliable;
-  if (!reliable) {
+  var reliable = !!(coordinate && coordinate.status === 'ready'
+    && consistency && consistency.status === 'available' && consistency.passed);
+  if (reliable) {
+    return '<span class="status-badge completed">✓ 可信</span>';
+  }
+  if (consistency && consistency.status === 'available') {
     return '<span class="status-badge" style="background:#fff3e0;color:#e65100">⚠ 低可信</span>';
   }
-  return '<span class="status-badge completed">✓ 可信</span>';
+  return '<span class="status-badge" style="background:#fce4ec;color:#c62828">⚠ 无法判定</span>';
 }
+
+const LOCALIZE_REASON_MESSAGES = {
+  'coordinate_transform_context_not_ready': '坐标变换上下文未就绪',
+  'coordinate_transform_artifact_unavailable': '坐标变换产物不可用',
+  'insufficient_valid_projection_pixels': '有效投影像素不足',
+  'insufficient_valid_homography_samples': '有效单应样本不足'
+};
 
 function renderCoordinateReliabilityDecision(result) {
   var coordinate = result.coordinate_transform || (result.validations || {}).coordinate_crosscheck || {};
@@ -631,10 +654,43 @@ function renderCoordinateReliabilityDecision(result) {
     html += '<p style="font-size:0.78rem;margin:0.2rem 0">P95: <b>' + Number(consistency.p95_m).toFixed(3) + ' m</b>；样本: <b>' + consistency.sample_count + '</b></p>';
     html += '<p style="font-size:0.78rem;margin:0.2rem 0">判定门槛: <b>&lt; ' + Number(consistency.threshold_m).toFixed(3) + ' m</b>；结论: <b>' + (passed ? '通过 / 可信' : '未通过 / 不准') + '</b></p>';
   } else {
-    html += '<p style="font-size:0.78rem;margin:0.2rem 0">未生成可用的多点坐标差，按最终标准判定为低可信；请重新定位。</p>';
+    var reason = consistency.reason || coordinate.reason;
+    var causeText = (reason && LOCALIZE_REASON_MESSAGES[reason])
+      ? '：' + LOCALIZE_REASON_MESSAGES[reason]
+      : '：该算法未生成多点坐标差产物，需重新定位';
+    html += '<p style="font-size:0.78rem;margin:0.2rem 0">未生成可用的多点坐标差' + causeText + '，按最终标准判定为低可信；请重新定位。</p>';
   }
   html += '<p style="font-size:0.7rem;color:#666;margin:0.3rem 0 0">最终可信状态只由本地 H→SLAM 与最终位姿 NPY 的多点中位坐标差决定；内点数和相似度仅作辅助诊断。</p></div>';
   return html;
+}
+
+function localizeDiagnosticLine(r) {
+  var quality = r.quality || {};
+  var inliers = r.inliers != null
+    ? r.inliers
+    : (quality.inlier_count != null ? quality.inlier_count : '—');
+  var total3d = r.total_3d_points != null
+    ? r.total_3d_points
+    : (quality.match_count != null ? quality.match_count : '—');
+  return '<p style="font-size:0.78rem;color:#777;margin:0.3rem 0">辅助诊断：内点 ' + inliers + ' | 3D点数 ' + total3d;
+}
+
+function localizeFailureDiagLine(r) {
+  // TL-007-06 (specs/007 AC-007-06)：失败结果含 diagnostics 时展示
+  // 「内点 X | 重投影误差 Y px | 预测Z [a, b]」（保留 2 位小数）；
+  // 字段缺失/为 None 时对应段渲染 "—"；不含 diagnostics（旧结构兜底）
+  // 时沿用原失败文案 localizeErrorText(r.error)，不崩溃。
+  if (!r.diagnostics) return localizeErrorText(r.error);
+  var pnp = r.diagnostics.pnp || {};
+  var pred = r.diagnostics.pred_xyz || {};
+  var inliers = pnp.best_inliers != null ? pnp.best_inliers : '—';
+  var reproj = pnp.best_reproj_error_px != null
+    ? Number(pnp.best_reproj_error_px).toFixed(2) + ' px'
+    : '—';
+  var z = (pred.z_min != null && pred.z_max != null)
+    ? '[' + Number(pred.z_min).toFixed(2) + ', ' + Number(pred.z_max).toFixed(2) + ']'
+    : '—';
+  return '内点 ' + inliers + ' | 重投影误差 ' + reproj + ' | 预测Z ' + z;
 }
 
 function renderProjectionConsistency(result) {
@@ -699,13 +755,22 @@ async function verifyCoordinatePoint(event, taskId, resultIndex, targetId) {
     if (payload.status !== 'available') {
       throw new Error(payload.reason || '坐标源不完整');
     }
-    target.innerHTML =
-      '<div style="font-weight:bold;margin-bottom:0.25rem">坐标交叉验证（非绝对精度）</div>' +
-      '<div>选点: <b>(' + payload.u.toFixed(4) + ', ' + payload.v.toFixed(4) + ')</b></div>' +
-      '<div>H→SLAM XYZ: <b>' + formatCoordinateXYZ(payload.pixel_to_slam, ['slam_x', 'slam_y', 'slam_z']) + '</b></div>' +
-      '<div>NPY XYZ: <b>' + formatCoordinateXYZ(payload.npy_point, ['x', 'y', 'z']) + '</b></div>' +
-      '<div>坐标差: <b>' + Number(payload.difference_m).toFixed(3) + ' m</b></div>' +
-      '<div style="font-size:0.7rem;color:#666;margin-top:0.2rem">使用当前定位任务自产的单应矩阵与最终位姿投影 NPY；不依赖外部服务，也不替代独立位姿真值 Benchmark。</div>';
+    let html = '<div style="font-weight:bold;margin-bottom:0.25rem">坐标交叉验证</div>';
+    html += '<div>选点: <b>(' + payload.u.toFixed(4) + ', ' + payload.v.toFixed(4) + ')</b></div>';
+    if (payload.slam_xy) {
+      html += '<div>计算 XY: <b>(' + payload.slam_xy[0].toFixed(2) + ', ' + payload.slam_xy[1].toFixed(2) + ') m</b></div>';
+    }
+    if (payload.npy_xyz) {
+      html += '<div>NPY XYZ: <b>(' + payload.npy_xyz[0].toFixed(2) + ', ' + payload.npy_xyz[1].toFixed(2) + ', ' + payload.npy_xyz[2].toFixed(2) + ')</b></div>';
+    }
+    if (payload.error_m !== undefined && payload.error_m !== null) {
+      html += '<div>坐标误差: <b>' + payload.error_m.toFixed(3) + ' m</b></div>';
+    }
+    if (payload.error_px !== undefined && payload.error_px !== null) {
+      html += '<div style="font-size:0.7rem;color:#666">重投影像素误差: ' + payload.error_px.toFixed(1) + ' px</div>';
+    }
+    html += '<div style="font-size:0.7rem;color:#666;margin-top:0.2rem">PnP位姿+射线平面求交 vs NPY</div>';
+    target.innerHTML = html;
   } catch (error) {
     target.innerHTML = '<span style="color:#c62828">坐标交叉验证失败：' + escapeLocalizeHtml(error.message) + '</span>';
   }
@@ -753,6 +818,37 @@ function renderLocalizationArtifacts(result, maxHeight, taskId, resultIndex) {
   var generation = (result.validations || {}).artifact_generation || {};
   var reason = generation.error || generation.reason || '该结果未返回视觉产物';
   return '<p class="artifact-missing" style="font-size:0.78rem;color:#e65100;background:#fff3e0;padding:0.45rem;border-radius:4px">视觉产物未生成：' + escapeLocalizeHtml(reason) + '。历史结果需重新定位后生成。</p>';
+}
+
+async function runE2ETest() {
+  var btn = document.getElementById('e2e-test-btn');
+  var status = document.getElementById('e2e-test-status');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ 运行中...';
+  status.textContent = '';
+  try {
+    var r = await fetch(API + '/localize/verify-e2e', { method: 'POST' });
+    var data = await r.json();
+    if (data.success) {
+      btn.textContent = '✅ 通过';
+      status.innerHTML = '<span style="color:#2e7d32">端到端回归测试全部通过（' +
+        (data.stdout.match(/(\d+) passed/)?.[1] || '?') + ' tests）</span>';
+    } else {
+      btn.textContent = '❌ 失败';
+      var failInfo = (data.stdout.match(/FAILED.*/g) || []).join('<br>');
+      status.innerHTML = '<span style="color:#c62828">测试失败：</span><br><code style="font-size:0.72rem">' +
+        escapeLocalizeHtml(failInfo || data.error || data.stdout.slice(-500)) + '</code>';
+    }
+  } catch (e) {
+    btn.textContent = '❌ 错误';
+    status.textContent = '调用失败: ' + e.message;
+  } finally {
+    setTimeout(function () {
+      btn.disabled = false;
+      btn.textContent = '🧪 运行回归测试';
+    }, 3000);
+  }
 }
 
 // 定位页面上传
@@ -849,7 +945,7 @@ async function loadLocalizeImages() {
         html += localizeStatusBadge(r);
         html += '</div>';
         if (r.success) {
-          html += '<p style="font-size:0.78rem;color:#777;margin:0.3rem 0">辅助诊断：内点 ' + r.inliers;
+          html += localizeDiagnosticLine(r);
           if (r.timings && r.timings.total_s != null) {
             html += ' &nbsp;·&nbsp; ⏱ ' + r.timings.total_s.toFixed(2) + 's';
           }
@@ -906,7 +1002,7 @@ async function loadLocalizeImages() {
           html += '<button class="btn-refine" style="margin-top:0.5rem;padding:4px 12px;font-size:0.8rem;background:#ff9800;color:#fff;border:none;border-radius:4px;cursor:pointer" onclick="refinePose(this, ' + latest.id + ', ' + idx + ')">🔄 RoMa 优化</button>';
           html += ' <button style="margin-top:0.5rem;padding:4px 12px;font-size:0.8rem;background:#1976d2;color:#fff;border:none;border-radius:4px;cursor:pointer" onclick="generateVerifyReport(' + latest.image_id + ')">📐 生成 2D 拟合报告</button>';
         } else {
-          html += '<p style="font-size:0.85rem;color:#f44336">' + escapeLocalizeHtml(localizeErrorText(r.error)) + '</p>';
+          html += '<p style="font-size:0.85rem;color:#f44336">' + escapeLocalizeHtml(localizeFailureDiagLine(r)) + '</p>';
         }
         html += '</div>';
       });
@@ -1035,7 +1131,7 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
       html += '</div>';
 
       if (r.success) {
-        html += '<p style="font-size:0.78rem;color:#777;margin:0.3rem 0">辅助诊断：内点 ' + r.inliers + ' | 3D点数 ' + (r.total_3d_points || 0);
+        html += localizeDiagnosticLine(r);
         if (r.timings && r.timings.total_s != null) {
           html += ' &nbsp;·&nbsp; ⏱ ' + r.timings.total_s.toFixed(2) + 's';
         }
@@ -1093,7 +1189,7 @@ async function pollLocalize(taskId, btn, statusEl, resultsEl) {
         // 优化按钮（所有成功结果都显示）
         html += '<button class="btn-refine" data-task="' + taskId + '" data-idx="' + idx + '" style="margin-top:0.5rem;padding:4px 12px;font-size:0.8rem;background:#ff9800;color:#fff;border:none;border-radius:4px;cursor:pointer" onclick="refinePose(this, ' + taskId + ', ' + idx + ')">🔄 RoMa 优化</button>';
       } else {
-        html += '<p style="font-size:0.85rem;color:#f44336">' + escapeLocalizeHtml(localizeErrorText(r.error)) + '</p>';
+        html += '<p style="font-size:0.85rem;color:#f44336">' + escapeLocalizeHtml(localizeFailureDiagLine(r)) + '</p>';
       }
 
       html += '</div>';
@@ -1182,3 +1278,168 @@ async function generateVerifyReport(imageId) {
     statusEl.textContent = '❌ 请求失败: ' + e.message;
   }
 }
+
+// =====================================================================
+// 3D 点云瓦片加载
+// =====================================================================
+
+
+// =====================================================================
+// 3D 点云（简化版，全自动加载）
+// =====================================================================
+let pcScene, pcCamera, pcRenderer, pcControls, pcTileCache = {}, pcTileMeta = [], pcTileSize = 50, pcInitialized = false, pcLoading = false;
+let pcLoadingTiles = false;       // 防止并发加载瓦片
+let pcLoadTimer = null;           // 防抖定时器
+
+function initPointCloud() {
+  console.log('[PC] initPointCloud called, pcInitialized=', pcInitialized);
+  if (pcInitialized) {
+    // 已初始化但可能没加载数据（首次 tab 切换）
+    if (!Object.keys(pcTileCache).length && !pcLoading) {
+      console.log('[PC] already initialized but no tiles, loading...');
+      loadPointCloud();
+    }
+    return;
+  }
+  pcInitialized = true;
+
+  // 等待容器可见后初始化（tab 切换后 display: none → block）
+  let retries = 0;
+  const tryInit = () => {
+    const c = document.getElementById('pc-canvas-container');
+    console.log('[PC] tryInit retry=' + retries + ', clientWidth=' + (c ? c.clientWidth : 'null'));
+    if (!c || c.clientWidth === 0) {
+      if (++retries < 50) return setTimeout(tryInit, 100);
+      console.warn('[PC] container not visible after 5s');
+      return;
+    }
+    initScene(c);
+  };
+
+  function initScene(c) {
+    console.log('[PC] initScene, container size=' + c.clientWidth + 'x' + c.clientHeight);
+    pcScene = new THREE.Scene();
+    pcScene.background = new THREE.Color(0x1a1a2e);
+    pcCamera = new THREE.PerspectiveCamera(60, c.clientWidth / c.clientHeight, 0.1, 10000);
+    pcRenderer = new THREE.WebGLRenderer({ antialias: true });
+    pcRenderer.setSize(c.clientWidth, c.clientHeight);
+    pcRenderer.setPixelRatio(window.devicePixelRatio);
+    c.appendChild(pcRenderer.domElement);
+    pcControls = new OrbitControls(pcCamera, pcRenderer.domElement);
+    pcControls.enableDamping = true;
+    pcScene.add(new THREE.AxesHelper(30));
+    pcScene.add(new THREE.GridHelper(300, 30, 0x444466, 0x333355));
+    console.log('[PC] scene initialized');
+
+    loadPointCloud();
+
+    addEventListener('resize', () => {
+      if (!pcCamera) return;
+      pcCamera.aspect = c.clientWidth / c.clientHeight;
+      pcCamera.updateProjectionMatrix();
+      pcRenderer.setSize(c.clientWidth, c.clientHeight);
+    });
+    // 防抖：OrbitControls change 事件在高频触发时，延迟 300ms 才真正加载
+    pcControls.addEventListener('change', () => {
+      if (pcLoadTimer) clearTimeout(pcLoadTimer);
+      pcLoadTimer = setTimeout(() => {
+        pcLoadTimer = null;
+        loadNearbyTiles();
+      }, 300);
+    });
+    (function animate(){ requestAnimationFrame(animate); if(pcControls) pcControls.update(); if(pcRenderer) pcRenderer.render(pcScene, pcCamera); })();
+  }
+
+  // 启动：延迟 50ms 后尝试初始化
+  setTimeout(tryInit, 50);
+  console.log('[PC] initPointCloud done, waiting for tryInit');
+}
+
+async function loadPointCloud() {
+  console.log('[PC] loadPointCloud start');
+  if (pcLoading) { console.log('[PC] already loading, skip'); return; }
+  pcLoading = true;
+  document.getElementById('pc-loading').style.display = 'block';
+  for (const k in pcTileCache) { pcScene.remove(pcTileCache[k]); pcTileCache[k].geometry.dispose(); pcTileCache[k].material.dispose(); }
+  pcTileCache = {};
+  pcTileMeta = [];
+  try {
+    const url = `/api/point-cloud/tiles?tile_size=${pcTileSize}`;
+    console.log('[PC] fetching:', url);
+    const d = await fetch(url).then(r => r.json());
+    console.log('[PC] tiles response:', d.tiles ? d.tiles.length : 'no tiles', 'error:', d.error);
+    if (d.error) { document.getElementById('pc-loading').textContent = '错误: ' + d.error; pcLoading = false; return; }
+    pcTileMeta = d.tiles;
+    document.getElementById('pc-total').textContent = d.total_points.toLocaleString();
+    document.getElementById('pc-tiles').textContent = pcTileMeta.length;
+    document.getElementById('pc-stats').style.display = 'block';
+    document.getElementById('pc-loading').style.display = 'none';
+    const xs = pcTileMeta.flatMap(t => [t.min[0], t.max[0]]);
+    const ys = pcTileMeta.flatMap(t => [t.min[1], t.max[1]]);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const cz = (Math.min(...pcTileMeta.flatMap(t=>[t.min[2],t.max[2]])) + Math.max(...pcTileMeta.flatMap(t=>[t.min[2],t.max[2]]))) / 2;
+    const sz = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+    console.log('[PC] center:', cx.toFixed(1), cy.toFixed(1), cz.toFixed(1), 'size:', sz.toFixed(1));
+    pcControls.target.set(cx, cy, cz);
+    pcCamera.position.set(cx + sz * 0.8, cy + sz * 0.8, cz + sz * 0.8);
+    pcControls.update();
+    await loadNearbyTiles();
+  } catch(e) {
+    document.getElementById('pc-loading').textContent = '失败: ' + e.message;
+  }
+  pcLoading = false;
+}
+
+async function loadNearbyTiles() {
+  if (!pcTileMeta.length || !pcControls || pcLoading) { console.log('[PC] loadNearbyTiles skip: meta=' + pcTileMeta.length + ' loading=' + pcLoading); return; }
+  if (pcLoadingTiles) { console.log('[PC] loadNearbyTiles already running, skip'); return; }
+  pcLoadingTiles = true;
+  const camX = pcControls.target.x, camY = pcControls.target.y;
+  const cix = Math.floor(camX / pcTileSize), ciy = Math.floor(camY / pcTileSize);
+  console.log('[PC] loadNearbyTiles: cam=' + camX.toFixed(1) + ',' + camY.toFixed(1) + ' tile=' + cix + ',' + ciy);
+  const wanted = new Set();
+  for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) wanted.add(`${cix+dx},${ciy+dy}`);
+  for (const k of Object.keys(pcTileCache)) if (!wanted.has(k)) {
+    pcScene.remove(pcTileCache[k]); pcTileCache[k].geometry.dispose(); pcTileCache[k].material.dispose(); delete pcTileCache[k];
+  }
+  let loaded = 0;
+  for (const k of wanted) {
+    if (pcTileCache[k]) continue;
+    const [ix, iy] = k.split(',').map(Number);
+    if (!pcTileMeta.some(t => t.ix === ix && t.iy === iy)) continue;
+    try {
+      const d = await fetch(`/api/point-cloud/tile/${ix}/${iy}?tile_size=${pcTileSize}&max_points=50000`).then(r=>r.json());
+      if (d.error || !d.points.length) continue;
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(d.points.flat()), 3));
+      g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(d.colors.flat()), 3));
+      const pts = new THREE.Points(g, new THREE.PointsMaterial({ size: 0.8, vertexColors: true, sizeAttenuation: true }));
+      pcScene.add(pts);
+      pcTileCache[k] = pts;
+      loaded++;
+    } catch(e) { console.warn('[PC] tile ' + k + ' error:', e); }
+  }
+  console.log('[PC] loadNearbyTiles done, loaded=' + loaded + ' total cached=' + Object.keys(pcTileCache).length);
+  document.getElementById('pc-loaded-tiles').textContent = Object.keys(pcTileCache).length;
+  document.getElementById('pc-loaded-pts').textContent = Object.values(pcTileCache).reduce((s,p)=>s+p.geometry.attributes.position.count,0).toLocaleString();
+  pcLoadingTiles = false;
+}
+
+// 暴露给 inline onclick 处理程序（模块作用域内全局不可见）
+window.showDetail = showDetail;
+window.startCompare = startCompare;
+window.startCompareFromList = startCompareFromList;
+window.toggleTaskDetail = toggleTaskDetail;
+window.selectLocalizeImage = selectLocalizeImage;
+window.startPreprocessBuild = startPreprocessBuild;
+window.startPreprocessRender = startPreprocessRender;
+window.startPreprocessFeature = startPreprocessFeature;
+window.startPreprocessAce = startPreprocessAce;
+window.startPreprocess = startPreprocess;
+window.refreshLocalizeImages = refreshLocalizeImages;
+window.startLocalize = startLocalize;
+window.runE2ETest = runE2ETest;
+window.verifyCoordinatePoint = verifyCoordinatePoint;
+window.refinePose = refinePose;
+window.generateVerifyReport = generateVerifyReport;

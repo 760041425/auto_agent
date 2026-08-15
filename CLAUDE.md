@@ -16,6 +16,28 @@
 ./scripts/drift-check.sh
 ```
 
+## 测试工具
+
+### Playwright 后台静默浏览器（前端/E2E 测试）
+
+项目已配置 Playwright MCP（`.mcp.json`，`--headless` 静默模式，会话启动自动加载）。**需要测试前端页面、截图、点击流、DOM 断言时**，直接用 Playwright 工具，浏览器后台运行不弹窗：
+
+```bash
+# 手动验证加载
+claude mcp list | grep playwright
+# 用法示例（对话中）："用 Playwright 打开 http://localhost:8000 截图"
+```
+
+**何时选用 Playwright vs pytest**：
+
+| 场景 | 工具 | 入口 |
+| --- | --- | --- |
+| 前端页面渲染、交互、视觉回归、E2E 用户路径 | **Playwright**（headless 浏览器） | MCP 工具 `playwright` |
+| 后端 API / 业务逻辑 / 单集成 / 回归门禁 | **pytest** | `./scripts/run-all-tests.sh fast` |
+| 精度基准（ACE 四路径对比等） | **基准脚本** | `scripts/benchmark_008.py` |
+
+> 首次使用 Playwright 会下载 Chromium（~150MB，需外网）。无需前端测试时不要无谓调用，避免拖慢会话。
+
 ---
 
 ## 硬红线速览

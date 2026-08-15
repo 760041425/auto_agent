@@ -650,8 +650,14 @@ def _lightglue_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000)
             # 用 DISK 提特征
             fe = _SUPERPOINT_MODEL  # DISK 实例
 
-            img1_t = kornia.image.image_to_tensor(img1, keepdim=False).float() / 255.0
-            img2_t = kornia.image.image_to_tensor(img2, keepdim=False).float() / 255.0
+            # kornia 0.8.2 已移除 kornia.image.image_to_tensor，改用 torch 手动转换
+            def _to_tensor(img):
+                if img.ndim == 2:  # (H,W) -> (1,H,W)
+                    return torch.from_numpy(img).float()[None, :, :] / 255.0
+                # (H,W,3) -> (3,H,W)
+                return torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+            img1_t = _to_tensor(img1)
+            img2_t = _to_tensor(img2)
 
             if img1_t.dim() == 3:
                 img1_t = img1_t.unsqueeze(0)
@@ -762,8 +768,13 @@ def _roma_match(img1: np.ndarray, img2: np.ndarray, sample_num: int = 3000) -> t
     h1, w1 = img2.shape[:2]
     image0 = cv2.cvtColor(img1, cv2.COLOR_BGR2RGB) if img1.ndim == 3 else img1
     image1 = cv2.cvtColor(img2, cv2.COLOR_BGR2RGB) if img2.ndim == 3 else img2
-    tensor0 = kornia.image.image_to_tensor(image0, keepdim=False).float().div(255.0)
-    tensor1 = kornia.image.image_to_tensor(image1, keepdim=False).float().div(255.0)
+    # kornia 0.8.2 已移除 kornia.image.image_to_tensor，改用 torch 手动转换
+    def _to_tensor(img):
+        if img.ndim == 2:  # (H,W) -> (1,H,W)
+            return torch.from_numpy(img).float()[None, :, :] / 255.0
+        return torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
+    tensor0 = _to_tensor(image0)
+    tensor1 = _to_tensor(image1)
     if tensor0.ndim == 3:
         tensor0 = tensor0.unsqueeze(0)
     if tensor1.ndim == 3:
@@ -1677,6 +1688,12 @@ def localize_with_salad_roma(
                     projection_xyz,
                     out / f"projection_xyz_{tag}.npy",
                     consistency_threshold_m=coordinate_threshold_m,
+                    plane_distance_threshold=0.1,
+                    plane_seed=1337,
+                    dense_points=all_pts,
+                    pose_rvec=best_rvec,
+                    pose_tvec=best_tvec,
+                    pose_K=cm_512,
                 )
                 consistency = coordinate_transform.get("consistency", {})
                 log(

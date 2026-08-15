@@ -283,6 +283,8 @@ def _render_point_cloud_splat(points_3d, point_colors, camera_matrix, img_w, img
     tvec_f = np.asarray(tvec, dtype=np.float64).reshape(1, 3)
 
     # 世界坐标 → 相机坐标
+    import sys
+    print(f"DEBUG _render: points.shape={points.shape}, rmat.T.shape={rmat.T.shape}, tvec_f.shape={tvec_f.shape}", file=sys.stderr)
     camera_pts = points @ rmat.T + tvec_f
     z = camera_pts[:, 2]
     valid = np.isfinite(z) & (z > 1e-3)

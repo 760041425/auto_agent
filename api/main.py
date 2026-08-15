@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.database import engine, Base, migrate_schema
-from api.routes import images, tasks, preprocess, localize
+from api.routes import images, tasks, preprocess, localize, point_cloud
 from api.runtime import ensure_runtime_directories
 from services.localizer.logger_config import get_http_logger, configure_uvicorn_access_logger
 
@@ -59,7 +59,9 @@ app.include_router(images.router)
 app.include_router(tasks.router)
 app.include_router(preprocess.router)
 app.include_router(localize.router)
+app.include_router(point_cloud.router)
 app.mount("/images", StaticFiles(directory=str(QUERY_IMAGES_DIR)), name="query_images")
+app.mount("/projections", StaticFiles(directory=str(PROJECTIONS_DIR)), name="projections")
 app.mount("/projections", StaticFiles(directory=str(PROJECTIONS_DIR)), name="projections")
 app.mount("/reports", StaticFiles(directory=str(REPORTS_DIR)), name="reports")
 app.mount("/", StaticFiles(directory=str(PROJECT_ROOT / "web"), html=True), name="static")
