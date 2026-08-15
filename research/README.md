@@ -18,7 +18,7 @@
 
 | 日期 | 研究主题 | 文件 | 状态 | 关键结论 |
 | --- | --- | --- | --- | --- |
-| — | — | — | — | —（首次研究完成后填入） |
+| 2026-05-12 | 特征匹配成功率分析 + 加速方案 | `2026-05-12-feature-matching-success-analysis-and-acceleration.md` | ✅ 完成 | 根因：稀疏关键点在跨域场景枯竭（DISK+LG 仅 10-15 match vs LoFTR 81-187）；加速首选 torch.compile+FP16+FAISS（1.88s→0.6-1.0s），备选 XFeat 替换 DISK+LG |
 
 ## 使用方式
 
