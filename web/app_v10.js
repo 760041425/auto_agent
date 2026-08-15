@@ -597,7 +597,11 @@ var localizeAlgorithmNames = {
   'ace_las': 'ACE + LAS 验证',
   'multi_strategy': 'Multi-Strategy 融合',
   'salad_lightglue': 'SALAD+LightGlue',
-  'ace': 'ACE 场景坐标回归'
+  'ace': 'ACE 场景坐标回归',
+  // 009 加速方案（原方案不动，新增对比项）
+  'salad_v2_loftr_fast': 'SALAD v2 + LoFTR [加速]',
+  'salad_v2_hybrid_fast': 'Hybrid (DISK+LG + LoFTR) [加速]',
+  'salad_v2_xfeat': 'SALAD v2 + XFeat'
 };
 
 function escapeLocalizeHtml(value) {

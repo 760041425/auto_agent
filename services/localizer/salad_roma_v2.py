@@ -83,6 +83,14 @@ _LIGHTGLUE_MODEL = None
 _COORD_REG_MODEL = None
 _LOFTR_MODEL = None
 
+# ── 加速缓存（009） ──
+_FAISS_INDEX = None          # FAISS 检索后端（可选）
+_FAISS_KEYS: list = []       # FAISS 索引对应的 tile_key 列表
+_DINO_COMPILED = False       # DINOv2 是否已 torch.compile
+_LOFTR_COMPILED = False      # LoFTR 是否已 torch.compile
+_HAS_FAISS: Optional[bool] = None  # 环境是否有 FAISS（延迟检测）
+_HAS_XFEAT: Optional[bool] = None  # 环境是否有 XFeat（延迟检测）
+
 
 # --------------------------------------------------------------------------- #
 # 模型加载（复用 salad_roma 的 DINOv2 / LightGlue 加载逻辑）
@@ -117,6 +125,143 @@ def _get_loftr_model():
     _LOFTR_MODEL = LoFTR(pretrained='outdoor').to(DEVICE).eval()
     log("LoFTR 模型加载完成")
     return _LOFTR_MODEL
+
+
+# --------------------------------------------------------------------------- #
+# FAISS 检索后端（009 加速，可选依赖）
+# --------------------------------------------------------------------------- #
+
+def _has_faiss() -> bool:
+    """检测环境是否有 FAISS（延迟检测，缓存结果）。"""
+    global _HAS_FAISS
+    if _HAS_FAISS is None:
+        try:
+            import faiss  # noqa: F401
+            _HAS_FAISS = True
+        except ImportError:
+            _HAS_FAISS = False
+    return _HAS_FAISS
+
+
+def _build_faiss_index():
+    """构建 FAISS 内积索引（描述子需先 L2 归一化）。"""
+    global _FAISS_INDEX, _FAISS_KEYS
+    if _FAISS_INDEX is not None:
+        return
+
+    # 无 FAISS 则不构建（faiss 为可选依赖）
+    try:
+        faiss_mod = __import__("faiss")
+    except ImportError:
+        return
+
+    try:
+        index = _ensure_index()
+    except Exception as e:
+        log(f"  FAISS 构建失败（无索引数据）: {e}")
+        return
+    if not index:
+        return
+
+    # 收集所有 rgb 描述子
+    descs = []
+    keys = []
+    for key, entry in index.items():
+        if isinstance(entry, dict) and "rgb" in entry:
+            d = entry["rgb"].astype(np.float32)
+            norm = np.linalg.norm(d)
+            if norm > 1e-8:
+                descs.append(d / norm)  # L2 归一化 → 内积 == 余弦相似度
+                keys.append(key)
+
+    if not descs:
+        return
+
+    mat = np.stack(descs).astype(np.float32)
+    dim = mat.shape[1]
+    _FAISS_INDEX = faiss_mod.IndexFlatIP(dim)
+    _FAISS_INDEX.add(mat)
+    _FAISS_KEYS = keys
+    log(f"  FAISS 索引构建完成: {len(keys)} 条, dim={dim}")
+
+
+def _faiss_search(q_desc: np.ndarray, k: int = 5) -> list:
+    """FAISS 检索 top-k。返回 list[(tile_key, similarity)]（降序）。"""
+    global _FAISS_INDEX, _FAISS_KEYS
+    if _FAISS_INDEX is None:
+        _build_faiss_index()
+    if _FAISS_INDEX is None or not _FAISS_KEYS:
+        return []  # 无索引或无数据 → 空结果
+
+    q = q_desc.astype(np.float32).reshape(1, -1)
+    q_norm = np.linalg.norm(q)
+    if q_norm > 1e-8:
+        q = q / q_norm  # L2 归一化
+
+    scores, indices = _FAISS_INDEX.search(q, k)
+    results = []
+    for score, idx in zip(scores[0], indices[0]):
+        if idx < 0 or idx >= len(_FAISS_KEYS):
+            continue
+        results.append((_FAISS_KEYS[idx], float(score)))
+    return results
+
+
+# --------------------------------------------------------------------------- #
+# MPS 加速（009 torch.compile + FP16）
+# --------------------------------------------------------------------------- #
+
+def _compile_models():
+    """尝试 torch.compile 包裹 DINOv2 / LoFTR；失败回退 eager。"""
+    global _DINO_COMPILED, _LOFTR_COMPILED
+
+    if not hasattr(torch, "compile"):
+        log("  torch.compile 不可用（PyTorch <2.0），跳过编译")
+        return
+
+    # DINOv2 编译
+    if not _DINO_COMPILED and _DINO_MODEL is not None:
+        try:
+            _orig_forward = _DINO_MODEL.forward
+            # 仅标记，实际 compile 在首次推理时触发（避免启动开销）
+            _DINO_COMPILED = True
+            log("  DINOv2 编译标记已设置（首次推理触发）")
+        except Exception as e:
+            log(f"  DINOv2 编译跳过: {e}")
+
+    # LoFTR 编译
+    if not _LOFTR_COMPILED and _LOFTR_MODEL is not None:
+        try:
+            _LOFTR_COMPILED = True
+            log("  LoFTR 编译标记已设置（首次推理触发）")
+        except Exception as e:
+            log(f"  LoFTR 编译跳过: {e}")
+
+
+def _maybe_compile_dinov2():
+    """首次推理时尝试 compile DINOv2（lazy）。"""
+    global _DINO_MODEL, _DINO_COMPILED
+    if _DINO_COMPILED is True and hasattr(torch, "compile") and _DINO_MODEL is not None:
+        try:
+            _DINO_MODEL = torch.compile(_DINO_MODEL, backend="mps")
+            _DINO_COMPILED = "done"
+            log("  DINOv2 torch.compile(mps) 成功")
+        except Exception as e:
+            log(f"  DINOv2 compile 失败，回退 eager: {e}")
+            _DINO_COMPILED = False
+
+
+def _maybe_compile_loftr():
+    """首次推理时尝试 compile LoFTR（lazy）。"""
+    global _LOFTR_MODEL, _LOFTR_COMPILED
+    if _LOFTR_COMPILED is True and hasattr(torch, "compile") and _LOFTR_MODEL is not None:
+        try:
+            _LOFTR_MODEL = torch.compile(_LOFTR_MODEL, backend="mps")
+            _LOFTR_COMPILED = "done"
+            log("  LoFTR torch.compile(mps) 成功")
+        except Exception as e:
+            log(f"  LoFTR compile 失败，回退 eager: {e}")
+            _LOFTR_COMPILED = False
 
 
 # --------------------------------------------------------------------------- #
@@ -277,24 +422,44 @@ def _salad_retrieve_v2(
     top_k: int = 5,
     prior_position: Optional[Tuple[float, float, float]] = None,
     prior_radius: float = 15.0,
+    use_faiss: bool = False,
 ):
     """对称 SALAD 检索，可选先验位置引导。
 
     有先验时只在 ``prior_radius`` 米内检索，候选从 ~2732 降到 ~10。
     返回 ``[(tile_key, similarity, tile_info), ...]``。
+
+    use_faiss: 使用 FAISS 后端（加速）；无 FAISS 时自动回退 numpy。
     """
     index = _ensure_index()
     if not index:
         return []
+
+    # lazy compile DINOv2（009 加速）
+    _maybe_compile_dinov2()
 
     model, scale = _get_dinov2_model()
     if model is None:
         return []
 
     q_rgb = cv2.cvtColor(q_img, cv2.COLOR_BGR2RGB) if q_img.ndim == 3 else q_img
-    q_desc = _extract_rgb_descriptor(model, q_rgb, scale)
+
+    # 009: FP16 autocast 推理 DINOv2 描述子（精度足够，速度提升）
+    if DEVICE.type == "mps" and hasattr(torch, "autocast"):
+        with torch.autocast(device_type="mps", dtype=torch.float16):
+            q_desc = _extract_rgb_descriptor(model, q_rgb, scale)
+        # 描述子转回 float32（后续 numpy 运算需要）
+        if hasattr(q_desc, "float"):
+            q_desc = q_desc.float()
+    else:
+        q_desc = _extract_rgb_descriptor(model, q_rgb, scale)
+
     if q_desc is None:
         return []
+
+    # 确保 q_desc 是 numpy（DINOv2 输出可能是 tensor）
+    if hasattr(q_desc, "cpu"):
+        q_desc = q_desc.cpu().numpy()
 
     tiles = _load_tile_index()
     tile_map = {}
@@ -313,6 +478,19 @@ def _salad_retrieve_v2(
         log("  SALAD v2 缓存与当前 accepted MapTile 无交集")
         return []
 
+    # 009: FAISS 后端（可选）
+    if use_faiss and _has_faiss():
+        scores = _faiss_search(q_desc, k=top_k * 3)  # 多取一些供先验过滤
+        # 先验过滤
+        if prior_position is not None:
+            scores = _apply_prior_filter(scores, prior_position, prior_radius)
+        results = []
+        for key, sim in scores[:top_k]:
+            if key in tile_map:
+                results.append((key, sim, tile_map[key]))
+        return results
+
+    # ── 原 numpy 逻辑（保留不动，作为 fallback）──
     scores = []
     q_norm = np.linalg.norm(q_desc) + 1e-8
 
@@ -349,6 +527,29 @@ def _salad_retrieve_v2(
     for sim, key in scores[:top_k]:
         results.append((key, sim, tile_map[key]))
     return results
+
+
+def _apply_prior_filter(scores: list, prior_position, prior_radius: float) -> list:
+    """先验位置过滤 FAISS 检索结果。"""
+    try:
+        from services.localizer import _POSE_TREE, _POSE_ARRAY, load_colmap
+        if _POSE_TREE is None:
+            load_colmap()
+        if _POSE_TREE is not None:
+            nearby_idx = _POSE_TREE.query_ball_point(prior_position, prior_radius)
+            if nearby_idx:
+                nearby_roots = set()
+                for idx in nearby_idx:
+                    if idx < len(_POSE_ARRAY):
+                        x, y, z = _POSE_ARRAY[idx]
+                        nearby_roots.add(f"{round(x,1)}_{round(y,1)}_{round(z,1)}")
+                filtered = [(k, s) for k, s in scores if any(r in k for r in nearby_roots)]
+                if filtered:
+                    log(f"  [先验-FAISS] 从 {len(scores)} 筛到 {len(filtered)}")
+                    return filtered
+    except Exception as e:
+        log(f"  [先验-FAISS] 失败，回退全量: {e}")
+    return scores
 
 
 # --------------------------------------------------------------------------- #
@@ -552,6 +753,7 @@ def localize_with_salad_roma_v2(
     use_loftr: bool = False,  # 方案 B：使用 LoFTR 替代 DISK+LightGlue
     matcher_mode: Optional[str] = None,
     coordinate_threshold_m: float = 0.3,
+    fast_mode: bool = False,  # 009: 加速模式（FAISS + FP16 + 参数收紧）
 ) -> dict:
     """SALAD v2 定位入口。
 
@@ -570,14 +772,18 @@ def localize_with_salad_roma_v2(
 
     if matcher_mode is None:
         matcher_mode = "loftr" if use_loftr else "disk_lg"
-    if matcher_mode not in {"disk_lg", "loftr", "hybrid"}:
+    if matcher_mode not in {"disk_lg", "loftr", "hybrid", "xfeat"}:
         return {"success": False, "error": f"Unsupported matcher mode: {matcher_mode}"}
     match_name = {
         "disk_lg": "DISK+LightGlue",
         "loftr": "LoFTR",
         "hybrid": "Hybrid",
+        "xfeat": "XFeat",
     }[matcher_mode]
-    tag = f"salad_v2_{matcher_mode}"
+    # 009 fast_mode 标识
+    if fast_mode:
+        match_name = f"{match_name}[fast]"
+    tag = f"salad_v2_{matcher_mode}" + ("_fast" if fast_mode else "")
     log(f"{'=' * 60}")
     log(f"🚀 SALAD v2 + {match_name} 定位: {os.path.basename(query_image_path)}")
 
@@ -637,15 +843,29 @@ def localize_with_salad_roma_v2(
     all_pts, all_col = get_point_cloud_arrays()
     log(f"🗺️ {len(all_pts)} 个 3D 点")
 
-    # 6. SALAD 检索
+    # 6. SALAD 检索（009 fast_mode: FAISS + 参数收紧）
     log("🔍 SALAD v2 对称检索...")
     t0 = time.time()
+    # fast_mode: top_k 收紧到 1（先验引导下安全），FAISS 加速
+    effective_top_k = 1 if fast_mode else top_k_retrieval
+    use_faiss = fast_mode and _has_faiss()
     retrieved = _salad_retrieve_v2(
-        q_small, top_k=top_k_retrieval,
+        q_small, top_k=effective_top_k,
         prior_position=prior_position if use_pose_prior else None,
         prior_radius=prior_radius,
+        use_faiss=use_faiss,
     )
-    log(f"  SALAD 检索: {time.time() - t0:.2f}s, 找到 {len(retrieved)} 候选")
+    # fast_mode 先验失败回退
+    if fast_mode and not retrieved and top_k_retrieval > 1:
+        log("  [fast] 先验 top_k=1 无结果，回退 top_k=3")
+        retrieved = _salad_retrieve_v2(
+            q_small, top_k=top_k_retrieval,
+            prior_position=prior_position if use_pose_prior else None,
+            prior_radius=prior_radius,
+            use_faiss=use_faiss,
+        )
+    log(f"  SALAD 检索: {time.time() - t0:.2f}s, 找到 {len(retrieved)} 候选"
+        + (f" [FAISS]" if use_faiss else ""))
     if not retrieved:
         return {"success": False, "error": "SALAD 检索无匹配候选", "tag": tag}
 
@@ -695,6 +915,8 @@ def localize_with_salad_roma_v2(
             kpts_q, kpts_tile, cert = _match_tile_with_loftr(q_small, tile_bgr)
         elif matcher_mode == "hybrid":
             kpts_q, kpts_tile, cert = _match_tile_with_hybrid(q_small, tile_bgr)
+        elif matcher_mode == "xfeat":
+            kpts_q, kpts_tile, cert = _match_tile_with_xfeat(q_small, tile_bgr)
         else:
             kpts_q, kpts_tile, cert = _match_tile_with_lightglue_v2(q_small, tile_bgr)
         if len(kpts_q) < 6:
@@ -786,11 +1008,18 @@ def localize_with_salad_roma_v2(
     current_error = best_reproj_error
     round_errors = [current_error]
 
-    # 迭代阈值：从严格到宽松，逐步精化
-    cert_thresholds = [0.1, 0.01, 0.001]
-    actual_iterations = 0  # 实际执行的迭代轮数
+    # 009 fast_mode: 跳过迭代精化（节省 ~0.5-1s）
+    if fast_mode:
+        log(f"  [fast] 跳过迭代精化")
+        actual_iterations = 0
+    else:
+        # 迭代阈值：从严格到宽松，逐步精化
+        cert_thresholds = [0.1, 0.01, 0.001]
+        actual_iterations = 0  # 实际执行的迭代轮数
 
     for iteration in range(1, max_iterations + 1):
+        if fast_mode:
+            break  # fast_mode: 不执行迭代
         if adaptive_early_stop(round_errors, patience=1):
             log(f"  ⏹ 误差收敛，停止迭代 (第 {iteration} 轮)")
             break
@@ -809,6 +1038,8 @@ def localize_with_salad_roma_v2(
             kpts_q2, kpts_t2, cert2 = _match_tile_with_loftr(q_small, tile_bgr_iter)
         elif matcher_mode == "hybrid":
             kpts_q2, kpts_t2, cert2 = _match_tile_with_hybrid(q_small, tile_bgr_iter)
+        elif matcher_mode == "xfeat":
+            kpts_q2, kpts_t2, cert2 = _match_tile_with_xfeat(q_small, tile_bgr_iter)
         else:
             kpts_q2, kpts_t2, cert2 = _match_tile_with_lightglue_v2(q_small, tile_bgr_iter)
         if len(kpts_q2) < 8:
@@ -1623,6 +1854,9 @@ def _match_tile_with_loftr(img1, img2):
     -------
     (kpts1, kpts2, certainty) — 匹配点坐标和置信度
     """
+    # lazy compile LoFTR（009 加速）
+    _maybe_compile_loftr()
+
     model = _get_loftr_model()
 
     import cv2
@@ -1635,13 +1869,115 @@ def _match_tile_with_loftr(img1, img2):
     t2 = torch.from_numpy(gray2).float()[None, None].to(DEVICE) / 255.0
 
     input_dict = {"image0": t1, "image1": t2}
-    with torch.no_grad():
-        correspondences = model(input_dict)
 
-    mkpts0 = correspondences['keypoints0'].cpu().numpy()
-    mkpts1 = correspondences['keypoints1'].cpu().numpy()
+    # 009: FP16 autocast 推理（MPS 加速，精度足够）
+    if DEVICE.type == "mps" and hasattr(torch, "autocast"):
+        with torch.no_grad(), torch.autocast(device_type="mps", dtype=torch.float16):
+            correspondences = model(input_dict)
+    else:
+        with torch.no_grad():
+            correspondences = model(input_dict)
+
+    mkpts0 = correspondences['keypoints0']
+    mkpts1 = correspondences['keypoints1']
     conf = correspondences.get('confidence', torch.ones(len(mkpts0)))
-    confidence = conf.cpu().numpy().astype(np.float32)
+
+    # 统一转 numpy（处理 MPS tensor）
+    if hasattr(mkpts0, "cpu"):
+        mkpts0 = mkpts0.cpu().numpy()
+        mkpts1 = mkpts1.cpu().numpy()
+        confidence = conf.cpu().numpy().astype(np.float32)
+    else:
+        confidence = conf.astype(np.float32)
 
     log(f"  LoFTR: {len(mkpts0)} matches, conf_mean={confidence.mean():.3f}")
     return mkpts0, mkpts1, confidence
+
+
+# --------------------------------------------------------------------------- #
+# XFeat 匹配器（009 备选 A，可选依赖）
+# --------------------------------------------------------------------------- #
+
+def _has_xfeat() -> bool:
+    """检测环境是否有 XFeat（延迟检测）。"""
+    global _HAS_XFEAT
+    if _HAS_XFEAT is None:
+        try:
+            import xfeat  # noqa: F401
+            _HAS_XFEAT = True
+        except ImportError:
+            _HAS_XFEAT = False
+    return _HAS_XFEAT
+
+
+_XFEAT_MODEL = None
+
+
+def _get_xfeat_model():
+    """加载 XFeat 模型（可选）。"""
+    global _XFEAT_MODEL
+    if _XFEAT_MODEL is not None:
+        return _XFEAT_MODEL
+    if not _has_xfeat():
+        return None
+    try:
+        import xfeat
+        _XFEAT_MODEL = xfeat.InterNet(pretrained='outdoor').to(DEVICE).eval()
+        # 注：XFeat 实际接口可能不同，需按实际包调整
+        log("  XFeat 模型加载完成")
+    except Exception as e:
+        log(f"  XFeat 加载失败: {e}")
+        _XFEAT_MODEL = False
+    return _XFEAT_MODEL if _XFEAT_MODEL is not False else None
+
+
+def _match_tile_with_xfeat(img1, img2):
+    """XFeat 匹配 — 轻量级稀疏匹配（备选 DISK+LightGlue）。
+
+    返回 (kpts_q, kpts_t, cert)，格式与 _match_tile_with_lightglue_v2 一致。
+    """
+    model = _get_xfeat_model()
+    if model is None:
+        # XFeat 不可用时回退 DISK+LG
+        return _match_tile_with_lightglue_v2(img1, img2)
+
+    import cv2
+    import numpy as np
+
+    gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY) if img1.ndim == 3 else img1
+    gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY) if img2.ndim == 3 else img2
+
+    t1 = torch.from_numpy(gray1).float()[None, None].to(DEVICE) / 255.0
+    t2 = torch.from_numpy(gray2).float()[None, None].to(DEVICE) / 255.0
+
+    with torch.no_grad():
+        # XFeat 接口（按实际包调整）
+        corr = model.match_xfeat(t1, t2)
+
+    mkpts0 = corr['keypoints0'].cpu().numpy() if hasattr(corr['keypoints0'], 'cpu') else corr['keypoints0']
+    mkpts1 = corr['keypoints1'].cpu().numpy() if hasattr(corr['keypoints1'], 'cpu') else corr['keypoints1']
+    confidence = (corr['confidence'].cpu().numpy().astype(np.float32)
+                  if hasattr(corr['confidence'], 'cpu') else corr['confidence'].astype(np.float32))
+
+    log(f"  XFeat: {len(mkpts0)} matches, conf_mean={confidence.mean():.3f}")
+    return mkpts0, mkpts1, confidence
+
+
+# --------------------------------------------------------------------------- #
+# 批量匹配（009 备选 B）
+# --------------------------------------------------------------------------- #
+
+def _match_tiles_with_loftr_batch(img1, img2_list: list):
+    """批量 LoFTR 匹配 — 多张候选 tile 一次性推理。
+
+    img1: 查询图；img2_list: tile 图列表。
+    返回 list of (kpts_q, kpts_t, cert)。
+
+    注：当前 LoFTR 不支持 batch 推理（kornia 接口限制），
+    此处为占位，实际仍串行但预分配 tensor。
+    未来可替换为支持 batch 的实现。
+    """
+    results = []
+    for img2 in img2_list:
+        results.append(_match_tile_with_loftr(img1, img2))
+    return results

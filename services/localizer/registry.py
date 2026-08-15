@@ -64,7 +64,25 @@ def _run_salad_v2_hybrid(localization_input: LocalizationInput) -> dict[str, Any
     return _run_salad_v2(localization_input, matcher_mode="hybrid")
 
 
-def _run_salad_v2(localization_input: LocalizationInput, matcher_mode: str) -> dict[str, Any]:
+def _run_salad_v2_xfeat(localization_input: LocalizationInput) -> dict[str, Any]:
+    """009 备选 A: XFeat 替换 DISK+LightGlue（XFeat 未安装则回退 disk_lg）。"""
+    from services.localizer.salad_roma_v2 import _has_xfeat
+    matcher = "xfeat" if _has_xfeat() else "disk_lg"
+    return _run_salad_v2(localization_input, matcher_mode=matcher)
+
+
+def _run_salad_v2_loftr_fast(localization_input: LocalizationInput) -> dict[str, Any]:
+    """009 首选: LoFTR + fast_mode（FAISS + FP16 + 跳过迭代）。"""
+    return _run_salad_v2(localization_input, matcher_mode="loftr", fast_mode=True)
+
+
+def _run_salad_v2_hybrid_fast(localization_input: LocalizationInput) -> dict[str, Any]:
+    """009 备选 B: Hybrid + fast_mode。"""
+    return _run_salad_v2(localization_input, matcher_mode="hybrid", fast_mode=True)
+
+
+def _run_salad_v2(localization_input: LocalizationInput, matcher_mode: str,
+                   fast_mode: bool = False) -> dict[str, Any]:
     from services.localizer.salad_roma_v2 import localize_with_salad_roma_v2
 
     return localize_with_salad_roma_v2(
@@ -83,6 +101,7 @@ def _run_salad_v2(localization_input: LocalizationInput, matcher_mode: str) -> d
         keep_aspect_ratio=localization_input.keep_aspect_ratio,
         coordinate_threshold_m=localization_input.coordinate_threshold_m,
         matcher_mode=matcher_mode,
+        fast_mode=fast_mode,
     )
 
 
@@ -347,6 +366,10 @@ _DEFAULTS = (
     ("ace_better", "J. ACE+更好法线 (~3s)", "ace", _run_ace_better_normal),
     ("depth_anything", "K. DepthAnything+ICP", "depth", _run_depth_anything),
     ("train_ace", "L. 训练ACE+定位", "ace", _run_train_ace),
+    # 009 加速方案（原方案不动，新增对比项）
+    ("salad_v2_loftr_fast", "SALAD v2 + LoFTR [加速]", "fast", _run_salad_v2_loftr_fast),
+    ("salad_v2_hybrid_fast", "Hybrid (DISK+LG + LoFTR) [加速]", "fast", _run_salad_v2_hybrid_fast),
+    ("salad_v2_xfeat", "SALAD v2 + XFeat", "fast", _run_salad_v2_xfeat),
 )
 
 
