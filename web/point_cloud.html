@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>3D 点云</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1a1a2e; color: #eee; overflow: hidden; }
+    #container { width: 100vw; height: 100vh; }
+    #loading { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 16px; color: #4fc3f7; }
+    #stats {
+      position: fixed; bottom: 16px; left: 16px; z-index: 10;
+      background: rgba(30, 30, 50, 0.9); padding: 12px; border-radius: 6px;
+      font-size: 12px; line-height: 1.6; display: none;
+    }
+    #stats span { color: #4fc3f7; }
+  </style>
+</head>
+<body>
+  <div id="container"></div>
+  <div id="loading">加载中...</div>
+  <div id="stats">
+    总点数: <span id="total">-</span><br>
+    已加载: <span id="loaded">-</span> 点<br>
+    相机: <span id="cam-pos">-</span>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    let scene, camera, renderer, controls;
+    let tileCache = {};
+    let tileMeta = [];
+    let tileSize = 50;
+    let totalLoaded = 0;
+
+    // 初始化 Three.js
+    function init() {
+      const container = document.getElementById('container');
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x1a1a2e);
+
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 10000);
+      camera.position.set(100, 100, 100);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(window.devicePixelRatio);
+      container.appendChild(renderer.domElement);
+
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.05;
+
+      // 坐标轴 + 网格
+      scene.add(new THREE.AxesHelper(30));
+      scene.add(new THREE.GridHelper(300, 30, 0x444466, 0x333355));
+
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      controls.addEventListener('change', loadNearbyTiles);
+      animate();
+    }
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+      document.getElementById('cam-pos').textContent =
+        `${camera.position.x.toFixed(0)}, ${camera.position.y.toFixed(0)}, ${camera.position.z.toFixed(0)}`;
+    }
+
+    // 加载瓦片列表
+    async function loadTileList() {
+      const resp = await fetch(`/api/point-cloud/tiles?tile_size=${tileSize}`);
+      const data = await resp.json();
+      if (data.error) {
+        document.getElementById('loading').textContent = '错误: ' + data.error;
+        return;
+      }
+      tileMeta = data.tiles;
+      document.getElementById('total').textContent = data.total_points.toLocaleString();
+      document.getElementById('stats').style.display = 'block';
+      document.getElementById('loading').style.display = 'none';
+
+      // 自动定位相机到点云中心
+      const xs = tileMeta.flatMap(t => [t.min[0], t.max[0]]);
+      const ys = tileMeta.flatMap(t => [t.min[1], t.max[1]]);
+      const zs = tileMeta.flatMap(t => [t.min[2], t.max[2]]);
+      const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+      const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+      const cz = (Math.min(...zs) + Math.max(...zs)) / 2;
+      const size = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+
+      controls.target.set(cx, cy, cz);
+      camera.position.set(cx + size * 0.8, cy + size * 0.8, cz + size * 0.8);
+      controls.update();
+
+      // 加载初始瓦片
+      loadNearbyTiles();
+    }
+
+    // 加载相机附近的瓦片
+    async function loadNearbyTiles() {
+      if (!tileMeta.length) return;
+
+      const camX = controls.target.x;
+      const camY = controls.target.y;
+      const camIX = Math.floor(camX / tileSize);
+      const camIY = Math.floor(camY / tileSize);
+
+      // 周围 5x5 瓦片
+      const wanted = new Set();
+      for (let dx = -2; dx <= 2; dx++) {
+        for (let dy = -2; dy <= 2; dy++) {
+          wanted.add(`${camIX + dx},${camIY + dy}`);
+        }
+      }
+
+      // 卸载远处
+      for (const key of Object.keys(tileCache)) {
+        if (!wanted.has(key)) {
+          scene.remove(tileCache[key]);
+          tileCache[key].geometry.dispose();
+          tileCache[key].material.dispose();
+          delete tileCache[key];
+        }
+      }
+
+      // 加载新瓦片
+      for (const key of wanted) {
+        if (tileCache[key]) continue;
+        const [ix, iy] = key.split(',').map(Number);
+        if (!tileMeta.some(t => t.ix === ix && t.iy === iy)) continue;
+
+        try {
+          const resp = await fetch(`/api/point-cloud/tile/${ix}/${iy}?tile_size=${tileSize}&max_points=50000`);
+          const data = await resp.json();
+          if (data.error || !data.points.length) continue;
+
+          const geom = new THREE.BufferGeometry();
+          geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(data.points.flat()), 3));
+          geom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(data.colors.flat()), 3));
+
+          const mat = new THREE.PointsMaterial({ size: 0.8, vertexColors: true, sizeAttenuation: true });
+          const points = new THREE.Points(geom, mat);
+          scene.add(points);
+          tileCache[key] = points;
+          totalLoaded += data.count;
+        } catch (e) { /* ignore */ }
+      }
+
+      document.getElementById('loaded').textContent = totalLoaded.toLocaleString();
+    }
+
+    // 启动
+    init();
+    loadTileList();
+  </script>
+</body>
+</html>

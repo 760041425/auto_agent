@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LAS 3D 坐标查询系统</title>
 <link rel="stylesheet" href="/style.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
 </head>
 <body>
 <div id="app">
@@ -14,6 +22,8 @@
       <button class="tab active" data-tab="upload">上传图像</button>
       <button class="tab" data-tab="list">图像列表</button>
       <button class="tab" data-tab="tasks">任务记录</button>
+      <button class="tab" data-tab="localize">视觉定位</button>
+      <button class="tab" data-tab="pointcloud">3D 点云</button>
     </nav>
   </header>
 
@@ -27,6 +37,34 @@
         <div class="progress-bar"></div>
       </div>
       <div id="upload-result" class="result hidden"></div>
+
+      <div style="margin-top:2rem;border-top:1px solid #eee;padding-top:1rem">
+        <h3 style="font-size:0.95rem;margin-bottom:0.5rem">LAS 数据预处理</h3>
+        <p style="font-size:0.82rem;color:#888;margin-bottom:0.5rem">
+          生成 LAS 投影图、像素-3D 坐标映射和 SIFT 特征，用于图像匹配
+        </p>
+        <div style="display:flex;gap:0.75rem;flex-wrap:wrap">
+          <button id="build-btn" class="btn-primary" onclick="startPreprocessBuild()" style="white-space:nowrap">
+            下采样 + octree_build
+          </button>
+          <button id="render-btn" class="btn-primary" onclick="startPreprocessRender()" style="white-space:nowrap">
+            仅渲染投影图
+          </button>
+          <button id="feature-btn" class="btn-primary" onclick="startPreprocessFeature()" style="white-space:nowrap">
+            仅重建 SALAD 特征
+          </button>
+          <button id="ace-btn" class="btn-primary" onclick="startPreprocessAce()" style="white-space:nowrap">
+            训练 ACE 模型
+          </button>
+          <button id="full-btn" class="btn-primary" onclick="startPreprocess()" style="white-space:nowrap">
+            完整预处理
+          </button>
+        </div>
+        <div id="preprocess-status" class="hidden" style="margin-top:0.5rem"></div>
+        <div id="preprocess-progress-wrap" class="progress hidden" style="margin-top:0.5rem">
+          <div id="preprocess-progress-bar" class="progress-bar" style="width:0%"></div>
+        </div>
+      </div>
     </section>
 
     <section id="tab-list" class="tab-content">
@@ -39,6 +77,85 @@
 
     <section id="tab-tasks" class="tab-content">
       <div id="task-list" class="task-list"></div>
+    </section>
+
+    <section id="tab-localize" class="tab-content">
+      <h3 style="margin-bottom:0.5rem">端到端视觉定位</h3>
+      <div style="display:flex;gap:0.5rem;margin-bottom:0.5rem;flex-wrap:wrap;align-items:center">
+        <div class="upload-zone" id="localize-upload-zone" style="flex:1;padding:0.8rem;border:1px dashed #ccc;border-radius:6px;text-align:center;cursor:pointer;font-size:0.85rem;color:#888">
+          拖拽/点击上传查询图像
+        </div>
+        <input type="file" id="localize-file-input" accept="image/*" hidden>
+        <button class="btn-primary" onclick="refreshLocalizeImages()" style="white-space:nowrap">刷新列表</button>
+      </div>
+      <div id="localize-image-grid" class="image-grid" style="margin-bottom:1rem"></div>
+      <div id="localize-selected" style="display:none;margin-bottom:0.5rem">
+        <div style="display:flex;align-items:center;gap:0.5rem;padding:0.5rem;background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+          <img id="localize-selected-thumb" style="width:60px;height:60px;object-fit:cover;border-radius:4px">
+          <span id="localize-selected-name" style="font-size:0.9rem"></span>
+          <div style="margin-left:auto">
+            <button id="localize-btn" class="btn-primary" onclick="startLocalize()">开始定位</button>
+          </div>
+        </div>
+      </div>
+      <fieldset id="localize-algorithms" style="margin:0 0 0.8rem;padding:0.65rem;border:1px solid #ddd;border-radius:6px">
+        <legend style="font-size:0.85rem;color:#555">定位算法（可单选或多选）</legend>
+        <div style="margin-bottom:0.4rem;padding-bottom:0.3rem;border-bottom:1px dashed #eee">
+          <div style="font-size:0.78rem;color:#999;margin-bottom:0.2rem">── 原有方案 ──</div>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma"> SALAD+RoMa (原版)</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma_v2" checked> SALAD v2 (DISK+LG)</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="salad_roma_v2_loftr"> SALAD v2 + LoFTR <span style="font-size:0.7rem;color:#999">（高精度对照）</span></label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="hybrid"> Hybrid (联合)</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="ace_las"> ACE + LAS</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="multi_strategy"> Multi-Strategy</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="salad_lightglue"> SALAD+LightGlue</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="flann"> SIFT + FLANN</label>
+        </div>
+        <div style="margin-bottom:0.2rem">
+          <div style="font-size:0.78rem;color:#e94560;margin-bottom:0.2rem">── 新方案（空间特征对比） ──</div>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="pointcloud_descriptor"> A. 点云全局描述子</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="depth_icp"> B. 深度估计+ICP</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="explicit_2d3d"> C. 显式2D-3D匹配</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="render_compare"> D. 渲染对比定位</label>
+        </div>
+        <div style="margin-bottom:0.2rem">
+          <div style="font-size:0.78rem;color:#2e7d32;margin-bottom:0.2rem">── 快速版 ──</div>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="fast"> E. 快速定位 (~40s)</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="ultrafast"> F. 超快定位 (~31s)</label>
+        </div>
+        <div style="margin-bottom:0.2rem">
+          <div style="font-size:0.78rem;color:#1565c0;margin-bottom:0.2rem">── ACE 场景坐标回归 ──</div>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="ace_normal"> G. ACE+法线估计 (~2s)</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="ace_rgb"> H. ACE RGB-only (~2s)</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="depth_icp"> I. 深度+ICP</label>
+        </div>
+        <div style="margin-bottom:0.2rem">
+          <div style="font-size:0.78rem;color:#6a1b9a;margin-bottom:0.2rem">── 增强版（训练+更好模型） ──</div>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="ace_better"> J. ACE+更好法线 (~3s)</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="depth_anything"> K. DepthAnything+ICP</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="train_ace"> L. 训练ACE+定位</label>
+        </div>
+        <div style="margin-bottom:0.2rem">
+          <div style="font-size:0.78rem;color:#00695c;margin-bottom:0.2rem">── 009 加速方案（默认推荐） ──</div>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="salad_v2_loftr_fast" checked> LoFTR <b>[加速]</b> (~12s)</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="salad_v2_hybrid_fast"> Hybrid <b>[加速]</b> (~12s)</label>
+          <label style="margin-right:0.8rem"><input type="checkbox" value="salad_v2_xfeat"> XFeat <b>[跨域]</b> (~16s)</label>
+        </div>
+        <label style="display:block;margin-top:0.5rem;font-size:0.82rem;color:#666"><input id="localize-debug" type="checkbox"> 生成候选轮次调试图（较慢）</label>
+      </fieldset>
+      <label style="display:block;margin-top:0.3rem;font-size:0.82rem;color:#666"><input id="localize-verify" type="checkbox" checked> 定位后计算 2D 几何拟合诊断（非 Benchmark）</label>
+      <div style="margin:0.5rem 0;display:flex;gap:0.5rem;align-items:center">
+        <button id="e2e-test-btn" class="btn-primary" onclick="runE2ETest()" style="white-space:nowrap;padding:0.4rem 0.8rem;font-size:0.82rem">🧪 运行回归测试</button>
+        <span id="e2e-test-status" style="font-size:0.8rem;color:#666"></span>
+      </div>
+      <div id="localize-status" class="status hidden"></div>
+      <div id="localize-verify-result" style="margin:0.5rem 0;padding:0.5rem;background:#e3f2fd;border-radius:4px;font-size:0.82rem;display:none">
+        <details open>
+          <summary style="cursor:pointer;font-weight:bold;color:#1565c0">📐 2D 单应拟合诊断（像素残差）</summary>
+          <div id="verify-detail" style="margin-top:0.5rem"></div>
+        </details>
+      </div>
+      <div id="localize-results"></div>
     </section>
 
     <section id="tab-detail" class="tab-content">
@@ -62,8 +179,36 @@
         </div>
       </div>
     </section>
+
+    <section id="tab-pointcloud" class="tab-content">
+      <h3 style="margin-bottom:0.5rem">3D 点云可视化</h3>
+      <div style="margin-bottom:0.5rem;display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+        <label style="font-size:0.82rem">瓦片大小:
+          <input id="pc-tile-size" type="number" value="50" min="10" max="100" step="10" style="width:60px;padding:2px 4px;border:1px solid #ccc;border-radius:4px;">
+          m
+        </label>
+        <label style="font-size:0.82rem">每瓦片点数:
+          <input id="pc-max-pts" type="number" value="50000" min="5000" max="200000" step="5000" style="width:80px;padding:2px 4px;border:1px solid #ccc;border-radius:4px;">
+        </label>
+        <label style="font-size:0.82rem">点大小:
+          <input id="pc-point-size" type="range" min="0.1" max="5" step="0.1" value="1.0" style="width:80px;vertical-align:middle;">
+          <span id="pc-point-size-val" style="color:#4fc3f7">1.0</span>
+        </label>
+        <!-- 点云自动加载，无需手动按钮 -->
+      </div>
+      <div id="pc-loading" style="display:none;padding:1rem;text-align:center;color:#4fc3f7">加载中...</div>
+      <div id="pc-container" style="width:100%;height:calc(100vh - 220px);border:1px solid #333;border-radius:4px;overflow:hidden;position:relative;">
+        <div id="pc-canvas-container" style="width:100%;height:100%;"></div>
+        <div id="pc-stats" style="position:absolute;bottom:8px;left:8px;background:rgba(30,30,50,0.9);padding:8px;border-radius:4px;font-size:0.75rem;line-height:1.5;display:none;">
+          总点数: <span id="pc-total">-</span><br>
+          瓦片数: <span id="pc-tiles">-</span><br>
+          已加载: <span id="pc-loaded-tiles">-</span> 瓦片 / <span id="pc-loaded-pts">-</span> 点
+        </div>
+      </div>
+    </section>
   </main>
+  <footer style="text-align:center;padding:1rem;color:#aaa;font-size:0.8rem">v6</footer>
 </div>
-<script src="/app.js"></script>
+<script type="module" src="/app_v10.js?v=31"></script>
 </body>
 </html>
