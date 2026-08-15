@@ -35,6 +35,13 @@ logs/*
 !logs/.gitkeep
 reports/generated/
 
+# Benchmark / 运行产物（JSON + HTML），保留 .md 文档与 README
+reports/**/*.json
+reports/**/*.html
+!reports/**/
+!reports/**/*.md
+!reports/**/README.md
+
 # IDE
 .idea/
 .vscode/
