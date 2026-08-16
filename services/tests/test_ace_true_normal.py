@@ -216,3 +216,38 @@ def test_estimate_normal_real_midas_end_to_end():
 
     assert normal_estimator.normal_source_from_estimate() == normal_estimator.NORMAL_SOURCE_MIDAS, \
         "真实 MiDaS 加载后 source 应为 mi_das"
+
+
+# ────────────────────────────────────────────────────────────────────
+# TL-008-07 (AC-008-01)：非法输入显式报错，不被降级静默吞掉
+# ────────────────────────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    "bad_image,expected_hint",
+    [
+        # 非 uint8：float32 (H,W,3) —— 应报 dtype 错误
+        (lambda: np.random.rand(32, 48, 3).astype(np.float32), "uint8"),
+        # 非 uint8：float64 (H,W,3)
+        (lambda: np.random.rand(32, 48, 3).astype(np.float64), "uint8"),
+        # 非 3 通道：uint8 (H,W,4)
+        (lambda: np.random.randint(0, 255, (32, 48, 4), dtype=np.uint8), "3"),
+        # 非 3 通道：uint8 (H,W,1)
+        (lambda: np.random.randint(0, 255, (32, 48, 1), dtype=np.uint8), "3"),
+        # 非 3 维：uint8 (H,W) —— 应报通道/维度错误
+        (lambda: np.random.randint(0, 255, (32, 48), dtype=np.uint8), "3"),
+    ],
+    ids=["float32", "float64", "4ch", "1ch", "2d"],
+)
+def test_estimate_normal_rejects_invalid_input(monkeypatch, bad_image, expected_hint):
+    """TL-008-07: estimate_normal 对非法输入（非 uint8 / 非 3 通道 / 非 3 维）应显式 ValueError。
+
+    关键：非法输入是编程错误，不应被末端 `except Exception` 静默降级为常量 0.5。
+    因此校验必须在 try 之前，且错误消息应包含具体 dtype/通道数以便诊断。
+    """
+    _reset_model_cache()
+    bad = bad_image()
+    # 隔离模型依赖：只要校验在 try 之前，根本不会走到 _raw_infer。
+    monkeypatch.setattr(normal_estimator, "_raw_infer",
+                        lambda img: np.zeros((*img.shape[:2], 3), dtype=np.float32))
+
+    with pytest.raises(ValueError, match=expected_hint):
+        normal_estimator.estimate_normal(bad)

@@ -8,6 +8,7 @@
 | [x] | **TL-008-04** | AC-008-01 | 集成/真实权重 | 真实 MiDaS_small 端到端（不注入）：(H,W,3) float32、值域 [0,1]、|n|≈1.0、[0,1] mean 对齐训练 0.5、normal_source=mi_das（P2 定案后端）；需外网/缓存，默认跳过（@pytest.mark.integration） |
 | [x] | **TL-008-05** | AC-008-04 | 集成/路由 | 基准数据未触发切换（6ch_midas 1.197m 差于 baseline 0.877m）→ 维持 007 现状；测试断言既有默认路径（scene 3ch 优先）不变 |
 | [x] | **TL-008-06** | AC-008-05/06 | 回归+门禁 | 007 默认路由行为回归绿（scene 3ch 存在优先）；validate-specs / run-all fast / drift-check / 全量 pytest 全绿（全量 129 passed，仅 las/points3D.txt 既有 baseline 红） |
+| [x] | **TL-008-07** | AC-008-01 | 单元/接口 | `estimate_normal` 收到非 uint8 / 非 3 通道输入时显式抛 ValueError（含具体 dtype/通道数），不被末端 `except` 静默降级为常量 0.5；正常 uint8 (H,W,3) 不受影响 |
 
 ## TDD 顺序（单流水线，禁止一次写一堆）
 

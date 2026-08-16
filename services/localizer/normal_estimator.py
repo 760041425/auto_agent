@@ -157,12 +157,39 @@ def _to_unit_range(raw: np.ndarray) -> np.ndarray:
     return arr
 
 
+def _validate_normal_input(image: np.ndarray) -> None:
+    """校验 ``estimate_normal`` 输入，非法时抛 ValueError。
+
+    这是编程错误（调用方传错dtype/维度），不是运行时模型失败，
+    因此 ``estimate_normal`` 在 ``try`` 之前调用它，避免被末端
+    ``except Exception`` 静默降级为常量 0.5（TL-008-07）。
+    """
+    if not isinstance(image, np.ndarray):
+        raise ValueError(
+            f"estimate_normal 输入应为 numpy.ndarray，实际 {type(image).__name__}"
+        )
+    if image.ndim != 3:
+        raise ValueError(
+            f"estimate_normal 输入应为 3 维 (H,W,3)，实际 {image.ndim} 维，shape={image.shape}"
+        )
+    if image.shape[2] != 3:
+        raise ValueError(
+            f"estimate_normal 输入应为 3 通道 (H,W,3)，实际 {image.shape[2]} 通道，shape={image.shape}"
+        )
+    if image.dtype != np.uint8:
+        raise ValueError(
+            f"estimate_normal 输入 dtype 应为 uint8，实际 {image.dtype}"
+        )
+
+
 def estimate_normal(image: np.ndarray) -> np.ndarray:
     """估计 BGR uint8 (H,W,3) 查询图的法线 → (H,W,3) float32，值域 [0,1]。
 
-    模型加载/推理失败时优雅回退常量 0.5（``normal_source="constant_fallback"``），
-    不抛异常（RISK-008-01）。
+    输入校验失败（非 ndarray / 非 3 维 / 非 3 通道 / 非 uint8）显式抛
+    ValueError，不被降级吞掉（TL-008-07）；模型加载/推理失败时优雅回退
+    常量 0.5（``normal_source="constant_fallback"``），不抛异常（RISK-008-01）。
     """
+    _validate_normal_input(image)
     global _last_source
     h, w = image.shape[:2]
     try:
