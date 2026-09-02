@@ -18,10 +18,9 @@ from services.localizer import salad_roma_v2 as v2
 
 def test_faiss_search_matches_numpy_brute_force():
     """FAISS IndexFlatIP + L2 归一化 == numpy 余弦相似度（误差 <1e-6）。"""
-    try:
-        import faiss  # noqa: F401
-    except ImportError:
-        pytest.skip("faiss 未安装，跳过 FAISS 等价性测试")
+    if not v2._has_faiss():
+        pytest.skip("FAISS 未安装或当前 PyTorch/FAISS 运行时不兼容")
+    import faiss
 
     # 构造 100 条随机描述子（768d，DINOv2 ViT-S 维度）
     np.random.seed(42)
@@ -98,6 +97,20 @@ def test_faiss_search_fallback_when_no_index(monkeypatch):
     q = np.random.randn(384).astype(np.float32)
     result = v2._faiss_search(q, k=5)
     assert result == []
+
+
+def test_faiss_search_skips_runtime_marked_incompatible(monkeypatch):
+    """TL-009-10: 运行时不兼容时不得进入 FAISS 原生 search（会直接 abort 进程）。"""
+    class AbortSentinelIndex:
+        def search(self, query, k):
+            raise AssertionError("不兼容运行时仍调用了 FAISS search")
+
+    v2._FAISS_INDEX = AbortSentinelIndex()
+    v2._FAISS_KEYS = ["tile_0"]
+    monkeypatch.setattr(v2, "_has_faiss", lambda: False)
+
+    q = np.random.randn(384).astype(np.float32)
+    assert v2._faiss_search(q, k=1) == []
 
 
 # ── TL-009-03: compile 标记 ──

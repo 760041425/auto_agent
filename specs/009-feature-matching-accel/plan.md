@@ -6,7 +6,7 @@
 - 八件套建齐
 
 ### 批次 P1：首选 — MPS+FAISS 加速（独立可验证）
-1. **FAISS 检索后端**：`services/localizer/salad_roma_v2.py` 新增 `_salad_retrieve_v2_faiss`，try-import faiss，无则回退 numpy
+1. **FAISS 检索后端**：`services/localizer/salad_roma_v2.py` 增加可选 FAISS；除 import 外还校验运行时安全性，缺失或 macOS PyTorch 双 OpenMP 冲突时回退 numpy
 2. **MPS 加速**：DINOv2 / LoFTR 推理包裹 `torch.compile` + `torch.autocast(mps, fp16)`，失败回退 eager
 3. **参数收紧**：新增 `fast_mode` 参数（top_k=1, max_iterations=1, 先验强制开）
 4. **注册新算法**：`registry.py` 新增 `salad_v2_loftr_fast` / `salad_v2_hybrid_fast`

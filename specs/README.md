@@ -25,6 +25,8 @@
 | 006 | ACE 坐标差最终判定链路对齐 | 已实施（降级「无法判定」独立状态） | [规格](006-ace-coordinate-consistency/spec.md) |
 | 007 | ACE 系法线 train/serve skew 修复 + PnP 失败诊断 | 已实施（法线对齐 + 3ch 模型路由 + diagnostics） | [规格](007-ace-better-fix/spec.md) |
 | 008 | ACE 推理期真法线估计 + 6ch 精度基准（D 治本） | 实施中（P0+P1 法线模块与 normal_mode 接入已交付，P2/P3 待办） | [规格](008-ace-true-normal/spec.md) |
+| 009 | 特征匹配加速 + 多方案对比 | 已实施；FAISS macOS/PyTorch 运行时安全回退已通过门禁 | [规格](009-feature-matching-accel/spec.md) |
+| 010 | 空间感特征轻量验证 + 速度—准确率双轨决策 | 实验已完成（P0/P1/P1b/P1c/P1d/P3/P4/P4b/P4c） | [规格](010-spatial-feature-validation/spec.md) |
 
 ## 质量命令
 

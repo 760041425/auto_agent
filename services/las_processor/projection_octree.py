@@ -767,60 +767,39 @@ def _depth_to_xyz_map(
 def _compute_normal_map(world_array: np.ndarray) -> np.ndarray:
     """
     从 XYZ 世界坐标图 (H, W, 3) 计算表面法线图 (H, W, 3)。
-    
-    先用双边滤波平滑 XYZ 坐标（降噪保边），
-    再用中心差分 + 叉积估算法向量。
-    无效像素（[0,0,0]）输出 [0,0,0]。
-    
-    后续可升级为 Open3D `estimate_normals()` 替代。
+
+    使用完整四邻域中心差分 + 叉积估算法向量。中心或任一上下左右
+    邻居无效时输出 [0,0,0]，避免跨孔洞/边界生成假法线。
     """
     h, w = world_array.shape[:2]
-    valid = np.linalg.norm(world_array, axis=2) > 1e-6
-    
-    if not valid.any():
+    points = np.asarray(world_array, dtype=np.float64)
+    valid = np.isfinite(points).all(axis=2) & (np.linalg.norm(points, axis=2) > 1e-6)
+
+    if h < 3 or w < 3 or not valid.any():
         return np.zeros((h, w, 3), dtype=np.float32)
-    
-    # 双边滤波平滑 XYZ（降噪保边）
-    # 注意：XYZ 坐标值很大（UTM ~500000），需归一化到 [0,1] 再滤波
-    smooth = np.zeros_like(world_array)
-    for c in range(3):
-        ch = world_array[..., c].copy()
-        # 仅对有效区域做 min-max 归一化后滤波，再还原
-        ch_valid = ch[valid]
-        if len(ch_valid) == 0:
-            smooth[..., c] = ch
-            continue
-        c_min, c_max = float(ch_valid.min()), float(ch_valid.max())
-        if c_max - c_min < 1e-6:
-            smooth[..., c] = ch
-            continue
-        ch_norm = (ch - c_min) / (c_max - c_min)
-        ch_norm = np.nan_to_num(ch_norm, nan=0.0, posinf=0.0, neginf=0.0)
-        ch_filtered = cv2.bilateralFilter(ch_norm.astype(np.float32), d=5, sigmaColor=50, sigmaSpace=5)
-        # 还原到原始数值范围
-        smooth[..., c] = ch_filtered * (c_max - c_min) + c_min
-        smooth[..., c] = np.where(valid, smooth[..., c], ch)
-    
-    x, y, z = smooth[..., 0], smooth[..., 1], smooth[..., 2]
-    
-    # 中心差分
-    dx = np.zeros((h, w, 3), dtype=np.float32)
-    dy = np.zeros((h, w, 3), dtype=np.float32)
-    
-    dx[1:-1, :, 0] = x[2:, :] - x[:-2, :]
-    dx[1:-1, :, 1] = y[2:, :] - y[:-2, :]
-    dx[1:-1, :, 2] = z[2:, :] - z[:-2, :]
-    dy[:, 1:-1, 0] = x[:, 2:] - x[:, :-2]
-    dy[:, 1:-1, 1] = y[:, 2:] - y[:, :-2]
-    dy[:, 1:-1, 2] = z[:, 2:] - z[:, :-2]
-    
-    n = np.cross(dx.reshape(-1, 3), dy.reshape(-1, 3)).reshape(h, w, 3)
-    n_norm = np.linalg.norm(n, axis=2, keepdims=True)
-    n_valid = n_norm[..., 0] > 1e-10
-    n[n_valid] = n[n_valid] / n_norm[n_valid]
-    n[~valid] = 0.0
-    
-    return n.astype(np.float32)
+
+    stencil_valid = np.zeros((h, w), dtype=bool)
+    stencil_valid[1:-1, 1:-1] = (
+        valid[1:-1, 1:-1]
+        & valid[:-2, 1:-1]
+        & valid[2:, 1:-1]
+        & valid[1:-1, :-2]
+        & valid[1:-1, 2:]
+    )
+
+    vertical = np.zeros_like(points)
+    horizontal = np.zeros_like(points)
+    vertical[1:-1, 1:-1] = points[2:, 1:-1] - points[:-2, 1:-1]
+    horizontal[1:-1, 1:-1] = points[1:-1, 2:] - points[1:-1, :-2]
+    normal = np.cross(vertical, horizontal)
+    lengths = np.linalg.norm(normal, axis=2)
+    normal_valid = stencil_valid & np.isfinite(lengths) & (lengths > 1e-10)
+
+    output = np.zeros((h, w, 3), dtype=np.float32)
+    output[normal_valid] = (normal[normal_valid] / lengths[normal_valid, None]).astype(
+        np.float32
+    )
+    return output
 
 
 # ── 点云密度分析（基于下采样 LAS） ──

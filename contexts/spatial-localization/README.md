@@ -22,6 +22,7 @@
 - `ReliabilityUnavailable`（未生成坐标差判据产物时的独立状态：徽章与判定卡均不显示 ✓，展示「⚠ 无法判定」与 reason；ACE 系列等未接 H→SLAM/NPY 判据的算法归入此类）
 - `GroundTruthEvaluation`（相对独立 holdout 位姿真值的平移/旋转误差）
 - `LocalizationArtifacts`（查询图、最终位姿投影图、双图对比图及生成状态）
+- `PoseOnlyBenchmark`（离线位姿评分策略，只运行检索、匹配、tile XYZ→PnP、质量门和独立真值；不运行二次投影拟合，也不加载稠密 LAS/KD-Tree）
 
 ## 当前代码
 
@@ -37,3 +38,4 @@ V2 定位任务在成功时生成 query→SLAM XY 单应矩阵和最终位姿 XY
 位姿绝对误差；绝对米制定位精度只属于加载独立真值的 Benchmark 评估结果。
 V2 的 `reliable` 不再由内点数或相似度决定，而由最多 256 个有效 NPY 像素的
 H/NPY 三维差中位数决定；门槛严格为 `<0.3` 米，等于或超过均判为不准，无可用指标时按低可信处理。
+正式 pose-only 基准与生产定位是两个策略：前者将二次 LightGlue 投影拟合、LAS 邻近诊断、坐标转换和视觉产物明确标记为 skipped，以避免无关模型和 5.2M 点/KD-Tree 冷启动；后者默认保持完整诊断与产物。

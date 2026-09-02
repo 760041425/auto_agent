@@ -10,3 +10,4 @@
 | [ ] | TASK-009-06 | TASK-009-01 | 批量匹配 + 异步流水线 | 单测：batch 结果等价于串行 |
 | [ ] | TASK-009-07 | TASK-009-04, TASK-009-05, TASK-009-06 | 前端新增选项（原 key 不变） | Playwright/DOM 验证 |
 | [ ] | TASK-009-08 | TASK-009-07 | 基准对比（原 vs 新，≥5 张图）+ 门禁全绿 | benchmark_009.json + 三脚本绿 |
+| [x] | TASK-009-09 | TASK-009-02 | macOS PyTorch+FAISS 双 OpenMP abort：运行时禁用并回退 numpy | TL-009-10 Red→Green；近邻 11 passed, 1 skipped |

@@ -11,6 +11,7 @@
 | [x] | **TL-009-07** | AC-009-02 | 集成/benchmark | fast_loftr 延迟 ≤ 原 loftr × 1.3（同硬件） |
 | [x] | **TL-009-08** | AC-009-03 | 集成/benchmark | fast_loftr 成功率 ≥ 原 loftr（同查询集） |
 | [x] | **TL-009-09** | AC-009-06 | 回归+门禁 | validate-specs / run-all fast / drift-check / 全量 pytest 全绿 |
+| [x] | **TL-009-10** | AC-009-04 | 单元/原生运行时降级 | FAISS 运行时被判不兼容时，`_faiss_search` 不得进入原生 `Index.search`，必须安全返回空并由调用方走 numpy |
 
 ## TDD 顺序
 
@@ -32,3 +33,4 @@
 
 ### 批次 P5（基准+门禁）
 9. TL-009-07/08/09
+10. TL-009-10 红 → 绿（macOS 双 OpenMP 运行时安全降级）

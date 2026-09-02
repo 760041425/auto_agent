@@ -19,6 +19,7 @@
 | 日期 | 研究主题 | 文件 | 状态 | 关键结论 |
 | --- | --- | --- | --- | --- |
 | 2026-05-12 | 特征匹配成功率分析 + 加速方案 | `2026-05-12-feature-matching-success-analysis-and-acceleration.md` | ✅ 完成 | 根因：稀疏关键点在跨域场景枯竭（DISK+LG 仅 10-15 match vs LoFTR 81-187）；加速首选 torch.compile+FP16+FAISS（1.88s→0.6-1.0s），备选 XFeat 替换 DISK+LG |
+| 2026-08-31 | 空间感特征提取 + 轻量验证 | `2026-08-31-spatial-features-lightweight-validation.md` | ✅ P0/P1/P1b/P1c/P1d/P3/P4/P4b/P4c 完成 | MiDaS/MoGe 法线未过 20° 门；确定性 8+2 下 LoFTR 保持准确率优势，pose-only cold 2.301s、LOO warm P50 0.675s；默认生产路径不变 |
 
 ## 使用方式
 

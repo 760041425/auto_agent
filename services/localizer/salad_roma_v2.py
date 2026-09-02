@@ -25,6 +25,7 @@ SALAD + Roma v2 视觉定位引擎 — 精度 + 速度优化版
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -54,6 +55,12 @@ from services.localizer.verify_projection import (
     build_local_coordinate_transform_context,
     build_projection_xyz_map,
     verify_projection_local,
+)
+from services.localizer.spatial_validation import (
+    exclude_query_tile,
+    load_dense_map_assets,
+    require_leave_one_out,
+    select_postprocessing_plan,
 )
 
 from services.localizer.logger_config import get_backend_logger
@@ -132,9 +139,17 @@ def _get_loftr_model():
 # --------------------------------------------------------------------------- #
 
 def _has_faiss() -> bool:
-    """检测环境是否有 FAISS（延迟检测，缓存结果）。"""
+    """检测 FAISS 是否可安全使用（延迟检测，缓存结果）。
+
+    macOS 下本模块已加载 PyTorch 自带的 ``libomp``，当前 faiss wheel 又捆绑
+    另一份 ``libomp``；首次 ``Index.search`` 会触发 OMP Error #15 并 abort
+    整个进程，无法由 Python 捕获。因此 Darwin 运行时直接走 numpy 回退。
+    """
     global _HAS_FAISS
     if _HAS_FAISS is None:
+        if sys.platform == "darwin":
+            _HAS_FAISS = False
+            return _HAS_FAISS
         try:
             import faiss  # noqa: F401
             _HAS_FAISS = True
@@ -149,7 +164,9 @@ def _build_faiss_index():
     if _FAISS_INDEX is not None:
         return
 
-    # 无 FAISS 则不构建（faiss 为可选依赖）
+    # 无 FAISS 或运行时不安全则不构建（faiss 为可选依赖）
+    if not _has_faiss():
+        return
     try:
         faiss_mod = __import__("faiss")
     except ImportError:
@@ -188,6 +205,8 @@ def _build_faiss_index():
 def _faiss_search(q_desc: np.ndarray, k: int = 5) -> list:
     """FAISS 检索 top-k。返回 list[(tile_key, similarity)]（降序）。"""
     global _FAISS_INDEX, _FAISS_KEYS
+    if not _has_faiss():
+        return []
     if _FAISS_INDEX is None:
         _build_faiss_index()
     if _FAISS_INDEX is None or not _FAISS_KEYS:
@@ -423,6 +442,7 @@ def _salad_retrieve_v2(
     prior_position: Optional[Tuple[float, float, float]] = None,
     prior_radius: float = 15.0,
     use_faiss: bool = False,
+    excluded_tile_keys: Optional[set[str]] = None,
 ):
     """对称 SALAD 检索，可选先验位置引导。
 
@@ -430,6 +450,7 @@ def _salad_retrieve_v2(
     返回 ``[(tile_key, similarity, tile_info), ...]``。
 
     use_faiss: 使用 FAISS 后端（加速）；无 FAISS 时自动回退 numpy。
+    excluded_tile_keys: leave-one-out 时显式排除的查询 tile key。
     """
     index = _ensure_index()
     if not index:
@@ -474,20 +495,29 @@ def _salad_retrieve_v2(
 
     # 描述子缓存可能仍含历史实验视角；当前 MapTile 发布清单是唯一候选边界。
     index = {key: entry for key, entry in index.items() if key in tile_map}
+    excluded = set(excluded_tile_keys or ())
+    for key in excluded:
+        index = exclude_query_tile(index, key)
+        tile_map.pop(key, None)
+        require_leave_one_out(index, key)
     if not index:
         log("  SALAD v2 缓存与当前 accepted MapTile 无交集")
         return []
 
     # 009: FAISS 后端（可选）
     if use_faiss and _has_faiss():
-        scores = _faiss_search(q_desc, k=top_k * 3)  # 多取一些供先验过滤
+        scores = _faiss_search(
+            q_desc, k=top_k * 3 + len(excluded)
+        )  # 多取一些供先验和留一过滤
         # 先验过滤
         if prior_position is not None:
             scores = _apply_prior_filter(scores, prior_position, prior_radius)
         results = []
-        for key, sim in scores[:top_k]:
-            if key in tile_map:
+        for key, sim in scores:
+            if key in index:
                 results.append((key, sim, tile_map[key]))
+            if len(results) >= top_k:
+                break
         return results
 
     # ── 原 numpy 逻辑（保留不动，作为 fallback）──
@@ -754,6 +784,8 @@ def localize_with_salad_roma_v2(
     matcher_mode: Optional[str] = None,
     coordinate_threshold_m: float = 0.3,
     fast_mode: bool = False,  # 009: 加速模式（FAISS + FP16 + 参数收紧）
+    exclude_query_tile_key: Optional[str] = None,
+    pose_only_benchmark: bool = False,
 ) -> dict:
     """SALAD v2 定位入口。
 
@@ -767,9 +799,9 @@ def localize_with_salad_roma_v2(
     min_inliers : 最少内点，低于此值视为失败
     geometric_verify : 是否在 PnP 前做 E-matrix 几何预过滤
     keep_aspect_ratio : 保持宽高比 resize
+    exclude_query_tile_key : 留一验证时必须排除的查询 tile key
+    pose_only_benchmark : 只用于离线位姿基准；跳过稠密地图、二次投影拟合、LAS 验证、坐标转换和视觉产物
     """
-    from services.localizer import load_colmap, _POINT_INDEX, get_point_cloud_arrays
-
     if matcher_mode is None:
         matcher_mode = "loftr" if use_loftr else "disk_lg"
     if matcher_mode not in {"disk_lg", "loftr", "hybrid", "xfeat"}:
@@ -784,6 +816,9 @@ def localize_with_salad_roma_v2(
     if fast_mode:
         match_name = f"{match_name}[fast]"
     tag = f"salad_v2_{matcher_mode}" + ("_fast" if fast_mode else "")
+    postprocessing_plan = select_postprocessing_plan(
+        pose_only_benchmark=pose_only_benchmark
+    )
     log(f"{'=' * 60}")
     log(f"🚀 SALAD v2 + {match_name} 定位: {os.path.basename(query_image_path)}")
 
@@ -838,10 +873,24 @@ def localize_with_salad_roma_v2(
         return _localize_ace_v2(query_img, q_small, K, scale, pad, out, tag,
                                 keep_aspect_ratio, fov_deg, prior_position, prior_radius)
 
-    # 5. 加载点云
-    known_points, _ = load_colmap()
-    all_pts, all_col = get_point_cloud_arrays()
-    log(f"🗺️ {len(all_pts)} 个 3D 点")
+    # 5. 按后处理计划加载稠密地图。tile XYZ→PnP 主链路不依赖 5.2M 点云。
+    def _load_dense_map():
+        import services.localizer as localizer_service
+
+        localizer_service.load_colmap()
+        points, colors = localizer_service.get_point_cloud_arrays()
+        point_index = localizer_service._POINT_INDEX or {}
+        return {"points": points, "colors": colors, "tree": point_index.get("tree")}
+
+    dense_map = load_dense_map_assets(postprocessing_plan, _load_dense_map)
+    if dense_map is None:
+        all_pts = all_col = point_tree = None
+        log("🗺️ pose-only：跳过稠密点云与 KD-Tree 加载")
+    else:
+        all_pts = dense_map["points"]
+        all_col = dense_map["colors"]
+        point_tree = dense_map["tree"]
+        log(f"🗺️ {len(all_pts)} 个 3D 点")
 
     # 6. SALAD 检索（009 fast_mode: FAISS + 参数收紧）
     log("🔍 SALAD v2 对称检索...")
@@ -854,6 +903,7 @@ def localize_with_salad_roma_v2(
         prior_position=prior_position if use_pose_prior else None,
         prior_radius=prior_radius,
         use_faiss=use_faiss,
+        excluded_tile_keys={exclude_query_tile_key} if exclude_query_tile_key else None,
     )
     # fast_mode 先验失败回退
     if fast_mode and not retrieved and top_k_retrieval > 1:
@@ -863,6 +913,7 @@ def localize_with_salad_roma_v2(
             prior_position=prior_position if use_pose_prior else None,
             prior_radius=prior_radius,
             use_faiss=use_faiss,
+            excluded_tile_keys={exclude_query_tile_key} if exclude_query_tile_key else None,
         )
     log(f"  SALAD 检索: {time.time() - t0:.2f}s, 找到 {len(retrieved)} 候选"
         + (f" [FAISS]" if use_faiss else ""))
@@ -1084,51 +1135,57 @@ def localize_with_salad_roma_v2(
 
     # 9. 投影验证（homography + NPY 坐标对比）
     # 即使定位失败（PnP 无解），也尝试用最佳候选 tile 做验证
-    verify_result = None
-    log(f"  [VERIFY-DEBUG] best_tile={best_tile is not None}, retrieved={len(retrieved)}, best_rvec={best_rvec is not None}")
-    try:
-        _verify_tile = best_tile if best_tile is not None else (
-            retrieved[0][2] if retrieved else None
-        )
-        log(f"  [VERIFY-DEBUG] verify_tile={_verify_tile is not None}")
-        if _verify_tile is not None:
-            best_tile_path = _verify_tile.get("image_path", "")
-            best_npy_path = _verify_tile.get("npy_path", "")
-            if best_tile_path and os.path.exists(best_tile_path) and os.path.exists(best_npy_path):
-                tile_img = cv2.imread(best_tile_path)
-                tile_npy = np.load(best_npy_path)
-                if tile_img is not None:
-                    # 用匹配点（如有）或网格采样
-                    from services.localizer.salad_roma import _lightglue_match
-                    kq_v, kt_v, cert_v = _lightglue_match(q_small, tile_img)
-                    mask_v = cert_v > 0.003
-                    if mask_v.sum() >= 4:
-                        kq_v, kt_v = kq_v[mask_v], kt_v[mask_v]
-                        verify_result = verify_projection_local(
-                            q_small, tile_img, tile_npy,
-                            kq_v, kt_v,
-                            n_samples=min(20, len(kq_v)),
-                        )
-                        fit = verify_result.get("homography_fit", {})
-                        log(
-                            f"  2D 单应拟合: {fit.get('n_inliers', 0)}/"
-                            f"{fit.get('n_matches', 0)} inliers, "
-                            f"median={fit.get('inlier_median_residual_px', 'n/a')}px; "
-                            "米制验证不可用（同源 NPY）"
-                        )
-                    else:
-                        log(f"  验证跳过: 匹配点不足 ({mask_v.sum()} < 4)")
-    except Exception as e:
-        log(f"  投影验证失败: {e}")
+    if not postprocessing_plan["projection_verification"]:
+        verify_result = {"status": "skipped", "reason": "pose_only_benchmark"}
+    else:
+        verify_result = None
+        log(f"  [VERIFY-DEBUG] best_tile={best_tile is not None}, retrieved={len(retrieved)}, best_rvec={best_rvec is not None}")
+        try:
+            _verify_tile = best_tile if best_tile is not None else (
+                retrieved[0][2] if retrieved else None
+            )
+            log(f"  [VERIFY-DEBUG] verify_tile={_verify_tile is not None}")
+            if _verify_tile is not None:
+                best_tile_path = _verify_tile.get("image_path", "")
+                best_npy_path = _verify_tile.get("npy_path", "")
+                if best_tile_path and os.path.exists(best_tile_path) and os.path.exists(best_npy_path):
+                    tile_img = cv2.imread(best_tile_path)
+                    tile_npy = np.load(best_npy_path)
+                    if tile_img is not None:
+                        # 用匹配点（如有）或网格采样
+                        from services.localizer.salad_roma import _lightglue_match
+                        kq_v, kt_v, cert_v = _lightglue_match(q_small, tile_img)
+                        mask_v = cert_v > 0.003
+                        if mask_v.sum() >= 4:
+                            kq_v, kt_v = kq_v[mask_v], kt_v[mask_v]
+                            verify_result = verify_projection_local(
+                                q_small, tile_img, tile_npy,
+                                kq_v, kt_v,
+                                n_samples=min(20, len(kq_v)),
+                            )
+                            fit = verify_result.get("homography_fit", {})
+                            log(
+                                f"  2D 单应拟合: {fit.get('n_inliers', 0)}/"
+                                f"{fit.get('n_matches', 0)} inliers, "
+                                f"median={fit.get('inlier_median_residual_px', 'n/a')}px; "
+                                "米制验证不可用（同源 NPY）"
+                            )
+                        else:
+                            log(f"  验证跳过: 匹配点不足 ({mask_v.sum()} < 4)")
+        except Exception as e:
+            log(f"  投影验证失败: {e}")
 
     # 10. LAS 验证（可选）
     las_result = None
-    try:
-        if _POINT_INDEX is not None and "tree" in _POINT_INDEX and best_3d is not None and len(best_3d) > 0:
-            las_result = verify_with_las_points(best_3d, _POINT_INDEX["tree"], tol=3.0)
-            log(f"  LAS 验证: {las_result['verification_rate']:.1%} 通过, 平均距离={las_result['mean_distance_m']:.2f}m")
-    except Exception as e:
-        log(f"  LAS 验证失败: {e}")
+    if not postprocessing_plan["las_verification"]:
+        las_result = {"status": "skipped", "reason": "pose_only_benchmark"}
+    else:
+        try:
+            if point_tree is not None and best_3d is not None and len(best_3d) > 0:
+                las_result = verify_with_las_points(best_3d, point_tree, tol=3.0)
+                log(f"  LAS 验证: {las_result['verification_rate']:.1%} 通过, 平均距离={las_result['mean_distance_m']:.2f}m")
+        except Exception as e:
+            log(f"  LAS 验证失败: {e}")
 
     # 10. 输出位姿（稳定四元数）
     R_mat = cv2.Rodrigues(rvec)[0]
@@ -1144,7 +1201,12 @@ def localize_with_salad_roma_v2(
         "reason": "final_2d_3d_correspondences_unavailable",
     }
     try:
-        if best_3d is not None and best_2d is not None and len(best_3d) >= 4:
+        if not postprocessing_plan["coordinate_transform"]:
+            coordinate_transform = {
+                "status": "skipped",
+                "reason": "pose_only_benchmark",
+            }
+        elif best_3d is not None and best_2d is not None and len(best_3d) >= 4:
             height, width = q_small.shape[:2]
             projection_xyz = build_projection_xyz_map(
                 all_pts,
@@ -1237,29 +1299,30 @@ def localize_with_salad_roma_v2(
     # 生成视觉产物（在 coordinate_transform 之后，以便画地面凸包）
     artifacts = {}
     artifact_error = None
-    try:
-        ground_polygon = None
-        if coordinate_transform.get("plane_segmentation", {}).get("status") == "plane_detected":
-            # 用 PnP 内点（实际匹配点）计算凸包
-            fitting_2d = coordinate_transform.get("fitting_2d")
-            if fitting_2d is not None and len(fitting_2d) >= 3:
-                ground_pixels = np.array(fitting_2d, dtype=np.float64)
-                ground_polygon = _compute_ground_polygon(ground_pixels=ground_pixels)
-        artifacts = _write_final_artifacts(
-            q_small,
-            all_pts,
-            all_col,
-            rvec,
-            tvec,
-            K,
-            out,
-            tag,
-            ground_polygon=ground_polygon,
-        )
-        log(f"  最终视觉产物: {', '.join(artifacts)}")
-    except Exception as exc:
-        artifact_error = str(exc)
-        log(f"  最终视觉产物生成失败: {exc}")
+    if postprocessing_plan["visual_artifacts"]:
+        try:
+            ground_polygon = None
+            if coordinate_transform.get("plane_segmentation", {}).get("status") == "plane_detected":
+                # 用 PnP 内点（实际匹配点）计算凸包
+                fitting_2d = coordinate_transform.get("fitting_2d")
+                if fitting_2d is not None and len(fitting_2d) >= 3:
+                    ground_pixels = np.array(fitting_2d, dtype=np.float64)
+                    ground_polygon = _compute_ground_polygon(ground_pixels=ground_pixels)
+            artifacts = _write_final_artifacts(
+                q_small,
+                all_pts,
+                all_col,
+                rvec,
+                tvec,
+                K,
+                out,
+                tag,
+                ground_polygon=ground_polygon,
+            )
+            log(f"  最终视觉产物: {', '.join(artifacts)}")
+        except Exception as exc:
+            artifact_error = str(exc)
+            log(f"  最终视觉产物生成失败: {exc}")
 
     # 诊断：采样内点对比 H→SLAM XY vs NPY XY（在 coordinate_transform 生成后）
     sample_diag = ""
@@ -1315,7 +1378,11 @@ def localize_with_salad_roma_v2(
         "reprojection_image": artifacts.get("reprojection_image"),
         "comparison_image": artifacts.get("comparison_image"),
         "artifact_generation": {
-            "status": "available" if artifacts else "failed",
+            "status": (
+                "skipped"
+                if not postprocessing_plan["visual_artifacts"]
+                else "available" if artifacts else "failed"
+            ),
             "error": artifact_error,
         },
         "coordinate_transform": coordinate_transform,

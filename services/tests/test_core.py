@@ -74,6 +74,52 @@ def test_camera_like_projection_renders_nontrivial_image():
     assert img.std() > 0
 
 
+def test_normal_map_is_rotation_equivariant_and_rejects_invalid_stencils():
+    """TL-010-13：法线只来自完整四邻域，且刚体旋转前后方向保持等变。"""
+    height = width = 31
+    row, column = np.mgrid[-15:16, -15:16].astype(np.float64)
+    xyz = np.stack(
+        [100.0 + column * 0.2, 200.0 + row * 0.3, 5.0 + column * 0.04 - row * 0.07],
+        axis=-1,
+    ).astype(np.float32)
+    xyz[14:17, 14:17] = 0.0
+
+    axis = np.array([0.3, 0.7, 0.2], dtype=np.float64)
+    axis /= np.linalg.norm(axis)
+    angle = np.deg2rad(43.0)
+    skew = np.array(
+        [[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]]
+    )
+    rotation = np.eye(3) + np.sin(angle) * skew + (1.0 - np.cos(angle)) * (skew @ skew)
+
+    normal_world = projection_octree_module._compute_normal_map(xyz)
+    normal_rotated = projection_octree_module._compute_normal_map(xyz @ rotation.T)
+
+    source_valid = np.linalg.norm(xyz, axis=-1) > 1e-6
+    stencil_valid = np.zeros((height, width), dtype=bool)
+    stencil_valid[1:-1, 1:-1] = (
+        source_valid[1:-1, 1:-1]
+        & source_valid[:-2, 1:-1]
+        & source_valid[2:, 1:-1]
+        & source_valid[1:-1, :-2]
+        & source_valid[1:-1, 2:]
+    )
+    assert np.count_nonzero(np.linalg.norm(normal_world[~stencil_valid], axis=-1)) == 0
+
+    expected_rotated = normal_world @ rotation.T
+    valid = stencil_valid & (np.linalg.norm(normal_world, axis=-1) > 0.5)
+    expected_unit = expected_rotated[valid] / np.linalg.norm(
+        expected_rotated[valid], axis=-1, keepdims=True
+    )
+    actual_unit = normal_rotated[valid] / np.linalg.norm(
+        normal_rotated[valid], axis=-1, keepdims=True
+    )
+    dot = np.abs(np.sum(expected_unit * actual_unit, axis=-1))
+    cross = np.linalg.norm(np.cross(expected_unit, actual_unit), axis=-1)
+    error_deg = np.degrees(np.arctan2(cross, dot))
+    assert float(error_deg.max()) <= 0.01
+
+
 def test_build_projection_view_poses_uses_euler_views(tmp_path):
     poses = [
         {"x": 0.0, "y": 0.0, "z": 1.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0, "name": "p0"},

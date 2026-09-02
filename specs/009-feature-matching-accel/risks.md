@@ -9,3 +9,4 @@
 | RISK-009-05 | 批量 LoFTR 显存/内存不足（MPS 统一内存） | 中 | 限制 batch size（≤3）；内存超则回退串行 |
 | RISK-009-06 | top_k=1 在先验失败时漏掉正确候选 | 中 | 先验失败自动回退 top_k=3（graceful） |
 | RISK-009-07 | 原算法被意外修改 | 低 | 代码 review + diff 检查；单测覆盖原算法行为 |
+| RISK-009-08 | macOS PyTorch 与 FAISS wheel 各自加载 `libomp`，首次 search 直接 abort | 已发生/高 | Darwin 运行时禁用 FAISS并回退 numpy；禁止用 `KMP_DUPLICATE_LIB_OK` 绕过 |

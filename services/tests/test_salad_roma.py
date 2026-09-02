@@ -172,6 +172,55 @@ def test_v2_retrieval_never_returns_stale_keys_outside_current_tile_publication(
     assert results[0][2]["pitch_deg"] == -15.0
 
 
+def test_v2_retrieval_excludes_leave_one_out_query_without_mutating_shared_index(monkeypatch):
+    """TL-010-08：真实检索必须排除查询 tile，且不得污染进程共享缓存。"""
+    from services.localizer import salad_roma_v2
+
+    query_key = "view_yaw0_1.0_2.0_0.5_8_p-15"
+    neighbor_key = "view_yaw0_2.0_2.0_0.5_9_p-15"
+    monkeypatch.setattr(
+        salad_roma_v2,
+        "_SALAD_INDEX_V2",
+        {
+            query_key: {"rgb": np.array([1.0, 0.0], dtype=np.float32)},
+            neighbor_key: {"rgb": np.array([0.8, 0.2], dtype=np.float32)},
+        },
+    )
+    monkeypatch.setattr(salad_roma_v2, "_get_dinov2_model", lambda: (object(), 1.0))
+    monkeypatch.setattr(
+        salad_roma_v2,
+        "_extract_rgb_descriptor",
+        lambda model, image, scale: np.array([1.0, 0.0], dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        salad_roma_v2,
+        "_load_tile_index",
+        lambda: [
+            {
+                "image_path": f"projections/tiles/{query_key}.png",
+                "view": "yaw0",
+                "tile": "1.0_2.0_0.5",
+                "accepted": True,
+            },
+            {
+                "image_path": f"projections/tiles/{neighbor_key}.png",
+                "view": "yaw0",
+                "tile": "2.0_2.0_0.5",
+                "accepted": True,
+            },
+        ],
+    )
+
+    results = salad_roma_v2._salad_retrieve_v2(
+        np.zeros((8, 8, 3), dtype=np.uint8),
+        top_k=1,
+        excluded_tile_keys={query_key},
+    )
+
+    assert [key for key, _, _ in results] == [neighbor_key]
+    assert query_key in salad_roma_v2._SALAD_INDEX_V2
+
+
 def test_render_point_cloud_splat_produces_soft_image():
     points = np.array([[0.0, 0.0, 2.0], [0.2, 0.0, 3.0]], dtype=np.float64)
     colors = np.array([[255, 0, 0], [0, 255, 0]], dtype=np.uint8)

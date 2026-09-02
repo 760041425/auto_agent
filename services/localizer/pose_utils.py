@@ -119,6 +119,7 @@ def solve_pnp_ransac(
     iterations: int = 2000,
     confidence: float = 0.999,
     refine: bool = True,
+    ransac_seed: Optional[int] = None,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
     """PnP RANSAC 求解，可选 Levenberg-Marquardt 细化。
 
@@ -135,6 +136,8 @@ def solve_pnp_ransac(
     if dist_coeffs is None:
         dist_coeffs = np.zeros((4, 1), dtype=np.float64)
 
+    if ransac_seed is not None:
+        cv2.setRNGSeed(int(ransac_seed))
     success, rvec, tvec, inliers = cv2.solvePnPRansac(
         obj, img, camera_matrix, dist_coeffs,
         iterationsCount=iterations,
@@ -421,7 +424,7 @@ def solve_pnp_with_focal_search(
         K = get_camera_matrix(img_w, img_h, fov_deg=fov_deg, intrinsics=initial_K)
         rvec, tvec, inliers = solve_pnp_ransac(
             object_pts, image_pts, K,
-            reproj_error=reproj_error, refine=True,
+            reproj_error=reproj_error, refine=True, ransac_seed=ransac_seed,
         )
         if rvec is None:
             return {"success": False, "error": "PnP 无解（单次模式）"}
@@ -456,6 +459,7 @@ def solve_pnp_with_focal_search(
             method=ransac_method,
             iterations=2000,
             confidence=confidence,
+            ransac_seed=seed_offset,
         )
         if rvec is None:
             return None
